@@ -1,0 +1,234 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Syne", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+/*
+ * Semantic color tokens. Every color utility resolves through a --tone-* CSS
+ * variable so a subtree can flip between the light workshop theme and the
+ * dark "command center" theme (data-theme="dark") without per-component
+ * overrides. Legacy utility names (paper, mist, fog, ink, line, teal…) are
+ * kept as aliases onto the semantic tones.
+ */
+@theme inline {
+  /* canvas + surfaces */
+  --color-canvas: var(--tone-canvas);
+  --color-surface: var(--tone-surface);
+  --color-raised: var(--tone-raised);
+
+  /* legacy surface aliases */
+  --color-paper: var(--tone-canvas);
+  --color-mist: var(--tone-surface);
+  --color-fog: var(--tone-fog);
+
+  /* text */
+  --color-ink: var(--tone-ink);
+  --color-ink-soft: var(--tone-ink-soft);
+  --color-slate-muted: var(--tone-muted);
+
+  /* borders */
+  --color-line: var(--tone-line);
+  --color-line-strong: var(--tone-line-strong);
+
+  /* tenant accent (Atlas teal) */
+  --color-accent: var(--tone-accent);
+  --color-accent-dim: var(--tone-accent-dim);
+  --color-teal: var(--tone-accent);
+  --color-teal-bright: var(--tone-accent-bright);
+
+  /* semantic status */
+  --color-amber: var(--tone-warning);
+  --color-rose: var(--tone-danger);
+  --color-info: var(--tone-info);
+}
+
+:root {
+  color-scheme: light;
+
+  --tone-canvas: #f5f8fb;
+  --tone-surface: #eef3f7;
+  --tone-raised: #ffffff;
+  --tone-fog: #d7e0e8;
+
+  --tone-ink: #071018;
+  --tone-ink-soft: #12202c;
+  --tone-muted: #5b6b78;
+
+  --tone-line: #c5d0da;
+  --tone-line-strong: #9db0bf;
+
+  --tone-accent: #0f8f7b;
+  --tone-accent-bright: #18c4a8;
+  --tone-accent-dim: #0b6b5c;
+
+  --tone-warning: #d97706;
+  --tone-danger: #c2415a;
+  --tone-info: #38678c;
+
+  --app-gradient:
+    radial-gradient(1200px 600px at 10% -10%, rgba(24, 196, 168, 0.14), transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, rgba(217, 119, 6, 0.08), transparent 50%),
+    linear-gradient(180deg, #eef3f7 0%, #f5f8fb 40%, #e8eef4 100%);
+  --grid-line: rgba(7, 16, 24, 0.04);
+  --shadow-panel:
+    0 1px 2px rgba(7, 16, 24, 0.04),
+    0 14px 34px -18px rgba(7, 16, 24, 0.22);
+}
+
+/* Dark command-center theme (adapted from ops-console palettes, kept teal). */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --tone-canvas: #06121a;
+  --tone-surface: #0a1a23;
+  --tone-raised: #10222d;
+  --tone-fog: #17303b;
+
+  --tone-ink: #e4f0f2;
+  --tone-ink-soft: #c0d4d8;
+  --tone-muted: #7f98a2;
+
+  --tone-line: #1c3440;
+  --tone-line-strong: #2d4b58;
+
+  --tone-accent: #22c8a8;
+  --tone-accent-bright: #4fe9cc;
+  --tone-accent-dim: #128a74;
+
+  --tone-warning: #efa64e;
+  --tone-danger: #ef8399;
+  --tone-info: #7db4d8;
+
+  --app-gradient:
+    radial-gradient(1100px 560px at 12% -12%, rgba(34, 200, 168, 0.14), transparent 55%),
+    radial-gradient(900px 480px at 88% -6%, rgba(78, 124, 168, 0.1), transparent 52%),
+    linear-gradient(180deg, #081a23 0%, #06121a 45%, #040d13 100%);
+  --grid-line: rgba(228, 240, 242, 0.045);
+  --shadow-panel:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 18px 44px -22px rgba(0, 0, 0, 0.75);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    background-image: var(--app-gradient);
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--tone-accent-bright) 35%, var(--tone-canvas));
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  /* Themed canvas for a subtree (e.g. the admin shell owns its own theme). */
+  .app-canvas {
+    background-color: var(--tone-canvas);
+    background-image: var(--app-gradient);
+  }
+
+  /* Frosted glass panel over the ambient gradient. */
+  .surface-panel {
+    border: 1px solid color-mix(in oklab, var(--tone-line) 80%, transparent);
+    background: color-mix(in oklab, var(--tone-raised) 76%, transparent);
+    backdrop-filter: blur(10px) saturate(1.15);
+    box-shadow: var(--shadow-panel);
+  }
+
+  /* Frosted sticky bars (admin top bar, pane headers). */
+  .glass-bar {
+    background: color-mix(in oklab, var(--tone-canvas) 76%, transparent);
+    backdrop-filter: blur(14px) saturate(1.35);
+  }
+
+  /* Dense data table / list container. */
+  .table-shell {
+    overflow: hidden;
+    border: 1px solid color-mix(in oklab, var(--tone-line) 85%, transparent);
+    background: color-mix(in oklab, var(--tone-raised) 62%, transparent);
+    backdrop-filter: blur(8px);
+  }
+
+  /* Uppercase micro-label used for table headers and section eyebrows. */
+  .th-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--tone-muted);
+  }
+
+  /* Mono cells for IDs, metrics, and timestamps. */
+  .mono-cell {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* KPI card with a thin semantic top edge (set --kpi-edge per card). */
+  .kpi-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in oklab, var(--tone-line) 85%, transparent);
+    background: color-mix(in oklab, var(--tone-raised) 74%, transparent);
+    backdrop-filter: blur(8px);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .kpi-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--kpi-edge, var(--tone-accent));
+  }
+
+  /* Pulsing live indicator dot; tint with text color utilities. */
+  .live-dot {
+    display: inline-block;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 9999px;
+    background: currentColor;
+    box-shadow: 0 0 0 0 currentColor;
+    animation: atlas-live-pulse 2.2s ease-out infinite;
+  }
+
+  @keyframes atlas-live-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 45%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 6px transparent;
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+    }
+  }
+
+  .grid-noise {
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+}

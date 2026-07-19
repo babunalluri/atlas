@@ -1,0 +1,14 @@
+{
+  "name": "multi-tenant-agent-saas",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "packages/contracts"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @agent-saas/web",
+    "test:web": "npm run test --workspace @agent-saas/web",
+    "typecheck:web": "npm run typecheck --workspace @agent-saas/web",
+    "generate:contracts": "bash scripts/generate-contracts.sh"
+  }
+}

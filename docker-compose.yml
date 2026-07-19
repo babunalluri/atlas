@@ -1,0 +1,96 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agent_saas}
+      POSTGRES_USER: ${POSTGRES_USER:-agent_saas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_saas_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent_saas} -d ${POSTGRES_DB:-agent_saas}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: ./apps/backend
+      target: development
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent_saas}:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
+      AGNO_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-agent_saas}:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
+      AUTH_DISABLED: "false"
+      CLERK_ISSUER: https://emerging-unicorn-41.clerk.accounts.dev
+      CLERK_JWKS_URL: https://emerging-unicorn-41.clerk.accounts.dev/.well-known/jwks.json
+      CLERK_AUDIENCE: agent-saas
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-dev-only-change-me-please-32b}
+      DOCUMENT_UPLOAD_DIR: /data/uploads
+      CORS_ORIGINS: http://localhost:3000
+      ENVIRONMENT: development
+    ports:
+      - "7777:7777"
+    volumes:
+      - ./apps/backend:/app
+      - document_uploads:/data/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+      uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7777/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  web:
+    build:
+      context: ./apps/web
+      target: development
+    env_file:
+      - path: .env
+        required: false
+      - path: ./apps/web/.env.local
+        required: false
+    environment:
+      NEXT_PUBLIC_AGENTOS_URL: http://localhost:7777
+      AGENTOS_INTERNAL_URL: http://backend:7777
+      NEXT_PUBLIC_DEV_AUTH: "false"
+      NEXT_PUBLIC_DEV_TENANT_ID: "11111111-1111-1111-1111-111111111111"
+      NEXT_PUBLIC_DEV_USER_ID: "dev-admin"
+      NEXT_PUBLIC_DEV_ROLE: "tenant_admin"
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - web_node_modules:/app/node_modules
+      - web_next:/app/.next
+    depends_on:
+      backend:
+        condition: service_healthy
+    command: sh -c "npm install --include=optional && npm run dev -- --hostname 0.0.0.0"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres_data:
+  document_uploads:
+  web_node_modules:
+  web_next:
