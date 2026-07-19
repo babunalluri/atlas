@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from "react";
 
-import { PreviewChat } from "@/components/agent-builder/PreviewChat";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import {
@@ -272,8 +271,7 @@ export function AgentEditor({
         </div>
       ) : null}
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
-        <div className="space-y-5">
+      <div className="space-y-5">
           <section className="surface-panel rounded-2xl p-5">
             <h2 className="font-display text-lg font-semibold">Identity</h2>
             <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -547,9 +545,6 @@ export function AgentEditor({
               />
             </div>
           </section>
-        </div>
-
-        <PreviewChat agentId={initial.id} agentName={form.name} />
       </div>
     </div>
   );
