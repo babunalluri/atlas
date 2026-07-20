@@ -185,6 +185,62 @@ class CustomPythonConfig(BaseModel):
         return self
 
 
+class TenantPythonCapability(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(default="", max_length=2000)
+    mutating: bool = False
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not re.fullmatch(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", value):
+            raise ValueError(f"Invalid capability name: {value}")
+        return value
+
+
+class TenantPythonDependency(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    version: str = Field(min_length=1, max_length=64)
+
+
+class TenantPythonConfig(BaseModel):
+    source_code: str = Field(min_length=1, max_length=80_000)
+    dependencies: list[TenantPythonDependency] = Field(default_factory=list, max_length=50)
+    capabilities: list[TenantPythonCapability] = Field(default_factory=list, max_length=MAX_TOOLS)
+    settings: dict[str, Any] = Field(default_factory=dict)
+    template: str | None = Field(default=None, max_length=64)
+    version_status: Literal["draft", "validated", "published"] = "draft"
+
+    @model_validator(mode="after")
+    def validate_source_and_caps(self) -> TenantPythonConfig:
+        from app.tools.sandbox.validator import (
+            SandboxValidationError,
+            validate_tenant_python_source,
+        )
+
+        try:
+            discovered = set(validate_tenant_python_source(self.source_code))
+        except SandboxValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        if not self.capabilities:
+            self.capabilities = [
+                TenantPythonCapability(name=name, description=name.replace("_", " "))
+                for name in sorted(discovered)
+            ]
+        declared = {item.name for item in self.capabilities}
+        missing = declared - discovered
+        if missing:
+            raise ValueError(
+                "Declared capabilities missing from source: " + ", ".join(sorted(missing))
+            )
+        if len(declared) != len(self.capabilities):
+            raise ValueError("capabilities cannot contain duplicates")
+        return self
+
+
 class MCPConfig(BaseModel):
     transport: Literal["streamable-http", "sse"] = "streamable-http"
     url: str = Field(max_length=2048)
@@ -212,6 +268,7 @@ PROVIDER_CONFIG_ADAPTERS: dict[str, TypeAdapter[Any]] = {
     "openapi": TypeAdapter(OpenAPIConfig),
     "python_toolkit": TypeAdapter(PythonToolkitConfig),
     "custom_python": TypeAdapter(CustomPythonConfig),
+    "tenant_python": TypeAdapter(TenantPythonConfig),
     "mcp": TypeAdapter(MCPConfig),
 }
 
@@ -609,6 +666,113 @@ class CustomPythonProvider(BaseProvider):
         return functions
 
 
+class TenantPythonProvider(BaseProvider):
+    key = "tenant_python"
+    label = "Editable Python"
+
+    async def enumerate_tools(
+        self, config: Mapping[str, Any], client: SafeRestClient, headers: dict[str, str]
+    ) -> list[Capability]:
+        del client, headers
+        parsed = TenantPythonConfig.model_validate(config)
+        return [
+            Capability(
+                name=item.name,
+                description=item.description,
+                approval_required=item.mutating,
+                input_schema=item.input_schema,
+            )
+            for item in parsed.capabilities
+        ]
+
+    async def test_connection(
+        self, config: Mapping[str, Any], client: SafeRestClient, headers: dict[str, str]
+    ) -> ConnectionResult:
+        capabilities = await self.enumerate_tools(config, client, headers)
+        base_url = str((config.get("settings") or {}).get("base_url") or "")
+        if base_url:
+            await client.validate_url(base_url)
+        return ConnectionResult(
+            ok=True,
+            message="Editable Python source passed AST checks; outbound hosts validated",
+            capabilities=capabilities,
+        )
+
+    async def build_tools(
+        self, config: Mapping[str, Any], context: ProviderBuildContext
+    ) -> list[Any]:
+        from app.core.settings import get_settings
+        from app.tools.sandbox.orchestrator import SandboxOrchestrator
+
+        parsed = TenantPythonConfig.model_validate(config)
+        if parsed.version_status != "published":
+            raise ProviderValidationError(
+                "Editable Python tool must be published before agents can use it"
+            )
+        settings = get_settings()
+        base_url = str(parsed.settings.get("base_url") or "")
+        if base_url:
+            await context.client.validate_url(base_url)
+
+        orchestrator = SandboxOrchestrator(
+            manager_url=settings.sandbox_manager_url,
+            client=context.client,
+            callback_base_url=settings.sandbox_callback_base_url,
+            concurrency_limit=settings.sandbox_tenant_concurrency,
+            image=settings.sandbox_python_image,
+        )
+        proxy_headers = dict(context.headers)
+        if context.credential_value and "Authorization" not in proxy_headers:
+            proxy_headers["Authorization"] = f"Bearer {context.credential_value}"
+
+        return [
+            self._make_capability_tool(
+                orchestrator=orchestrator,
+                parsed=parsed,
+                capability=capability,
+                prefix=context.prefix,
+                headers=proxy_headers,
+                force_approval=context.approval_required,
+                wall_seconds=settings.sandbox_wall_seconds,
+            )
+            for capability in parsed.capabilities
+        ]
+
+    def _make_capability_tool(
+        self,
+        *,
+        orchestrator: Any,
+        parsed: TenantPythonConfig,
+        capability: TenantPythonCapability,
+        prefix: str,
+        headers: dict[str, str],
+        force_approval: bool,
+        wall_seconds: int,
+    ) -> Any:
+        from app.tools.sandbox.orchestrator import SandboxRunRequest
+
+        async def _runner(**kwargs: Any) -> Any:
+            result = await orchestrator.run(
+                SandboxRunRequest(
+                    source_code=parsed.source_code,
+                    settings=dict(parsed.settings),
+                    capability=capability.name,
+                    arguments=dict(kwargs),
+                    headers=headers,
+                    timeout_seconds=wall_seconds,
+                )
+            )
+            if not result.ok:
+                raise RuntimeError(result.error or "Sandbox run failed")
+            return result.value
+
+        _runner.__name__ = f"{prefix}_{_safe_callable_name(capability.name)}"
+        _runner.__doc__ = capability.description or capability.name
+        if force_approval or capability.mutating:
+            return approval(_runner)
+        return _runner
+
+
 class MCPProvider(BaseProvider):
     key = "mcp"
     label = "MCP Server"
@@ -706,6 +870,7 @@ PROVIDERS: dict[str, ToolProvider] = {
         OpenAPIProvider(),
         PythonToolkitProvider(),
         CustomPythonProvider(),
+        TenantPythonProvider(),
         MCPProvider(),
     )
 }
@@ -717,7 +882,7 @@ def provider_catalog() -> list[dict[str, Any]]:
             "key": provider.key,
             "label": provider.label,
             "enabled": True,
-            "remote": provider.key in {"http", "openapi", "mcp"},
+            "remote": provider.key in {"http", "openapi", "mcp", "tenant_python"},
         }
         for provider in PROVIDERS.values()
     ]

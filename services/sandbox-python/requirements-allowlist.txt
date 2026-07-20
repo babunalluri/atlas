@@ -1,0 +1,4 @@
+# Platform allowlist pins installed into the sandbox image.
+# Keep in sync with platform_python_packages (rebuild on change).
+jsonschema==4.26.0
+pydantic==2.13.4

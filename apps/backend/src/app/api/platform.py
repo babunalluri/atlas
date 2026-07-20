@@ -11,9 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
 from app.db.models import PlatformAuditEvent, Role, Tenant
+from app.db.repositories import PlatformPythonPackageRepository
 from app.db.session import SessionFactory
 from app.tenancy.context import TenantContext
 from app.tenancy.ids import new_id, validate_slug
+from app.api.schemas import (
+    PlatformPythonPackageIn,
+    PlatformPythonPackageOut,
+    PlatformPythonPackageUpdateIn,
+)
 
 router = APIRouter(prefix="/admin/platform", tags=["platform-admin"])
 PlatformContext = Annotated[
@@ -203,4 +209,80 @@ async def list_platform_audit(
     return [
         PlatformAuditOut.model_validate(row, from_attributes=True)
         for row in rows.all()
+    ]
+
+
+@router.get("/sandbox-packages", response_model=list[PlatformPythonPackageOut])
+async def list_sandbox_packages(
+    context: PlatformContext,
+    session: PlatformSession,
+    active_only: bool = False,
+) -> list[PlatformPythonPackageOut]:
+    del context
+    rows = await PlatformPythonPackageRepository(session).list(active_only=active_only)
+    return [
+        PlatformPythonPackageOut.model_validate(row, from_attributes=True) for row in rows
+    ]
+
+
+@router.post(
+    "/sandbox-packages",
+    response_model=PlatformPythonPackageOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sandbox_package(
+    payload: PlatformPythonPackageIn,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> PlatformPythonPackageOut:
+    repo = PlatformPythonPackageRepository(session)
+    try:
+        row = await repo.create(payload.model_dump())
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Package name/version already exists on the allowlist",
+        ) from exc
+    await audit(
+        session,
+        context,
+        "sandbox_package.create",
+        None,
+        {"name": row.name, "version": row.version, "sha256": row.sha256},
+    )
+    await session.refresh(row)
+    return PlatformPythonPackageOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/sandbox-packages/{package_id}", response_model=PlatformPythonPackageOut)
+async def update_sandbox_package(
+    package_id: uuid.UUID,
+    payload: PlatformPythonPackageUpdateIn,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> PlatformPythonPackageOut:
+    changes = payload.model_dump(exclude_unset=True)
+    row = await PlatformPythonPackageRepository(session).update(package_id, changes)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Package not found")
+    await audit(
+        session,
+        context,
+        "sandbox_package.update",
+        None,
+        {"id": str(row.id), "fields": sorted(changes), "active": row.active},
+    )
+    return PlatformPythonPackageOut.model_validate(row, from_attributes=True)
+
+
+@router.get("/sandbox-packages/catalog", response_model=list[PlatformPythonPackageOut])
+async def catalog_active_sandbox_packages(
+    context: PlatformContext,
+    session: PlatformSession,
+) -> list[PlatformPythonPackageOut]:
+    """Active packages for editors (platform admin). Tenant admins use the tools route."""
+    del context
+    rows = await PlatformPythonPackageRepository(session).list(active_only=True)
+    return [
+        PlatformPythonPackageOut.model_validate(row, from_attributes=True) for row in rows
     ]

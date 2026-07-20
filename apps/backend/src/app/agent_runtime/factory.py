@@ -332,7 +332,7 @@ class AgentFactoryService:
                     credential.encrypted_value,
                     credential.key_version,
                 )
-                if provider_key not in {"python_toolkit", "custom_python"}:
+                if provider_key not in {"python_toolkit", "custom_python", "tenant_python"}:
                     header_name = str(config.get("credential_header", "Authorization"))
                     prefix = str(config.get("credential_prefix", "Bearer "))
                     headers[header_name] = prefix + credential_value

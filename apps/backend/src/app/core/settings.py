@@ -90,6 +90,26 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: int = Field(
         default=15, ge=1, validation_alias="SCHEDULER_POLL_SECONDS"
     )
+    sandbox_manager_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("SANDBOX_MANAGER_URL", "BACKEND_SANDBOX_MANAGER_URL"),
+    )
+    sandbox_callback_base_url: str = Field(
+        default="http://backend:7777",
+        validation_alias=AliasChoices(
+            "SANDBOX_CALLBACK_BASE_URL", "BACKEND_SANDBOX_CALLBACK_BASE_URL"
+        ),
+    )
+    sandbox_python_image: str = Field(
+        default="atlas-sandbox-python:local",
+        validation_alias="SANDBOX_PYTHON_IMAGE",
+    )
+    sandbox_tenant_concurrency: int = Field(
+        default=4, ge=1, le=32, validation_alias="SANDBOX_TENANT_CONCURRENCY"
+    )
+    sandbox_wall_seconds: int = Field(
+        default=30, ge=5, le=120, validation_alias="SANDBOX_WALL_SECONDS"
+    )
 
     @field_validator("database_url")
     @classmethod

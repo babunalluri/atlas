@@ -42,6 +42,7 @@ from app.api import mcp as mcp_api
 from app.api import metrics as metrics_api
 from app.api import platform as platform_api
 from app.api import public as public_api
+from app.api import sandbox_internal as sandbox_internal_api
 from app.api import schedules as schedules_api
 from app.api import service_accounts as service_accounts_api
 from app.api import sessions as sessions_api
@@ -520,6 +521,7 @@ def create_app() -> FastAPI:
     base_app.include_router(evals_api.router)
     base_app.include_router(teams_api.router)
     base_app.include_router(tools_api.router)
+    base_app.include_router(sandbox_internal_api.router)
     base_app.include_router(public_api.router)
     base_app.include_router(schedules_api.router)
     base_app.include_router(sessions_api.router)

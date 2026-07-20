@@ -361,6 +361,7 @@ class ToolDefinition(Base, TenantScoped, TimestampMixin):
     )
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_validation_error: Mapped[str | None] = mapped_column(String(500))
+    published_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     __table_args__ = (
         Index("uq_tool_definition_tenant_slug", "tenant_id", "slug", unique=True),
         Index("ix_tool_definitions_tenant_kind_active", "tenant_id", "kind", "active"),
@@ -371,6 +372,57 @@ class ToolDefinition(Base, TenantScoped, TimestampMixin):
             ondelete="SET NULL",
             name="fk_tool_definition_tenant_credential",
         ),
+    )
+
+
+class ToolDefinitionVersion(Base, TenantScoped, TimestampMixin):
+    """Immutable draft/published versions of sandboxed tenant Python tools."""
+
+    __tablename__ = "tool_definition_versions"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tool_definition_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="draft", nullable=False)
+    source_code: Mapped[str] = mapped_column(Text, nullable=False)
+    dependencies: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    capabilities: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    entry_module: Mapped[str] = mapped_column(String(100), default="tool", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "tool_definition_id"],
+            ["tool_definitions.tenant_id", "tool_definitions.id"],
+            ondelete="CASCADE",
+            name="fk_tool_definition_version_tenant_config",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "tool_definition_id",
+            "version",
+            name="uq_tool_definition_version",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "tool_definition_id",
+            "id",
+            name="uq_tool_definition_version_tenant_config_id",
+        ),
+    )
+
+
+class PlatformPythonPackage(Base, TimestampMixin):
+    """Platform-admin allowlist of packages installable in sandbox images."""
+
+    __tablename__ = "platform_python_packages"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_platform_python_package_name_version"),
     )
 
 

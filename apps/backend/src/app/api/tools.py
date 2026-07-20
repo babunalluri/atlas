@@ -7,17 +7,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    PlatformPythonPackageOut,
     ToolDefinitionBase,
     ToolDefinitionCreateIn,
     ToolDefinitionOut,
     ToolDefinitionUpdateIn,
+    ToolDefinitionVersionOut,
     ToolProviderCatalogOut,
     ToolValidationOut,
 )
 from app.auth.dependencies import require_roles
 from app.core.settings import Settings, get_settings
 from app.db.models import Role, ToolDefinition
-from app.db.repositories import CredentialRepository, ToolDefinitionRepository
+from app.db.repositories import (
+    CredentialRepository,
+    PlatformPythonPackageRepository,
+    ToolDefinitionRepository,
+    ToolDefinitionVersionRepository,
+)
 from app.db.session import tenant_session
 from app.tenancy.context import TenantContext
 from app.tools.custom import CUSTOM_TOOL_BY_KEY
@@ -28,6 +35,12 @@ from app.tools.providers import (
     toolkit_catalog,
 )
 from app.tools.registry import SafeRestClient, UnsafeOutboundRequest
+from app.tools.sandbox.templates import (
+    CC_PBX_DEFAULT_CAPABILITIES,
+    CC_PBX_DEFAULT_SETTINGS,
+    CC_PBX_STARTER_SOURCE,
+)
+from app.tools.sandbox.validator import SandboxValidationError, validate_dependencies
 from app.tools.toolkit_catalog import TOOLKIT_BY_KEY, toolkit_availability
 
 router = APIRouter(prefix="/admin/tools", tags=["admin-tools"])
@@ -58,9 +71,14 @@ def _out(row: ToolDefinition) -> ToolDefinitionOut:
         connection_status=row.connection_status,
         last_validated_at=row.last_validated_at,
         last_validation_error=row.last_validation_error,
+        published_version_id=row.published_version_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _version_out(row: Any) -> ToolDefinitionVersionOut:
+    return ToolDefinitionVersionOut.model_validate(row, from_attributes=True)
 
 
 async def _validate_targets(kind: str, config: dict[str, Any], settings: Settings) -> None:
@@ -79,11 +97,27 @@ async def _validate_targets(kind: str, config: dict[str, Any], settings: Setting
         spec = CUSTOM_TOOL_BY_KEY[str(config["custom_tool"])]
         parsed = spec.settings_model.model_validate(config.get("settings", {}))
         urls.extend(str(getattr(parsed, field_name)) for field_name in spec.url_fields)
+    elif kind == "tenant_python":
+        base = (config.get("settings") or {}).get("base_url")
+        if base:
+            urls.append(str(base))
     try:
         client = SafeRestClient(settings.allowed_outbound_hosts)
         for url in urls:
             await client.validate_url(url)
     except UnsafeOutboundRequest as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _validate_tenant_python_deps(
+    kind: str, config: dict[str, Any], session: AsyncSession
+) -> None:
+    if kind != "tenant_python":
+        return
+    allowlist = await PlatformPythonPackageRepository(session).allowlist_pairs()
+    try:
+        validate_dependencies(list(config.get("dependencies") or []), allowlist)
+    except SandboxValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -187,6 +221,32 @@ async def _validate_custom_python_credential(
         )
 
 
+async def _sync_tenant_python_draft(
+    row: ToolDefinition,
+    context: TenantContext,
+    session: AsyncSession,
+) -> None:
+    if row.kind != "tenant_python":
+        return
+    config = row.config or {}
+    await ToolDefinitionVersionRepository(session, context).upsert_draft(
+        tool_definition_id=row.id,
+        source_code=str(config.get("source_code") or ""),
+        dependencies=list(config.get("dependencies") or []),
+        capabilities=list(config.get("capabilities") or []),
+        settings=dict(config.get("settings") or {}),
+        created_by=context.user_id,
+    )
+
+
+def _apply_mutating_approval(values: dict[str, Any]) -> None:
+    if values.get("kind") != "tenant_python":
+        return
+    caps = (values.get("config") or {}).get("capabilities") or []
+    if any(bool(item.get("mutating")) for item in caps if isinstance(item, dict)):
+        values["approval_required"] = True
+
+
 async def _inspect_definition(
     row: ToolDefinition,
     context: TenantContext,
@@ -257,16 +317,45 @@ async def list_custom_python_tools(context: AdminContext) -> list[dict[str, obje
     return custom_tool_catalog()
 
 
+@router.get("/sandbox-packages", response_model=list[PlatformPythonPackageOut])
+async def list_active_sandbox_packages_for_editors(
+    context: AdminContext, session: TenantSession
+) -> list[PlatformPythonPackageOut]:
+    """Active platform allowlist packages (read-only for tenant tool editors)."""
+    del context
+    rows = await PlatformPythonPackageRepository(session).list(active_only=True)
+    return [
+        PlatformPythonPackageOut.model_validate(row, from_attributes=True) for row in rows
+    ]
+
+
+@router.get("/tenant-python/templates")
+async def list_tenant_python_templates(context: AdminContext) -> list[dict[str, Any]]:
+    del context
+    return [
+        {
+            "key": "cc_pbx",
+            "label": "Contact Center PBX starter",
+            "source_code": CC_PBX_STARTER_SOURCE,
+            "capabilities": CC_PBX_DEFAULT_CAPABILITIES,
+            "settings": CC_PBX_DEFAULT_SETTINGS,
+            "dependencies": [],
+        }
+    ]
+
+
 @router.post("/validate", response_model=ToolValidationOut)
 async def validate_tool(
     body: ToolDefinitionCreateIn,
     context: AdminContext,
+    session: TenantSession,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ToolValidationOut:
     await _validate_targets(body.kind, body.config, settings)
+    await _validate_tenant_python_deps(body.kind, body.config, session)
     provider = PROVIDERS[body.kind]
     capabilities = []
-    if body.kind in {"http", "python_toolkit", "custom_python"}:
+    if body.kind in {"http", "python_toolkit", "custom_python", "tenant_python"}:
         capabilities = await provider.enumerate_tools(
             body.config, SafeRestClient(settings.allowed_outbound_hosts), {}
         )
@@ -290,16 +379,22 @@ async def create_tool(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> ToolDefinitionOut:
     await _validate_targets(body.kind, body.config, settings)
+    await _validate_tenant_python_deps(body.kind, body.config, session)
     await _validate_python_toolkit_credential(
         body.kind, body.config, body.credential_id, context, session
     )
     await _validate_custom_python_credential(
         body.kind, body.config, body.credential_id, context, session
     )
+    values = body.model_dump()
+    if body.kind == "tenant_python":
+        values["config"] = {**values["config"], "version_status": "draft"}
+    _apply_mutating_approval(values)
     try:
-        row = await ToolDefinitionRepository(session, context).create(body.model_dump())
+        row = await ToolDefinitionRepository(session, context).create(values)
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _sync_tenant_python_draft(row, context, session)
     return _out(row)
 
 
@@ -328,6 +423,7 @@ async def update_tool(
     changes = body.model_dump(exclude_unset=True)
     merged = ToolDefinitionBase.model_validate(_row_values(current) | changes)
     await _validate_targets(merged.kind, merged.config, settings)
+    await _validate_tenant_python_deps(merged.kind, merged.config, session)
     await _validate_python_toolkit_credential(
         merged.kind, merged.config, merged.credential_id, context, session
     )
@@ -337,12 +433,93 @@ async def update_tool(
     validated_changes = {key: value for key, value in merged.model_dump().items() if key in changes}
     if merged.kind == "http" and merged.http_method != "GET":
         validated_changes["approval_required"] = True
+    if merged.kind == "tenant_python":
+        config = dict(validated_changes.get("config") or merged.config)
+        # Editing published source creates a new draft state on the definition.
+        if config.get("version_status") == "published" and "config" in changes:
+            config["version_status"] = "draft"
+        validated_changes["config"] = config
+        _apply_mutating_approval({"kind": "tenant_python", "config": config, **validated_changes})
     try:
         row = await repo.update(tool_id, validated_changes)
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     assert row is not None
+    await _sync_tenant_python_draft(row, context, session)
     return _out(row)
+
+
+@router.post("/{tool_id}/validate-source", response_model=ToolValidationOut)
+async def validate_tenant_python_source(
+    tool_id: uuid.UUID,
+    context: AdminContext,
+    session: TenantSession,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ToolValidationOut:
+    repo = ToolDefinitionRepository(session, context)
+    row = await repo.get(tool_id)
+    if row is None or row.kind != "tenant_python":
+        raise HTTPException(status_code=404, detail="Editable Python tool not found")
+    await _validate_targets(row.kind, row.config, settings)
+    await _validate_tenant_python_deps(row.kind, row.config, session)
+    result = await _inspect_definition(row, context, session, settings, test=False)
+    versions = ToolDefinitionVersionRepository(session, context)
+    draft = await versions.latest_draft(row.id)
+    if draft is not None:
+        await versions.mark_validated(draft.id)
+        config = dict(row.config)
+        config["version_status"] = "validated"
+        row.config = config
+        await session.flush()
+    await repo.audit(
+        action="tool.validate",
+        resource_type="tool_definition",
+        resource_id=str(row.id),
+        details={"ok": True, "capabilities": len(result.capabilities)},
+    )
+    return result
+
+
+@router.post("/{tool_id}/publish", response_model=ToolDefinitionOut)
+async def publish_tenant_python(
+    tool_id: uuid.UUID,
+    context: AdminContext,
+    session: TenantSession,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ToolDefinitionOut:
+    repo = ToolDefinitionRepository(session, context)
+    row = await repo.get(tool_id)
+    if row is None or row.kind != "tenant_python":
+        raise HTTPException(status_code=404, detail="Editable Python tool not found")
+    await _validate_targets(row.kind, row.config, settings)
+    await _validate_tenant_python_deps(row.kind, row.config, session)
+    await _inspect_definition(row, context, session, settings, test=False)
+    versions = ToolDefinitionVersionRepository(session, context)
+    draft = await versions.latest_draft(row.id)
+    if draft is None:
+        draft = await versions.upsert_draft(
+            tool_definition_id=row.id,
+            source_code=str(row.config.get("source_code") or ""),
+            dependencies=list(row.config.get("dependencies") or []),
+            capabilities=list(row.config.get("capabilities") or []),
+            settings=dict(row.config.get("settings") or {}),
+            created_by=context.user_id,
+        )
+    published = await versions.publish(draft.id, row)
+    if published is None:
+        raise HTTPException(status_code=422, detail="Unable to publish tool version")
+    return _out(row)
+
+
+@router.get("/{tool_id}/versions", response_model=list[ToolDefinitionVersionOut])
+async def list_tool_versions(
+    tool_id: uuid.UUID, context: AdminContext, session: TenantSession
+) -> list[ToolDefinitionVersionOut]:
+    row = await ToolDefinitionRepository(session, context).get(tool_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tool not found")
+    versions = await ToolDefinitionVersionRepository(session, context).list_for_tool(tool_id)
+    return [_version_out(item) for item in versions]
 
 
 @router.post("/{tool_id}/test", response_model=ToolValidationOut)

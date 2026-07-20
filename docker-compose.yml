@@ -15,6 +15,35 @@ services:
       timeout: 5s
       retries: 12
 
+  sandbox-python:
+    build:
+      context: ./services/sandbox-python
+    image: atlas-sandbox-python:local
+    profiles: ["build-sandbox"]
+
+  sandbox-manager:
+    build:
+      context: ./services/sandbox-manager
+    environment:
+      DOCKER_BIN: docker
+      SANDBOX_PYTHON_IMAGE: atlas-sandbox-python:local
+      SANDBOX_MAX_CONCURRENT: "8"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
   backend:
     build:
       context: ./apps/backend
@@ -33,6 +62,9 @@ services:
       DOCUMENT_UPLOAD_DIR: /data/uploads
       CORS_ORIGINS: http://localhost:3000
       ENVIRONMENT: development
+      SANDBOX_MANAGER_URL: http://sandbox-manager:8090
+      SANDBOX_CALLBACK_BASE_URL: http://backend:7777
+      SANDBOX_PYTHON_IMAGE: atlas-sandbox-python:local
     ports:
       - "7777:7777"
     volumes:
@@ -40,6 +72,8 @@ services:
       - document_uploads:/data/uploads
     depends_on:
       postgres:
+        condition: service_healthy
+      sandbox-manager:
         condition: service_healthy
     command: >
       sh -c "alembic upgrade head &&

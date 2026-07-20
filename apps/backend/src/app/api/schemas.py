@@ -128,6 +128,7 @@ class ToolDefinitionBase(BaseModel):
         "openapi",
         "python_toolkit",
         "custom_python",
+        "tenant_python",
         "mcp",
         "rest",
         "webhook",
@@ -201,7 +202,9 @@ class ToolDefinitionCreateIn(ToolDefinitionBase):
 class ToolDefinitionUpdateIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=4000)
-    kind: Literal["http", "openapi", "python_toolkit", "custom_python", "mcp"] | None = None
+    kind: Literal[
+        "http", "openapi", "python_toolkit", "custom_python", "tenant_python", "mcp"
+    ] | None = None
     http_method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] | None = None
     base_url: str | None = Field(default=None, max_length=2048)
     path: str | None = Field(default=None, max_length=2048)
@@ -220,8 +223,48 @@ class ToolDefinitionOut(ToolDefinitionBase):
     connection_status: str = "unvalidated"
     last_validated_at: datetime | None = None
     last_validation_error: str | None = None
+    published_version_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class ToolDefinitionVersionOut(BaseModel):
+    id: uuid.UUID
+    tool_definition_id: uuid.UUID
+    version: int
+    status: str
+    source_code: str
+    dependencies: list[dict[str, Any]]
+    capabilities: list[dict[str, Any]]
+    settings: dict[str, Any]
+    published_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlatformPythonPackageIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$")
+    version: str = Field(min_length=1, max_length=64)
+    sha256: str = Field(min_length=64, max_length=64, pattern=r"^[a-fA-F0-9]{64}$")
+    active: bool = True
+
+
+class PlatformPythonPackageUpdateIn(BaseModel):
+    sha256: str | None = Field(
+        default=None, min_length=64, max_length=64, pattern=r"^[a-fA-F0-9]{64}$"
+    )
+    active: bool | None = None
+
+
+class PlatformPythonPackageOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    version: str
+    sha256: str
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
 
 
 class ToolProviderCatalogOut(BaseModel):

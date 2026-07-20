@@ -56,6 +56,7 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/docs")
             or path.startswith("/public/tenants/")
             or path.startswith("/public/t/")
+            or path.startswith("/internal/sandbox/")
         ):
             return await call_next(request)
 

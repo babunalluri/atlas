@@ -29,6 +29,8 @@ from app.db.models import (
     Tenant,
     TenantCredential,
     ToolDefinition,
+    ToolDefinitionVersion,
+    PlatformPythonPackage,
     WorkflowAssignment,
     WorkflowConfig,
     WorkflowStep,
@@ -1252,6 +1254,266 @@ class ToolDefinitionRepository(TenantRepository):
         )
         await self.session.flush()
         return True
+
+
+class ApprovalRepository(TenantRepository):
+    async def create_from_requirement(
+        self,
+        *,
+        conversation: ConversationSession,
+        run_id: str,
+        requirement: dict[str, Any],
+    ) -> ApprovalBinding:
+        tool = requirement.get("tool_execution") or {}
+        requirement_id = str(requirement.get("id") or tool.get("tool_call_id") or new_id())
+        existing = await self.session.scalar(
+            self.scoped(
+                select(ApprovalBinding).where(
+                    ApprovalBinding.run_id == run_id,
+                    ApprovalBinding.requirement_id == requirement_id,
+                ),
+                ApprovalBinding,
+            )
+        )
+        if existing:
+            return existing
+        arguments = tool.get("tool_args") if isinstance(tool, dict) else {}
+        arguments = arguments if isinstance(arguments, dict) else {}
+        request_hash = hashlib.sha256(
+            json.dumps(arguments, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        row = ApprovalBinding(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            session_id=conversation.id,
+            tool_name=str(tool.get("tool_name") or "unknown"),
+            request_hash=request_hash,
+            redacted_arguments=arguments,
+            status=ApprovalStatus.pending,
+            run_id=run_id,
+            requirement_id=requirement_id,
+            requirement=requirement,
+            expires_at=datetime.now(UTC) + timedelta(hours=24),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        await self.audit(
+            action="approval.request",
+            resource_type="approval",
+            resource_id=str(row.id),
+            details={"run_id": run_id, "tool_name": row.tool_name},
+        )
+        return row
+
+    async def list_pending(self) -> Sequence[ApprovalBinding]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(ApprovalBinding)
+                .where(ApprovalBinding.status == ApprovalStatus.pending)
+                .order_by(ApprovalBinding.created_at.asc()),
+                ApprovalBinding,
+            )
+        )
+        return rows.all()
+
+    async def get(self, approval_id: uuid.UUID, *, lock: bool = False) -> ApprovalBinding | None:
+        statement = select(ApprovalBinding).where(ApprovalBinding.id == approval_id)
+        if lock:
+            statement = statement.with_for_update()
+        return await self.session.scalar(self.scoped(statement, ApprovalBinding))
+
+    async def resolve(
+        self, approval_id: uuid.UUID, approved: bool, reason: str | None = None
+    ) -> ApprovalBinding | None:
+        if not self.context.can_approve():
+            raise PermissionError("Only tenant/platform admins can resolve approvals")
+        approval = await self.get(approval_id, lock=True)
+        if approval is None or approval.status != ApprovalStatus.pending:
+            return None
+        if approval.expires_at and approval.expires_at <= datetime.now(UTC):
+            return None
+        approval.status = ApprovalStatus.approved if approved else ApprovalStatus.rejected
+        approval.resolved_by = self.context.user_id
+        approval.decision_reason = reason
+        await self.session.flush()
+        await self.audit(
+            action="approval.resolve",
+            resource_type="approval",
+            resource_id=str(approval.id),
+            details={"approved": approved, "reason": reason},
+        )
+        return approval
+
+    async def mark_continued(
+        self, approval_id: uuid.UUID, *, error: str | None = None
+    ) -> ApprovalBinding | None:
+        approval = await self.get(approval_id, lock=True)
+        if approval is None:
+            return None
+        approval.continued_at = datetime.now(UTC)
+        approval.continuation_error = error
+        await self.session.flush()
+        return approval
+
+
+class ToolDefinitionVersionRepository(TenantRepository):
+    async def list_for_tool(
+        self, tool_definition_id: uuid.UUID
+    ) -> Sequence[ToolDefinitionVersion]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(ToolDefinitionVersion)
+                .where(ToolDefinitionVersion.tool_definition_id == tool_definition_id)
+                .order_by(ToolDefinitionVersion.version.desc()),
+                ToolDefinitionVersion,
+            )
+        )
+        return rows.all()
+
+    async def get(self, version_id: uuid.UUID) -> ToolDefinitionVersion | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(ToolDefinitionVersion).where(ToolDefinitionVersion.id == version_id),
+                ToolDefinitionVersion,
+            )
+        )
+
+    async def latest_draft(
+        self, tool_definition_id: uuid.UUID
+    ) -> ToolDefinitionVersion | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(ToolDefinitionVersion)
+                .where(
+                    ToolDefinitionVersion.tool_definition_id == tool_definition_id,
+                    ToolDefinitionVersion.status.in_(("draft", "validated")),
+                )
+                .order_by(ToolDefinitionVersion.version.desc())
+                .limit(1),
+                ToolDefinitionVersion,
+            )
+        )
+
+    async def next_version_number(self, tool_definition_id: uuid.UUID) -> int:
+        current = await self.session.scalar(
+            self.scoped(
+                select(func.max(ToolDefinitionVersion.version)).where(
+                    ToolDefinitionVersion.tool_definition_id == tool_definition_id
+                ),
+                ToolDefinitionVersion,
+            )
+        )
+        return int(current or 0) + 1
+
+    async def upsert_draft(
+        self,
+        *,
+        tool_definition_id: uuid.UUID,
+        source_code: str,
+        dependencies: list[Any],
+        capabilities: list[Any],
+        settings: dict[str, Any],
+        created_by: str,
+    ) -> ToolDefinitionVersion:
+        draft = await self.latest_draft(tool_definition_id)
+        if draft is not None and draft.status == "draft":
+            draft.source_code = source_code
+            draft.dependencies = dependencies
+            draft.capabilities = capabilities
+            draft.settings = settings
+            draft.updated_at = datetime.now(UTC)
+            await self.session.flush()
+            return draft
+        row = ToolDefinitionVersion(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            tool_definition_id=tool_definition_id,
+            version=await self.next_version_number(tool_definition_id),
+            status="draft",
+            source_code=source_code,
+            dependencies=dependencies,
+            capabilities=capabilities,
+            settings=settings,
+            created_by=created_by,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def mark_validated(self, version_id: uuid.UUID) -> ToolDefinitionVersion | None:
+        row = await self.get(version_id)
+        if row is None:
+            return None
+        row.status = "validated"
+        await self.session.flush()
+        return row
+
+    async def publish(
+        self, version_id: uuid.UUID, tool: ToolDefinition
+    ) -> ToolDefinitionVersion | None:
+        row = await self.get(version_id)
+        if row is None or row.tool_definition_id != tool.id:
+            return None
+        if row.status not in {"draft", "validated"}:
+            return None
+        row.status = "published"
+        row.published_at = datetime.now(UTC)
+        tool.published_version_id = row.id
+        config = dict(tool.config or {})
+        config["source_code"] = row.source_code
+        config["dependencies"] = row.dependencies
+        config["capabilities"] = row.capabilities
+        config["settings"] = row.settings
+        config["version_status"] = "published"
+        tool.config = config
+        if any(bool(item.get("mutating")) for item in row.capabilities if isinstance(item, dict)):
+            tool.approval_required = True
+        await self.session.flush()
+        await self.audit(
+            action="tool.publish",
+            resource_type="tool_definition",
+            resource_id=str(tool.id),
+            details={"version_id": str(row.id), "version": row.version},
+        )
+        return row
+
+
+class PlatformPythonPackageRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def list(self, *, active_only: bool = False) -> Sequence[PlatformPythonPackage]:
+        statement = select(PlatformPythonPackage).order_by(
+            PlatformPythonPackage.name, PlatformPythonPackage.version
+        )
+        if active_only:
+            statement = statement.where(PlatformPythonPackage.active.is_(True))
+        rows = await self.session.scalars(statement)
+        return rows.all()
+
+    async def allowlist_pairs(self) -> set[tuple[str, str]]:
+        rows = await self.list(active_only=True)
+        return {(row.name.lower(), row.version) for row in rows}
+
+    async def get(self, package_id: uuid.UUID) -> PlatformPythonPackage | None:
+        return await self.session.get(PlatformPythonPackage, package_id)
+
+    async def create(self, values: dict[str, Any]) -> PlatformPythonPackage:
+        row = PlatformPythonPackage(id=new_id(), **values)
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def update(
+        self, package_id: uuid.UUID, values: dict[str, Any]
+    ) -> PlatformPythonPackage | None:
+        row = await self.get(package_id)
+        if row is None:
+            return None
+        for key, value in values.items():
+            setattr(row, key, value)
+        await self.session.flush()
+        return row
 
 
 class ApprovalRepository(TenantRepository):
