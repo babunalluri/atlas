@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_tenant
-from app.db.repositories import WorkflowRepository
+from app.db.repositories import MembershipRepository, WorkflowRepository
 from app.db.session import tenant_session
 from app.tenancy.context import TenantContext
 
@@ -17,6 +17,12 @@ async def list_available_workflows(
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> list[dict[str, object]]:
     """List published workflows the current user may run."""
+    membership = await MembershipRepository(session, context).get_by_user_id(
+        context.user_id
+    )
+    if membership is not None and not membership.is_active:
+        return []
+
     repo = WorkflowRepository(session, context)
     configs = (
         [config for config in await repo.list_configs() if config.published_version_id]

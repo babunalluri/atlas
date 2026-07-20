@@ -6,9 +6,19 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import {
+  CatalogControls,
+  DEFAULT_CATALOG_QUERY,
+  type CatalogQuery,
+} from "@/components/ui/CatalogControls";
 import { Input, Label } from "@/components/ui/Field";
-import { createAgent, getAgent } from "@/lib/api/admin";
-import type { AgentConfig, AgentSummary, ToolBinding } from "@/lib/api/types";
+import { createAgent, getAgent, listAgentCatalog } from "@/lib/api/admin";
+import type {
+  AgentConfig,
+  AgentSummary,
+  CatalogPage,
+  ToolBinding,
+} from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { slugifyName } from "@/lib/validation/agent-form";
 import { cn, formatRelative } from "@/lib/utils";
@@ -40,18 +50,59 @@ function ToolRow({ tool }: { tool: ToolBinding }) {
   );
 }
 
-export function AgentList({ agents }: { agents: AgentSummary[] }) {
+export function AgentList({
+  initial,
+}: {
+  initial: CatalogPage<AgentSummary>;
+}) {
   const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
+  const [pageData, setPageData] = useState(initial);
+  const [loading, setLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(
-    agents[0]?.id ?? null,
+    initial.items[0]?.id ?? null,
   );
   const [detail, setDetail] = useState<AgentConfig | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      let cancelled = false;
+      setLoading(true);
+      void (async () => {
+        try {
+          const next = await listAgentCatalog(await getAccessToken(), {
+            q: query.q,
+            status: query.status,
+            page: query.page,
+            pageSize: query.pageSize,
+          });
+          if (cancelled) return;
+          setPageData(next);
+          if (!next.items.some((item) => item.id === selectedId)) {
+            setSelectedId(next.items[0]?.id ?? null);
+          }
+        } catch (reason) {
+          if (!cancelled) {
+            setError(
+              reason instanceof Error ? reason.message : "Failed to load agents",
+            );
+          }
+        } finally {
+          if (!cancelled) setLoading(false);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [getAccessToken, query, selectedId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -99,6 +150,7 @@ export function AgentList({ agents }: { agents: AgentSummary[] }) {
     }
   }
 
+  const agents = pageData.items;
   const selectedSummary = agents.find((agent) => agent.id === selectedId);
 
   return (
@@ -114,8 +166,8 @@ export function AgentList({ agents }: { agents: AgentSummary[] }) {
               Configure agents your customers will recognize.
             </h1>
             <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-muted">
-              Draft instructions, bind tools, attach knowledge, and publish immutable
-              versions — without shipping a generic playground.
+              Search and page through large agent catalogs, then open one to
+              inspect tools and publish versions.
             </p>
           </div>
           <div className="rounded-xl border border-line bg-raised/90 p-4">
@@ -138,6 +190,13 @@ export function AgentList({ agents }: { agents: AgentSummary[] }) {
 
       <section className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.85fr)]">
         <div className="table-shell rounded-xl">
+          <CatalogControls
+            query={query}
+            total={pageData.total}
+            noun="agents"
+            loading={loading}
+            onChange={setQuery}
+          />
           <div className="grid grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] gap-3 border-b border-line px-4 py-2.5">
             <span className="th-label">Agent</span>
             <span className="th-label">Model</span>
@@ -209,7 +268,7 @@ export function AgentList({ agents }: { agents: AgentSummary[] }) {
             })}
             {agents.length === 0 ? (
               <li className="px-4 py-10 text-center text-sm text-slate-muted">
-                No agents yet — create your first configuration above.
+                No agents match this search.
               </li>
             ) : null}
           </ul>

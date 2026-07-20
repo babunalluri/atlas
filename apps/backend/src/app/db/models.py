@@ -86,7 +86,10 @@ class Membership(Base, TenantScoped, TimestampMixin):
     __tablename__ = "memberships"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    email: Mapped[str | None] = mapped_column(String(320))
     role: Mapped[Role] = mapped_column(Enum(Role), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     __table_args__ = (Index("uq_membership_tenant_user", "tenant_id", "user_id", unique=True),)
 
 

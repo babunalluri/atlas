@@ -50,6 +50,7 @@ from app.api import tools as tools_api
 from app.api import traces as traces_api
 from app.api import workflows as workflows_api
 from app.api import workflow_access as workflow_access_api
+from app.api import users as users_api
 from app.auth.dependencies import require_tenant
 from app.auth.middleware import TenantAuthMiddleware
 from app.core.errors import register_exception_handlers
@@ -59,6 +60,7 @@ from app.core.settings import get_settings
 from app.db.repositories import (
     AgentRepository,
     ApprovalRepository,
+    MembershipRepository,
     SessionRepository,
     TeamRepository,
     WorkflowRepository,
@@ -528,6 +530,7 @@ def create_app() -> FastAPI:
     base_app.include_router(traces_api.router)
     base_app.include_router(workflows_api.router)
     base_app.include_router(workflow_access_api.router)
+    base_app.include_router(users_api.router)
 
     @base_app.post("/v1/agents/tenant-agent/runs")
     async def run_tenant_agent(
@@ -849,10 +852,16 @@ def create_app() -> FastAPI:
                 version = await repo.get_version(version_uuid, allow_draft=preview)
                 if version is None:
                     raise LookupError("Workflow version not found")
-                if not context.can_administer() and not await repo.is_assigned(
-                    version.workflow_config_id, context.user_id
-                ):
-                    raise PermissionError("Workflow is not assigned to this user")
+                if not context.can_administer():
+                    membership = await MembershipRepository(
+                        session, context
+                    ).get_by_user_id(context.user_id)
+                    if membership is not None and not membership.is_active:
+                        raise PermissionError("User account is inactive")
+                    if not await repo.is_assigned(
+                        version.workflow_config_id, context.user_id
+                    ):
+                        raise PermissionError("Workflow is not assigned to this user")
                 workflow = await WorkflowFactoryService(
                     AgentFactoryService(session, context)
                 ).create(

@@ -47,10 +47,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         settings = get_settings()
+        # Local/dev traffic (SSR, HMR, retries) easily exceeds the default 60/min
+        # when many requests share the Docker gateway IP before tenant auth runs.
+        if settings.is_development:
+            return await call_next(request)
+
         tenant = getattr(request.state, "tenant", None)
-        user_key = (
-            getattr(tenant, "user_id", None) or request.client.host if request.client else "anon"
-        )
+        host = request.client.host if request.client else "anon"
+        user_key = getattr(tenant, "user_id", None) or host
         tenant_key = str(getattr(tenant, "tenant_id", "unknown"))
 
         limiter.hit(f"user:{user_key}", limit=settings.rate_limit_per_minute)

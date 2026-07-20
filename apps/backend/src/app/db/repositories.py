@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, delete, func, select, update
+from sqlalchemy import Select, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -20,6 +20,8 @@ from app.db.models import (
     KnowledgeBase,
     KnowledgeChunk,
     KnowledgeSource,
+    Membership,
+    Role,
     ServiceAccount,
     TeamConfig,
     TeamMember,
@@ -27,8 +29,8 @@ from app.db.models import (
     Tenant,
     TenantCredential,
     ToolDefinition,
-    WorkflowConfig,
     WorkflowAssignment,
+    WorkflowConfig,
     WorkflowStep,
     WorkflowVersion,
 )
@@ -102,6 +104,41 @@ class AgentRepository(TenantRepository):
             self.scoped(select(AgentConfig).order_by(AgentConfig.created_at.desc()), AgentConfig)
         )
         return result.all()
+
+    async def search_configs(
+        self,
+        *,
+        q: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> tuple[Sequence[AgentConfig], int]:
+        page = max(1, page)
+        page_size = min(max(1, page_size), 100)
+        filters = [AgentConfig.tenant_id == self.context.tenant_id]
+        if q and q.strip():
+            pattern = f"%{q.strip().lower()}%"
+            filters.append(
+                or_(
+                    func.lower(AgentConfig.name).like(pattern),
+                    func.lower(AgentConfig.slug).like(pattern),
+                )
+            )
+        if status == "published":
+            filters.append(AgentConfig.published_version_id.is_not(None))
+        elif status == "draft":
+            filters.append(AgentConfig.published_version_id.is_(None))
+        total = await self.session.scalar(
+            select(func.count()).select_from(AgentConfig).where(*filters)
+        )
+        rows = await self.session.scalars(
+            select(AgentConfig)
+            .where(*filters)
+            .order_by(AgentConfig.updated_at.desc(), AgentConfig.name.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return rows.all(), int(total or 0)
 
     async def get_config(self, config_id: uuid.UUID) -> AgentConfig | None:
         return await self.session.scalar(
@@ -294,6 +331,41 @@ class TeamRepository(TenantRepository):
         )
         return rows.all()
 
+    async def search_configs(
+        self,
+        *,
+        q: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> tuple[Sequence[TeamConfig], int]:
+        page = max(1, page)
+        page_size = min(max(1, page_size), 100)
+        filters = [TeamConfig.tenant_id == self.context.tenant_id]
+        if q and q.strip():
+            pattern = f"%{q.strip().lower()}%"
+            filters.append(
+                or_(
+                    func.lower(TeamConfig.name).like(pattern),
+                    func.lower(TeamConfig.slug).like(pattern),
+                )
+            )
+        if status == "published":
+            filters.append(TeamConfig.published_version_id.is_not(None))
+        elif status == "draft":
+            filters.append(TeamConfig.published_version_id.is_(None))
+        total = await self.session.scalar(
+            select(func.count()).select_from(TeamConfig).where(*filters)
+        )
+        rows = await self.session.scalars(
+            select(TeamConfig)
+            .where(*filters)
+            .order_by(TeamConfig.updated_at.desc(), TeamConfig.name.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return rows.all(), int(total or 0)
+
     async def get_config(self, config_id: uuid.UUID) -> TeamConfig | None:
         return await self.session.scalar(
             self.scoped(select(TeamConfig).where(TeamConfig.id == config_id), TeamConfig)
@@ -480,6 +552,121 @@ class TeamRepository(TenantRepository):
         return version
 
 
+class MembershipRepository(TenantRepository):
+    async def list_users(self) -> Sequence[Membership]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(Membership).order_by(Membership.display_name, Membership.user_id),
+                Membership,
+            )
+        )
+        return rows.all()
+
+    async def get(self, membership_id: uuid.UUID) -> Membership | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(Membership).where(Membership.id == membership_id),
+                Membership,
+            )
+        )
+
+    async def get_by_user_id(self, user_id: str) -> Membership | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(Membership).where(Membership.user_id == user_id),
+                Membership,
+            )
+        )
+
+    async def create(
+        self,
+        *,
+        user_id: str,
+        display_name: str,
+        email: str | None,
+        role: Role,
+        is_active: bool = True,
+    ) -> Membership:
+        existing = await self.get_by_user_id(user_id)
+        if existing is not None:
+            raise ValueError("A user with this ID already exists in the tenant")
+        if role not in {Role.tenant_admin, Role.end_user}:
+            raise ValueError("Tenant users must be tenant_admin or end_user")
+        membership = Membership(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            user_id=user_id.strip(),
+            display_name=display_name.strip(),
+            email=(email or "").strip() or None,
+            role=role,
+            is_active=is_active,
+        )
+        self.session.add(membership)
+        await self.session.flush()
+        await self.audit(
+            action="user.create",
+            resource_type="membership",
+            resource_id=str(membership.id),
+            details={"user_id": membership.user_id, "role": membership.role.value},
+        )
+        return membership
+
+    async def update(
+        self,
+        membership_id: uuid.UUID,
+        *,
+        display_name: str | None = None,
+        email: str | None = None,
+        role: Role | None = None,
+        is_active: bool | None = None,
+    ) -> Membership | None:
+        membership = await self.get(membership_id)
+        if membership is None:
+            return None
+        if display_name is not None:
+            membership.display_name = display_name.strip()
+        if email is not None:
+            membership.email = email.strip() or None
+        if role is not None:
+            if role not in {Role.tenant_admin, Role.end_user}:
+                raise ValueError("Tenant users must be tenant_admin or end_user")
+            membership.role = role
+        if is_active is not None:
+            membership.is_active = is_active
+        await self.session.flush()
+        await self.audit(
+            action="user.update",
+            resource_type="membership",
+            resource_id=str(membership.id),
+            details={
+                "user_id": membership.user_id,
+                "role": membership.role.value,
+                "is_active": membership.is_active,
+            },
+        )
+        return membership
+
+    async def delete(self, membership_id: uuid.UUID) -> Membership | None:
+        membership = await self.get(membership_id)
+        if membership is None:
+            return None
+        await self.session.execute(
+            delete(WorkflowAssignment).where(
+                WorkflowAssignment.tenant_id == self.context.tenant_id,
+                WorkflowAssignment.user_id == membership.user_id,
+            )
+        )
+        await self.session.delete(membership)
+        await self.session.flush()
+        await self.audit(
+            action="user.delete",
+            resource_type="membership",
+            resource_id=str(membership_id),
+            details={"user_id": membership.user_id},
+        )
+        return membership
+
+
 class WorkflowRepository(TenantRepository):
     async def list_available_for_user(self, user_id: str) -> Sequence[WorkflowConfig]:
         rows = await self.session.scalars(
@@ -552,6 +739,52 @@ class WorkflowRepository(TenantRepository):
         )
         return normalized
 
+    async def assigned_workflow_ids(self, user_id: str) -> list[uuid.UUID]:
+        rows = await self.session.scalars(
+            select(WorkflowAssignment.workflow_config_id)
+            .where(
+                WorkflowAssignment.tenant_id == self.context.tenant_id,
+                WorkflowAssignment.user_id == user_id,
+            )
+            .order_by(WorkflowAssignment.workflow_config_id)
+        )
+        return list(rows.all())
+
+    async def replace_user_assignments(
+        self, user_id: str, workflow_ids: Sequence[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        normalized = sorted({value for value in workflow_ids})
+        for workflow_id in normalized:
+            config = await self.get_config(workflow_id)
+            if config is None:
+                raise LookupError(f"Workflow {workflow_id} not found")
+            if config.published_version_id is None:
+                raise ValueError(f"Workflow {config.slug} must be published before assignment")
+        await self.session.execute(
+            delete(WorkflowAssignment).where(
+                WorkflowAssignment.tenant_id == self.context.tenant_id,
+                WorkflowAssignment.user_id == user_id,
+            )
+        )
+        self.session.add_all(
+            WorkflowAssignment(
+                id=new_id(),
+                tenant_id=self.context.tenant_id,
+                workflow_config_id=workflow_id,
+                user_id=user_id,
+                assigned_by=self.context.user_id,
+            )
+            for workflow_id in normalized
+        )
+        await self.session.flush()
+        await self.audit(
+            action="user.workflow_assignments.update",
+            resource_type="membership",
+            resource_id=user_id,
+            details={"workflow_ids": [str(value) for value in normalized]},
+        )
+        return normalized
+
     async def list_configs(self) -> Sequence[WorkflowConfig]:
         rows = await self.session.scalars(
             self.scoped(
@@ -560,6 +793,41 @@ class WorkflowRepository(TenantRepository):
             )
         )
         return rows.all()
+
+    async def search_configs(
+        self,
+        *,
+        q: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> tuple[Sequence[WorkflowConfig], int]:
+        page = max(1, page)
+        page_size = min(max(1, page_size), 100)
+        filters = [WorkflowConfig.tenant_id == self.context.tenant_id]
+        if q and q.strip():
+            pattern = f"%{q.strip().lower()}%"
+            filters.append(
+                or_(
+                    func.lower(WorkflowConfig.name).like(pattern),
+                    func.lower(WorkflowConfig.slug).like(pattern),
+                )
+            )
+        if status == "published":
+            filters.append(WorkflowConfig.published_version_id.is_not(None))
+        elif status == "draft":
+            filters.append(WorkflowConfig.published_version_id.is_(None))
+        total = await self.session.scalar(
+            select(func.count()).select_from(WorkflowConfig).where(*filters)
+        )
+        rows = await self.session.scalars(
+            select(WorkflowConfig)
+            .where(*filters)
+            .order_by(WorkflowConfig.updated_at.desc(), WorkflowConfig.name.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return rows.all(), int(total or 0)
 
     async def get_config(self, config_id: uuid.UUID) -> WorkflowConfig | None:
         return await self.session.scalar(

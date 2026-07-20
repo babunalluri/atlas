@@ -31,6 +31,66 @@ class ToolBindingIn(BaseModel):
         return self
 
 
+class CatalogQuery(BaseModel):
+    q: str | None = Field(default=None, max_length=200)
+    status: Literal["all", "published", "draft"] = "all"
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=100)
+
+
+class AgentCatalogItemOut(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    status: str
+    model_id: str
+    published_version: int | None = None
+    updated_at: datetime
+
+
+class TeamCatalogItemOut(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    status: str
+    mode: str
+    member_count: int = 0
+    published_version: int | None = None
+    updated_at: datetime
+
+
+class WorkflowCatalogItemOut(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    status: str
+    mode: str
+    step_count: int = 0
+    published_version: int | None = None
+    updated_at: datetime
+
+
+class AgentCatalogPageOut(BaseModel):
+    items: list[AgentCatalogItemOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class TeamCatalogPageOut(BaseModel):
+    items: list[TeamCatalogItemOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class WorkflowCatalogPageOut(BaseModel):
+    items: list[WorkflowCatalogItemOut]
+    total: int
+    page: int
+    page_size: int
+
+
 SENSITIVE_HEADER_NAMES = {
     "authorization",
     "cookie",
@@ -356,6 +416,68 @@ class WorkflowAssignmentsIn(BaseModel):
 class WorkflowAssignmentsOut(BaseModel):
     workflow_id: uuid.UUID
     user_ids: list[str] = Field(default_factory=list)
+
+
+class TenantUserCreateIn(BaseModel):
+    user_id: str = Field(min_length=1, max_length=255)
+    display_name: str = Field(min_length=1, max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+    role: Literal["tenant_admin", "end_user"] = "end_user"
+    is_active: bool = True
+    workflow_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
+
+    @field_validator("user_id", "display_name")
+    @classmethod
+    def strip_required(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Value is required")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+class TenantUserUpdateIn(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+    role: Literal["tenant_admin", "end_user"] | None = None
+    is_active: bool | None = None
+    workflow_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+
+    @field_validator("display_name")
+    @classmethod
+    def strip_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("display_name is required")
+        return cleaned
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class TenantUserOut(BaseModel):
+    id: uuid.UUID
+    user_id: str
+    display_name: str
+    email: str | None
+    role: str
+    is_active: bool
+    workflow_ids: list[uuid.UUID] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
 
 
 class KnowledgeBaseIn(BaseModel):

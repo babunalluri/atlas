@@ -8,21 +8,28 @@ import type { AvailableWorkflow, TenantBranding } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 
 export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
-  const { getAccessToken, isSignedIn } = useAgentOsToken();
+  const { getAccessToken, isSignedIn, isLoaded } = useAgentOsToken();
   const [workflows, setWorkflows] = useState<AvailableWorkflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!isLoaded) return;
     if (!isSignedIn) {
       setLoading(false);
+      setWorkflows([]);
+      setError(null);
       return;
     }
     let cancelled = false;
+    setLoading(true);
     void (async () => {
       try {
         const rows = await listAvailableWorkflows(await getAccessToken());
-        if (!cancelled) setWorkflows(rows);
+        if (!cancelled) {
+          setWorkflows(rows);
+          setError(null);
+        }
       } catch (reason) {
         if (!cancelled) {
           setError(
@@ -38,7 +45,7 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
     return () => {
       cancelled = true;
     };
-  }, [getAccessToken, isSignedIn]);
+  }, [getAccessToken, isLoaded, isSignedIn]);
 
   const cssVars = {
     "--tenant-primary": tenant.primaryColor,
@@ -73,13 +80,17 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
             coordinates the right teams and agents for the task.
           </p>
 
-          {!isSignedIn ? (
+          {!isLoaded ? (
+            <p className="mt-10 text-sm text-white/60">Checking sign-in…</p>
+          ) : null}
+
+          {isLoaded && !isSignedIn ? (
             <div className="mt-10 rounded-2xl border border-white/10 bg-white/5 p-6">
               <p className="text-sm text-white/70">
                 Sign in with your organization account to see your workflows.
               </p>
               <Link
-                href="/sign-in"
+                href={`/sign-in?redirect_url=${encodeURIComponent(`/t/${tenant.slug}/chat`)}`}
                 className="mt-4 inline-flex rounded-lg bg-[var(--tenant-accent)] px-4 py-2 text-sm font-semibold text-slate-950"
               >
                 Sign in
@@ -87,12 +98,14 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
             </div>
           ) : null}
 
-          {loading ? (
+          {isLoaded && isSignedIn && loading ? (
             <p className="mt-10 text-sm text-white/60">Loading workflows…</p>
           ) : null}
-          {error ? <p className="mt-10 text-sm text-amber">{error}</p> : null}
+          {isLoaded && isSignedIn && error ? (
+            <p className="mt-10 text-sm text-amber">{error}</p>
+          ) : null}
 
-          {!loading && isSignedIn && !error ? (
+          {isLoaded && isSignedIn && !loading && !error ? (
             <div className="mt-10 grid gap-4 md:grid-cols-2">
               {workflows.map((workflow) => (
                 <Link
@@ -116,8 +129,16 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
               ))}
               {workflows.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-white/15 p-8 text-center text-sm text-white/60 md:col-span-2">
-                  No workflows are assigned to your account yet. Ask your
-                  organization administrator to grant access.
+                  <p>
+                    No workflows are assigned to your account yet. Ask your
+                    organization administrator to grant access.
+                  </p>
+                  <Link
+                    href={`/t/${tenant.slug}/chat/support-concierge`}
+                    className="mt-4 inline-flex text-sm font-semibold text-[var(--tenant-accent)]"
+                  >
+                    Or open Support Concierge →
+                  </Link>
                 </div>
               ) : null}
             </div>

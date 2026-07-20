@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    AgentCatalogItemOut,
+    AgentCatalogPageOut,
     AgentConfigOut,
     AgentCreateIn,
     AgentUpdateIn,
@@ -62,6 +64,50 @@ async def _config_out(repo: AgentRepository, config) -> AgentConfigOut:  # type:
         knowledge_base_id=knowledge_base_id,
         draft=_version_out(draft) if draft else None,
         published=_version_out(published) if published else None,
+    )
+
+
+@router.get("/catalog", response_model=AgentCatalogPageOut)
+async def list_agent_catalog(
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+    q: str | None = None,
+    status: str = "all",
+    page: int = 1,
+    page_size: int = 25,
+) -> AgentCatalogPageOut:
+    repo = AgentRepository(session, context)
+    configs, total = await repo.search_configs(
+        q=q,
+        status=None if status == "all" else status,
+        page=page,
+        page_size=page_size,
+    )
+    items: list[AgentCatalogItemOut] = []
+    for config in configs:
+        draft = await repo.get_latest_draft(config.id)
+        published = (
+            await repo.get_version(config.published_version_id, allow_draft=False)
+            if config.published_version_id
+            else None
+        )
+        editable = draft or published
+        items.append(
+            AgentCatalogItemOut(
+                id=config.id,
+                slug=config.slug,
+                name=config.name,
+                status="published" if published else "draft",
+                model_id=editable.model_id if editable else "openai:gpt-4.1-mini",
+                published_version=published.version if published else None,
+                updated_at=config.updated_at,
+            )
+        )
+    return AgentCatalogPageOut(
+        items=items,
+        total=total,
+        page=max(1, page),
+        page_size=min(max(1, page_size), 100),
     )
 
 

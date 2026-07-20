@@ -154,6 +154,14 @@ const icons = {
       <path d="M12 9v6" />
     </>,
   ),
+  users: icon(
+    <>
+      <circle cx="9" cy="8" r="3.5" />
+      <path d="M3.5 19c1.2-2.8 3.3-4.2 5.5-4.2S13.3 16.2 14.5 19" />
+      <circle cx="17" cy="9" r="2.5" />
+      <path d="M15 15.8c1.7.3 3.1 1.3 4.2 3.2" />
+    </>,
+  ),
 };
 
 const navGroups: Array<{
@@ -239,6 +247,12 @@ const navGroups: Array<{
   {
     label: "Configure",
     items: [
+      {
+        href: "/admin/users",
+        label: "Users",
+        hint: "CRUD users and assign workflows",
+        icon: icons.users,
+      },
       {
         href: "/admin/integrations",
         label: "Integrations",

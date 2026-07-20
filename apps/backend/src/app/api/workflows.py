@@ -5,10 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
-    WorkflowConfigOut,
-    WorkflowCreateIn,
     WorkflowAssignmentsIn,
     WorkflowAssignmentsOut,
+    WorkflowCatalogItemOut,
+    WorkflowCatalogPageOut,
+    WorkflowConfigOut,
+    WorkflowCreateIn,
     WorkflowStepOut,
     WorkflowUpdateIn,
     WorkflowVersionOut,
@@ -100,6 +102,52 @@ async def workflow_config_out(
         updated_at=config.updated_at,
         draft=await _version_out(repo, draft) if draft else None,
         published=await _version_out(repo, published) if published else None,
+    )
+
+
+@router.get("/catalog", response_model=WorkflowCatalogPageOut)
+async def list_workflow_catalog(
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+    q: str | None = None,
+    status: str = "all",
+    page: int = 1,
+    page_size: int = 25,
+) -> WorkflowCatalogPageOut:
+    repo = WorkflowRepository(session, context)
+    configs, total = await repo.search_configs(
+        q=q,
+        status=None if status == "all" else status,
+        page=page,
+        page_size=page_size,
+    )
+    items: list[WorkflowCatalogItemOut] = []
+    for config in configs:
+        draft = await repo.get_latest_draft(config.id)
+        published = (
+            await repo.get_version(config.published_version_id)
+            if config.published_version_id
+            else None
+        )
+        editable = draft or published
+        step_count = len(await repo.steps(editable.id)) if editable else 0
+        items.append(
+            WorkflowCatalogItemOut(
+                id=config.id,
+                slug=config.slug,
+                name=config.name,
+                status="published" if published else "draft",
+                mode=editable.mode if editable else "sequential",
+                step_count=step_count,
+                published_version=published.version if published else None,
+                updated_at=config.updated_at,
+            )
+        )
+    return WorkflowCatalogPageOut(
+        items=items,
+        total=total,
+        page=max(1, page),
+        page_size=min(max(1, page_size), 100),
     )
 
 

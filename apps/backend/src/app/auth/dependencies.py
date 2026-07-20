@@ -116,12 +116,15 @@ async def require_tenant(
         try:
             payload = await asyncio.to_thread(_decode, bearer_token, settings)
             # Flatten common Clerk claim shapes.
-            if "o" in payload and isinstance(payload["o"], dict) and "org_id" not in payload:
-                payload = {
-                    **payload,
-                    "org_id": payload["o"].get("id"),
-                    "org_role": payload["o"].get("rol"),
-                }
+            org_from_o: str | None = None
+            org_role_from_o: str | None = None
+            if "o" in payload and isinstance(payload["o"], dict):
+                org_from_o = payload["o"].get("id") or payload["o"].get("org_id")
+                org_role_from_o = payload["o"].get("rol") or payload["o"].get("role")
+            if not payload.get("org_id") and org_from_o:
+                payload = {**payload, "org_id": org_from_o}
+            if not payload.get("org_role") and org_role_from_o:
+                payload = {**payload, "org_role": org_role_from_o}
             claims = ClerkClaims.model_validate(payload)
         except (jwt.PyJWTError, ValidationError, ValueError) as exc:
             raise HTTPException(status_code=401, detail="Invalid token") from exc
@@ -160,9 +163,15 @@ async def require_tenant(
                         status_code=404, detail="Selected tenant is inactive or missing"
                     )
         if home_tenant is None:
-            raise HTTPException(status_code=403, detail="Organization is not provisioned")
+            raise HTTPException(
+                status_code=403,
+                detail=f"Organization is not provisioned ({claims.org_id})",
+            )
         if tenant is None:
-            raise HTTPException(status_code=403, detail="Organization is not provisioned")
+            raise HTTPException(
+                status_code=403,
+                detail=f"Organization is not provisioned ({claims.org_id})",
+            )
         context = TenantContext(
             tenant.id,
             claims.sub,

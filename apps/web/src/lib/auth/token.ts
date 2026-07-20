@@ -1,11 +1,25 @@
 "use client";
 
+import { useAuth } from "@clerk/nextjs";
 import { useCallback } from "react";
 
 import {
   browserSelectedTenantId,
   packAccessContext,
 } from "@/lib/auth/access-context";
+
+function clerkConfigured(): boolean {
+  const key = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  return !!key && !key.includes("replace_me");
+}
+
+function devAuthEnabled(): boolean {
+  return (
+    process.env.NEXT_PUBLIC_DEV_AUTH === "true" ||
+    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace_me")
+  );
+}
 
 /**
  * Resolve a bearer token for AgentOS calls.
@@ -36,11 +50,7 @@ export async function getAccessToken(): Promise<string | null> {
   } catch {
     // Fall through to dev mode.
   }
-  if (
-    process.env.NEXT_PUBLIC_DEV_AUTH === "true" ||
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace_me")
-  ) {
+  if (devAuthEnabled()) {
     return packAccessContext("dev-token", browserSelectedTenantId());
   }
   return null;
@@ -60,20 +70,33 @@ export function devTenantHeaders(tenantId?: string): Record<string, string> {
 
 /**
  * Hook that resolves a fresh Clerk bearer token for AgentOS.
- * Safe to call without ClerkProvider (uses window.Clerk / dev token).
+ * Requires ClerkProvider when Clerk is configured (root layout).
  */
 export function useAgentOsToken() {
+  const { isLoaded, isSignedIn, getToken } = useAuth();
+  const bypass = !clerkConfigured() || process.env.NEXT_PUBLIC_DEV_AUTH === "true";
+
   const getAccessTokenCb = useCallback(async () => {
-    const token = await getAccessToken();
+    if (bypass) {
+      return packAccessContext("dev-token", browserSelectedTenantId());
+    }
+    if (!isLoaded) {
+      throw new Error("Sign in required");
+    }
+    if (!isSignedIn) {
+      throw new Error("Sign in required");
+    }
+    const token =
+      (await getToken({ template: "agentos" })) || (await getToken());
     if (!token) {
       throw new Error("Sign in required");
     }
-    return token;
-  }, []);
+    return packAccessContext(token, browserSelectedTenantId());
+  }, [bypass, getToken, isLoaded, isSignedIn]);
 
   return {
     getAccessToken: getAccessTokenCb,
-    isLoaded: true,
-    isSignedIn: true,
+    isLoaded: bypass ? true : isLoaded,
+    isSignedIn: bypass ? true : Boolean(isSignedIn),
   };
 }

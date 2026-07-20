@@ -12,6 +12,7 @@ import type {
   AvailableWorkflow,
   AdminSession,
   ApprovalRequest,
+  CatalogPage,
   KnowledgeBaseSummary,
   KnowledgeSearchResult,
   KnowledgeSource,
@@ -24,6 +25,8 @@ import type {
   TeamDraftInput,
   TeamSummary,
   TenantBranding,
+  TenantUser,
+  TenantUserInput,
   ToolBinding,
   ToolCapability,
   ToolDefinition,
@@ -348,6 +351,130 @@ export function listAgents(accessToken: string): Promise<AgentSummary[]> {
   );
 }
 
+export type CatalogListParams = {
+  q?: string;
+  status?: "all" | "published" | "draft";
+  page?: number;
+  pageSize?: number;
+};
+
+function catalogQuery(params: CatalogListParams = {}): string {
+  const search = new URLSearchParams();
+  if (params.q?.trim()) search.set("q", params.q.trim());
+  if (params.status && params.status !== "all") {
+    search.set("status", params.status);
+  }
+  search.set("page", String(params.page ?? 1));
+  search.set("page_size", String(params.pageSize ?? 25));
+  return search.toString();
+}
+
+export async function listAgentCatalog(
+  accessToken: string,
+  params: CatalogListParams = {},
+): Promise<CatalogPage<AgentSummary>> {
+  const row = await apiFetch<{
+    items: Array<{
+      id: string;
+      slug: string;
+      name: string;
+      status: "draft" | "published" | "archived";
+      model_id: string;
+      published_version: number | null;
+      updated_at: string;
+    }>;
+    total: number;
+    page: number;
+    page_size: number;
+  }>(`/admin/agents/catalog?${catalogQuery(params)}`, { accessToken });
+  return {
+    items: row.items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      slug: item.slug,
+      status: item.status,
+      model: frontendModel(item.model_id),
+      publishedVersion: item.published_version,
+      updatedAt: item.updated_at,
+    })),
+    total: row.total,
+    page: row.page,
+    pageSize: row.page_size,
+  };
+}
+
+export async function listTeamCatalog(
+  accessToken: string,
+  params: CatalogListParams = {},
+): Promise<CatalogPage<TeamSummary>> {
+  const row = await apiFetch<{
+    items: Array<{
+      id: string;
+      slug: string;
+      name: string;
+      status: "draft" | "published" | "archived";
+      mode: "route" | "coordinate";
+      member_count: number;
+      published_version: number | null;
+      updated_at: string;
+    }>;
+    total: number;
+    page: number;
+    page_size: number;
+  }>(`/admin/teams/catalog?${catalogQuery(params)}`, { accessToken });
+  return {
+    items: row.items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      slug: item.slug,
+      status: item.status,
+      mode: item.mode,
+      memberCount: item.member_count,
+      publishedVersion: item.published_version,
+      updatedAt: item.updated_at,
+    })),
+    total: row.total,
+    page: row.page,
+    pageSize: row.page_size,
+  };
+}
+
+export async function listWorkflowCatalog(
+  accessToken: string,
+  params: CatalogListParams = {},
+): Promise<CatalogPage<WorkflowSummary>> {
+  const row = await apiFetch<{
+    items: Array<{
+      id: string;
+      slug: string;
+      name: string;
+      status: "draft" | "published" | "archived";
+      mode: "sequential" | "parallel";
+      step_count: number;
+      published_version: number | null;
+      updated_at: string;
+    }>;
+    total: number;
+    page: number;
+    page_size: number;
+  }>(`/admin/workflows/catalog?${catalogQuery(params)}`, { accessToken });
+  return {
+    items: row.items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      slug: item.slug,
+      mode: item.mode,
+      status: item.status,
+      stepCount: item.step_count,
+      publishedVersion: item.published_version,
+      updatedAt: item.updated_at,
+    })),
+    total: row.total,
+    page: row.page,
+    pageSize: row.page_size,
+  };
+}
+
 export function getAgent(
   accessToken: string,
   agentId: string,
@@ -589,6 +716,95 @@ export async function listAvailableWorkflows(
 ): Promise<AvailableWorkflow[]> {
   return apiFetch<AvailableWorkflow[]>("/api/workflows/available", {
     accessToken,
+  });
+}
+
+interface BackendTenantUser {
+  id: string;
+  user_id: string;
+  display_name: string;
+  email: string | null;
+  role: "tenant_admin" | "end_user";
+  is_active: boolean;
+  workflow_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+function mapTenantUser(row: BackendTenantUser): TenantUser {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    displayName: row.display_name,
+    email: row.email,
+    role: row.role,
+    isActive: row.is_active,
+    workflowIds: row.workflow_ids,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listTenantUsers(
+  accessToken: string,
+): Promise<TenantUser[]> {
+  const rows = await apiFetch<BackendTenantUser[]>("/admin/users", {
+    accessToken,
+  });
+  return rows.map(mapTenantUser);
+}
+
+export async function createTenantUser(
+  accessToken: string,
+  input: TenantUserInput,
+): Promise<TenantUser> {
+  return mapTenantUser(
+    await apiFetch<BackendTenantUser>("/admin/users", {
+      accessToken,
+      method: "POST",
+      body: {
+        user_id: input.userId,
+        display_name: input.displayName,
+        email: input.email,
+        role: input.role,
+        is_active: input.isActive,
+        workflow_ids: input.workflowIds,
+      },
+    }),
+  );
+}
+
+export async function updateTenantUser(
+  accessToken: string,
+  membershipId: string,
+  input: Partial<TenantUserInput>,
+): Promise<TenantUser> {
+  return mapTenantUser(
+    await apiFetch<BackendTenantUser>(`/admin/users/${membershipId}`, {
+      accessToken,
+      method: "PATCH",
+      body: {
+        ...(input.displayName !== undefined
+          ? { display_name: input.displayName }
+          : {}),
+        ...(input.email !== undefined ? { email: input.email } : {}),
+        ...(input.role !== undefined ? { role: input.role } : {}),
+        ...(input.isActive !== undefined ? { is_active: input.isActive } : {}),
+        ...(input.workflowIds !== undefined
+          ? { workflow_ids: input.workflowIds }
+          : {}),
+      },
+    }),
+  );
+}
+
+export async function deleteTenantUser(
+  accessToken: string,
+  membershipId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/users/${membershipId}`, {
+    accessToken,
+    method: "DELETE",
   });
 }
 

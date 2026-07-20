@@ -18,9 +18,16 @@ const devAuthBypass = process.env.NEXT_PUBLIC_DEV_AUTH === "true";
 
 export default clerkConfigured && !devAuthBypass
   ? clerkMiddleware(async (auth, request) => {
-      if (!isPublicRoute(request)) {
-        await auth.protect();
+      if (isPublicRoute(request)) {
+        return NextResponse.next();
       }
+      const session = await auth();
+      if (!session.userId) {
+        // Prefer an explicit sign-in redirect over Clerk's protect rewrite,
+        // which can surface as a blank Next.js 404 in local browsers.
+        return session.redirectToSignIn({ returnBackUrl: request.url });
+      }
+      return NextResponse.next();
     })
   : function passthrough() {
       return NextResponse.next();

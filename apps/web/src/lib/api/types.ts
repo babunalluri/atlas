@@ -148,6 +148,13 @@ export interface AgentSummary {
   publishedVersion?: number | null;
 }
 
+export interface CatalogPage<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
@@ -365,6 +372,27 @@ export interface AvailableWorkflow {
 export interface WorkflowAssignments {
   workflowId: string;
   userIds: string[];
+}
+
+export interface TenantUser {
+  id: string;
+  userId: string;
+  displayName: string;
+  email: string | null;
+  role: "tenant_admin" | "end_user";
+  isActive: boolean;
+  workflowIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TenantUserInput {
+  userId: string;
+  displayName: string;
+  email?: string | null;
+  role: "tenant_admin" | "end_user";
+  isActive: boolean;
+  workflowIds: string[];
 }
 
 export const ALLOWED_MODELS: Array<{ id: ModelId; label: string }> = [
