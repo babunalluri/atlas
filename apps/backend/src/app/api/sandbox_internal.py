@@ -16,7 +16,9 @@ class ProxyBody(BaseModel):
     method: str = Field(min_length=1, max_length=10)
     url: str = Field(min_length=1, max_length=2048)
     headers: dict[str, str] = Field(default_factory=dict)
-    json: dict[str, Any] | None = None
+    json_body: dict[str, Any] | None = Field(default=None, alias="json")
+
+    model_config = {"populate_by_name": True}
 
 
 @router.post("/proxy/{run_id}")
@@ -30,7 +32,7 @@ async def sandbox_http_proxy(run_id: str, body: ProxyBody) -> dict[str, Any]:
             method=body.method,
             url=body.url,
             headers=body.headers,
-            json_body=body.json,
+            json_body=body.json_body,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

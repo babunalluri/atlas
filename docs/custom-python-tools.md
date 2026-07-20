@@ -41,3 +41,6 @@ These controls do not sandbox trusted repository code. A reviewed custom module
 could bypass the framework if it directly imported unrestricted networking or
 process APIs. Code review and CI security checks remain required for changes
 under `app/tools/custom/`.
+
+For tenant-authored editable source, use
+[`sandbox-python-tools.md`](./sandbox-python-tools.md) instead (`tenant_python`).

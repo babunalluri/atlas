@@ -10,6 +10,7 @@ SAFE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 ALLOWED_STDLIB = frozenset(
     {
+        "__future__",
         "asyncio",
         "collections",
         "dataclasses",

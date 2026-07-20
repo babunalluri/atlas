@@ -27,6 +27,7 @@ from app.db.repositories import (
     SessionRepository,
     TeamRepository,
     ToolDefinitionRepository,
+    ToolDefinitionVersionRepository,
     WorkflowRepository,
 )
 from app.knowledge.embeddings import EmbeddingService
@@ -138,6 +139,7 @@ class AgentFactoryService:
         self.repo = AgentRepository(session, context)
         self.credentials = CredentialRepository(session, context)
         self.tool_definitions = ToolDefinitionRepository(session, context)
+        self.tool_versions = ToolDefinitionVersionRepository(session, context)
         self.sessions = SessionRepository(session, context)
         self.knowledge = TenantKnowledgeStore(session, context)
         self.context = context
@@ -318,6 +320,19 @@ class AgentFactoryService:
                 if definition.kind in {"rest", "webhook"}
                 else definition.config
             )
+            if provider_key == "tenant_python":
+                if definition.published_version_id is None:
+                    raise ValueError("Editable Python tool has no published version")
+                published = await self.tool_versions.get(definition.published_version_id)
+                if published is None or published.status != "published":
+                    raise ValueError("Editable Python published version was not found")
+                config = {
+                    "source_code": published.source_code,
+                    "dependencies": published.dependencies,
+                    "capabilities": published.capabilities,
+                    "settings": published.settings,
+                    "version_status": "published",
+                }
             parsed = provider.validate_config(config)
             config = parsed.model_dump(mode="json", exclude_none=True)
             headers: dict[str, str] = {}
