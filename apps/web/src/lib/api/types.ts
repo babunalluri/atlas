@@ -80,7 +80,7 @@ export interface ToolDefinition {
   name: string;
   slug: string;
   description: string;
-  kind: "http" | "openapi" | "python_toolkit" | "custom_python" | "mcp";
+  kind: "http" | "openapi" | "python_toolkit" | "custom_python" | "tenant_python" | "mcp";
   httpMethod: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | null;
   baseUrl: string | null;
   path: string | null;
@@ -95,8 +95,33 @@ export interface ToolDefinition {
   connectionStatus: "unvalidated" | "connected" | "failed";
   lastValidatedAt: string | null;
   lastValidationError: string | null;
+  publishedVersionId?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SandboxPythonPackage {
+  id: string;
+  name: string;
+  version: string;
+  sha256: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TenantPythonTemplate {
+  key: string;
+  label: string;
+  source_code: string;
+  capabilities: Array<{
+    name: string;
+    description: string;
+    mutating: boolean;
+    input_schema: Record<string, unknown>;
+  }>;
+  settings: Record<string, unknown>;
+  dependencies: Array<{ name: string; version: string }>;
 }
 
 export interface ToolCapability {

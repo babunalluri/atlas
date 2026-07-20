@@ -271,6 +271,13 @@ const navGroups: Array<{
         hint: "Machine API access",
         icon: icons.access,
       },
+
+    {
+      href: "/admin/platform/sandbox-packages",
+      label: "Sandbox packages",
+      hint: "Allowlist pins for editable Python",
+      icon: icons.platform,
+    },
       {
         href: "/admin/mcp",
         label: "MCP server",

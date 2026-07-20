@@ -2,29 +2,49 @@
 
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ToolkitLogo } from "@/components/integrations/ToolkitLogo";
+import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select, Textarea } from "@/components/ui/Field";
+import { SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createToolDefinition,
   type CustomPythonCatalogEntry,
   deleteToolDefinition,
   enumerateToolCapabilities,
+  listSandboxPackages,
+  listTenantPythonTemplates,
   type CredentialSummary,
   type ToolkitCatalogEntry,
+  publishTenantPythonTool,
   testToolDefinition,
   updateToolDefinition,
+  validateTenantPythonSource,
+  validateToolDefinition,
 } from "@/lib/api/admin";
-import type { ToolCapability, ToolDefinition } from "@/lib/api/types";
+import type {
+  SandboxPythonPackage,
+  TenantPythonTemplate,
+  ToolCapability,
+  ToolDefinition,
+} from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { slugifyName } from "@/lib/validation/agent-form";
 
 const EMPTY_SCHEMA = { type: "object", properties: {} };
 
 type EditableTool = Omit<ToolDefinition, "id" | "createdAt" | "updatedAt">;
+
+type TenantCapability = {
+  name: string;
+  description: string;
+  mutating: boolean;
+  input_schema: Record<string, unknown>;
+};
 
 function customSettingsDefaults(
   entry: CustomPythonCatalogEntry | undefined,
@@ -34,6 +54,17 @@ function customSettingsDefaults(
       .filter(([, property]) => property.default !== undefined)
       .map(([name, property]) => [name, property.default]),
   );
+}
+
+function tenantPythonDefaults(template?: TenantPythonTemplate): Record<string, unknown> {
+  return {
+    source_code: template?.source_code ?? "",
+    dependencies: template?.dependencies ?? [],
+    capabilities: template?.capabilities ?? [],
+    settings: template?.settings ?? { base_url: "https://api.example.com/v1" },
+    template: template?.key ?? null,
+    version_status: "draft",
+  };
 }
 
 export function ToolEditor({
@@ -74,9 +105,13 @@ export function ToolEditor({
   const [schemaText, setSchemaText] = useState(
     JSON.stringify(form.requestSchema, null, 2),
   );
-  const [busy, setBusy] = useState<"save" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"save" | "delete" | "validate" | "publish" | null>(
+    null,
+  );
   const [banner, setBanner] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<ToolCapability[]>([]);
+  const [packages, setPackages] = useState<SandboxPythonPackage[]>([]);
+  const [templates, setTemplates] = useState<TenantPythonTemplate[]>([]);
   const visibleToolkits = toolkitCatalog.filter((item) => item.exposed);
   const selectedToolkit = visibleToolkits.find(
     (item) => item.key === String(form.config.toolkit ?? "calculator"),
@@ -87,6 +122,33 @@ export function ToolEditor({
   const toolkitCategories = Array.from(
     new Set(visibleToolkits.map((item) => item.category)),
   ).sort();
+  const tenantCapabilities = (form.config.capabilities as TenantCapability[] | undefined) ?? [];
+  const tenantDependencies =
+    (form.config.dependencies as Array<{ name: string; version: string }> | undefined) ??
+    [];
+  const versionStatus = String(form.config.version_status ?? "draft");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await getAccessToken();
+        const [packageRows, templateRows] = await Promise.all([
+          listSandboxPackages(token),
+          listTenantPythonTemplates(token),
+        ]);
+        if (!cancelled) {
+          setPackages(packageRows);
+          setTemplates(templateRows);
+        }
+      } catch {
+        // Catalog endpoints are optional for non-editable kinds.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getAccessToken]);
 
   function update<K extends keyof EditableTool>(key: K, value: EditableTool[K]) {
     setForm((previous) => ({ ...previous, [key]: value }));
@@ -120,7 +182,8 @@ export function ToolEditor({
     if (
       !form.name.trim() ||
       !form.slug ||
-      (form.kind === "http" && (!form.baseUrl || !form.httpMethod))
+      (form.kind === "http" && (!form.baseUrl || !form.httpMethod)) ||
+      (form.kind === "tenant_python" && !String(form.config.source_code ?? "").trim())
     ) {
       setBanner("Complete the required provider fields");
       return;
@@ -150,9 +213,11 @@ export function ToolEditor({
               }
             : form.config,
         approvalRequired:
-          form.kind !== "http" || form.httpMethod === "GET"
-            ? form.approvalRequired
-            : true,
+          form.kind === "tenant_python"
+            ? tenantCapabilities.some((item) => item.mutating) || form.approvalRequired
+            : form.kind !== "http" || form.httpMethod === "GET"
+              ? form.approvalRequired
+              : true,
       };
       const token = await getAccessToken();
       const saved = initial
@@ -177,11 +242,58 @@ export function ToolEditor({
         connectionStatus: saved.connectionStatus,
         lastValidatedAt: saved.lastValidatedAt,
         lastValidationError: saved.lastValidationError,
+        publishedVersionId: saved.publishedVersionId ?? null,
       });
       setBanner("Tool saved");
       if (!initial) router.replace(`/admin/tools/${saved.id}`);
     } catch (error) {
       setBanner(error instanceof Error ? error.message : "Save failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function validateSource() {
+    if (!initial) {
+      setBanner("Save the definition before validating.");
+      return;
+    }
+    setBusy("validate");
+    setBanner(null);
+    try {
+      const token = await getAccessToken();
+      const result =
+        form.kind === "tenant_python"
+          ? await validateTenantPythonSource(token, initial.id)
+          : await validateToolDefinition(token, form);
+      setCapabilities(result.capabilities);
+      if (form.kind === "tenant_python") {
+        updateConfig("version_status", "validated");
+      }
+      setBanner(result.message);
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : "Validation failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function publishSource() {
+    if (!initial || form.kind !== "tenant_python") return;
+    setBusy("publish");
+    setBanner(null);
+    try {
+      const token = await getAccessToken();
+      const saved = await publishTenantPythonTool(token, initial.id);
+      setForm((previous) => ({
+        ...previous,
+        config: saved.config,
+        approvalRequired: saved.approvalRequired,
+        publishedVersionId: saved.publishedVersionId ?? null,
+      }));
+      setBanner("Published — agents can now attach this tool");
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : "Publish failed");
     } finally {
       setBusy(null);
     }
@@ -225,30 +337,72 @@ export function ToolEditor({
           <p className="text-xs font-semibold uppercase tracking-[0.14em] text-teal">
             Tool builder
           </p>
-          <h1 className="font-display text-3xl font-semibold">
-            {form.name || "New reusable tool"}
-          </h1>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <BackLink href="/admin/tools" label="Back to tools" />
+            <h1 className="font-display text-3xl font-semibold">
+              {form.name || "New reusable tool"}
+            </h1>
+          </div>
           <div className="mt-2 flex gap-2">
             <Badge tone={form.active ? "success" : "neutral"}>
               {form.active ? "active" : "inactive"}
             </Badge>
             {(form.approvalRequired ||
-              (form.kind === "http" && form.httpMethod !== "GET")) && (
+              (form.kind === "http" && form.httpMethod !== "GET") ||
+              (form.kind === "tenant_python" &&
+                tenantCapabilities.some((item) => item.mutating))) && (
               <Badge tone="warning">requires approval</Badge>
             )}
             <Badge tone="info">{form.kind.replace("_", " ")}</Badge>
+            {form.kind === "tenant_python" ? (
+              <Badge tone={versionStatus === "published" ? "success" : "neutral"}>
+                {versionStatus}
+              </Badge>
+            ) : null}
           </div>
         </div>
-        <div className="flex gap-2">
+        <EditorActions>
           {initial ? (
-            <Button variant="secondary" onClick={remove} disabled={busy !== null}>
-              Delete
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={remove}
+              disabled={busy !== null}
+            >
+              <TrashIcon />
+              {busy === "delete" ? "Deleting…" : "Delete"}
             </Button>
           ) : null}
-          <Button variant="accent" onClick={save} disabled={busy !== null}>
+          {form.kind === "tenant_python" && initial ? (
+            <>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={validateSource}
+                disabled={busy !== null}
+              >
+                {busy === "validate" ? "Validating…" : "Validate"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={publishSource}
+                disabled={busy !== null}
+              >
+                {busy === "publish" ? "Publishing…" : "Publish"}
+              </Button>
+            </>
+          ) : null}
+          <Button
+            variant="accent"
+            size="sm"
+            onClick={save}
+            disabled={busy !== null}
+          >
+            <SaveIcon />
             {busy === "save" ? "Saving…" : "Save tool"}
           </Button>
-        </div>
+        </EditorActions>
       </div>
 
       {banner ? (
@@ -587,6 +741,208 @@ export function ToolEditor({
         </section>
       ) : null}
 
+      {form.kind === "tenant_python" ? (
+        <section className="surface-panel rounded-2xl p-5">
+          <h2 className="font-display text-lg font-semibold">Editable Python</h2>
+          <p className="mt-1 text-sm text-slate-muted">
+            Source runs only in an ephemeral isolated container. Outbound HTTPS is
+            proxied by the host through the allowlist. Arbitrary pip installs are
+            not allowed — pick packages from the platform allowlist.
+          </p>
+          <div className="mt-4 space-y-4">
+            <div className="flex flex-wrap gap-2">
+              {templates.map((template) => (
+                <Button
+                  key={template.key}
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    update("config", tenantPythonDefaults(template));
+                    setCapabilities(
+                      template.capabilities.map((capability) => ({
+                        name: capability.name,
+                        description: capability.description,
+                        approvalRequired: capability.mutating,
+                        inputSchema: capability.input_schema,
+                      })),
+                    );
+                  }}
+                >
+                  Use {template.label}
+                </Button>
+              ))}
+            </div>
+            <div>
+              <Label htmlFor="tenant-python-source">Source</Label>
+              <Textarea
+                id="tenant-python-source"
+                className="min-h-72 font-mono text-[13px]"
+                value={String(form.config.source_code ?? "")}
+                onChange={(event) => {
+                  updateConfig("source_code", event.target.value);
+                  updateConfig("version_status", "draft");
+                }}
+                placeholder={"async def list_items(ctx, limit: int = 10):\n    ..."}
+              />
+            </div>
+            <div>
+              <Label htmlFor="tenant-python-base-url">Settings base_url</Label>
+              <Input
+                id="tenant-python-base-url"
+                value={String(
+                  ((form.config.settings as Record<string, unknown> | undefined)
+                    ?.base_url as string | undefined) ?? "",
+                )}
+                onChange={(event) =>
+                  updateConfig("settings", {
+                    ...((form.config.settings as Record<string, unknown> | undefined) ??
+                      {}),
+                    base_url: event.target.value,
+                  })
+                }
+                placeholder="https://api.example.com/v1"
+              />
+            </div>
+            <div>
+              <Label>Allowlisted dependencies</Label>
+              <div className="mt-2 max-h-40 space-y-2 overflow-y-auto rounded-xl border border-line p-3">
+                {packages.length === 0 ? (
+                  <p className="text-xs text-slate-muted">
+                    No platform packages are available yet.
+                  </p>
+                ) : (
+                  packages.map((item) => {
+                    const selected = tenantDependencies.some(
+                      (dep) => dep.name === item.name && dep.version === item.version,
+                    );
+                    return (
+                      <label
+                        key={item.id}
+                        className="flex items-center justify-between gap-3 text-sm"
+                      >
+                        <span>
+                          {item.name}=={item.version}
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => {
+                            const next = event.target.checked
+                              ? [
+                                  ...tenantDependencies.filter(
+                                    (dep) => dep.name !== item.name,
+                                  ),
+                                  { name: item.name, version: item.version },
+                                ]
+                              : tenantDependencies.filter(
+                                  (dep) =>
+                                    !(
+                                      dep.name === item.name &&
+                                      dep.version === item.version
+                                    ),
+                                );
+                            updateConfig("dependencies", next);
+                          }}
+                        />
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+            <div>
+              <div className="flex items-center justify-between gap-3">
+                <Label>Capabilities</Label>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    updateConfig("capabilities", [
+                      ...tenantCapabilities,
+                      {
+                        name: "new_capability",
+                        description: "",
+                        mutating: false,
+                        input_schema: { type: "object", properties: {} },
+                      },
+                    ])
+                  }
+                >
+                  Add capability
+                </Button>
+              </div>
+              <ul className="mt-2 space-y-3">
+                {tenantCapabilities.map((capability, index) => (
+                  <li
+                    key={`${capability.name}-${index}`}
+                    className="rounded-xl border border-line p-3"
+                  >
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <Input
+                        value={capability.name}
+                        onChange={(event) => {
+                          const next = [...tenantCapabilities];
+                          next[index] = { ...capability, name: event.target.value };
+                          updateConfig("capabilities", next);
+                        }}
+                        placeholder="function_name"
+                      />
+                      <Input
+                        value={capability.description}
+                        onChange={(event) => {
+                          const next = [...tenantCapabilities];
+                          next[index] = {
+                            ...capability,
+                            description: event.target.value,
+                          };
+                          updateConfig("capabilities", next);
+                        }}
+                        placeholder="Description shown to the model"
+                      />
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={capability.mutating}
+                          onChange={(event) => {
+                            const next = [...tenantCapabilities];
+                            next[index] = {
+                              ...capability,
+                              mutating: event.target.checked,
+                            };
+                            updateConfig("capabilities", next);
+                            if (event.target.checked) {
+                              update("approvalRequired", true);
+                            }
+                          }}
+                        />
+                        Mutating (forces approval)
+                      </label>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() =>
+                          updateConfig(
+                            "capabilities",
+                            tenantCapabilities.filter((_, i) => i !== index),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
       {form.kind === "mcp" ? (
         <section className="surface-panel rounded-2xl border-amber-300 p-5">
           <h2 className="font-display text-lg font-semibold">Remote MCP server</h2>
@@ -620,7 +976,9 @@ export function ToolEditor({
         </section>
       ) : null}
 
-      {form.kind !== "http" && form.kind !== "custom_python" ? (
+      {form.kind !== "http" &&
+      form.kind !== "custom_python" &&
+      form.kind !== "tenant_python" ? (
         <section className="surface-panel rounded-2xl p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -725,15 +1083,16 @@ export function ToolEditor({
       <section className="surface-panel rounded-2xl p-5">
         <h2 className="font-display text-lg font-semibold">Provider</h2>
         <p className="mt-1 text-sm text-slate-muted">
-          Choose a constrained provider. Python modules, uploaded code, package
-          installs, and tenant-supplied MCP stdio commands are never accepted.
+          Choose a constrained provider. Editable Python runs in an isolated
+          sandbox; Custom Python remains source-controlled registry code only.
         </p>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {[
             ["http", "HTTP Request", "One reviewed request"],
             ["openapi", "OpenAPI", "Selected spec operations"],
             ["python_toolkit", "Python Toolkit", "Server allowlist only"],
             ["custom_python", "Custom Python", "Source-controlled registry"],
+            ["tenant_python", "Editable Python", "Sandboxed tenant source"],
             ["mcp", "MCP Server", "Remote HTTP transport"],
           ].map(([kind, label, description]) => (
             <button
@@ -756,6 +1115,8 @@ export function ToolEditor({
                             ) ?? [],
                           destructive_tools: [],
                         }
+                      : kind === "tenant_python"
+                        ? tenantPythonDefaults(templates[0])
                     : kind === "mcp"
                       ? {
                           transport: "streamable-http",
@@ -859,6 +1220,10 @@ export function ToolEditor({
                     : form.kind === "custom_python"
                       ? credential.provider ===
                         selectedCustomTool?.credential_provider
+                      : form.kind === "tenant_python" || form.kind === "http" ||
+                          form.kind === "openapi" ||
+                          form.kind === "mcp"
+                        ? credential.provider === "rest_api"
                     : credential.provider === "rest_api",
                 )
                 .map((credential) => (

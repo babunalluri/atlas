@@ -2126,3 +2126,123 @@ export async function listPlatformAudit(
     createdAt: row.created_at,
   }));
 }
+
+export async function listSandboxPackages(
+  accessToken: string,
+): Promise<import("./types").SandboxPythonPackage[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      name: string;
+      version: string;
+      sha256: string;
+      active: boolean;
+      created_at: string;
+      updated_at: string;
+    }>
+  >("/admin/tools/sandbox-packages", { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function listTenantPythonTemplates(
+  accessToken: string,
+): Promise<import("./types").TenantPythonTemplate[]> {
+  return apiFetch("/admin/tools/tenant-python/templates", { accessToken });
+}
+
+export async function listPlatformSandboxPackages(
+  accessToken: string,
+  activeOnly = false,
+): Promise<import("./types").SandboxPythonPackage[]> {
+  const query = activeOnly ? "?active_only=true" : "";
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      name: string;
+      version: string;
+      sha256: string;
+      active: boolean;
+      created_at: string;
+      updated_at: string;
+    }>
+  >(`/admin/platform/sandbox-packages${query}`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function createPlatformSandboxPackage(
+  accessToken: string,
+  input: { name: string; version: string; sha256: string; active?: boolean },
+): Promise<import("./types").SandboxPythonPackage> {
+  const row = await apiFetch<{
+    id: string;
+    name: string;
+    version: string;
+    sha256: string;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>("/admin/platform/sandbox-packages", {
+    accessToken,
+    method: "POST",
+    body: {
+      name: input.name,
+      version: input.version,
+      sha256: input.sha256,
+      active: input.active ?? true,
+    },
+  });
+  return {
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function updatePlatformSandboxPackage(
+  accessToken: string,
+  packageId: string,
+  input: { sha256?: string; active?: boolean },
+): Promise<import("./types").SandboxPythonPackage> {
+  const row = await apiFetch<{
+    id: string;
+    name: string;
+    version: string;
+    sha256: string;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>(`/admin/platform/sandbox-packages/${packageId}`, {
+    accessToken,
+    method: "PATCH",
+    body: input,
+  });
+  return {
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
