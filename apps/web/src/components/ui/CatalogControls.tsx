@@ -63,10 +63,10 @@ export function CatalogControls({
                 onChange({ ...query, status: option.value, page: 1 })
               }
               className={cn(
-                "rounded-md px-2.5 py-1.5 text-xs font-medium transition",
+                "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
                 query.status === option.value
-                  ? "bg-ink text-canvas"
-                  : "bg-raised text-slate-muted hover:bg-mist",
+                  ? "border-line-strong bg-mist text-ink"
+                  : "border-transparent bg-raised text-slate-muted hover:bg-mist",
               )}
             >
               {option.label}

@@ -1,15 +1,25 @@
 import { AgentList } from "@/components/agent-builder/AgentList";
-import { listAgents } from "@/lib/api/admin";
-import { MOCK_AGENTS } from "@/lib/api/mocks";
+import { listAgentCatalog } from "@/lib/api/admin";
+import type { CatalogPage, AgentSummary } from "@/lib/api/types";
 import { getServerAgentOsToken } from "@/lib/auth/server-token";
 
+const EMPTY: CatalogPage<AgentSummary> = {
+  items: [],
+  total: 0,
+  page: 1,
+  pageSize: 25,
+};
+
 export default async function AgentsPage() {
-  let agents = MOCK_AGENTS;
+  let initial = EMPTY;
   try {
-    agents = await listAgents(await getServerAgentOsToken());
+    initial = await listAgentCatalog(await getServerAgentOsToken(), {
+      page: 1,
+      pageSize: 25,
+    });
   } catch {
-    agents = MOCK_AGENTS;
+    initial = EMPTY;
   }
 
-  return <AgentList agents={agents} />;
+  return <AgentList initial={initial} />;
 }

@@ -8,7 +8,7 @@ import {
   UserButton,
 } from "@clerk/nextjs";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { BrandMark } from "@/components/layout/BrandMark";
@@ -17,6 +17,7 @@ import {
   PLATFORM_TENANT_NAME_COOKIE,
   tokenIsPlatformAdmin,
 } from "@/lib/auth/access-context";
+import { getOnboardingStatus } from "@/lib/api/admin";
 import { getAccessToken } from "@/lib/auth/token";
 import {
   readStoredTheme,
@@ -139,6 +140,14 @@ const icons = {
       <path d="M14 13h5" />
     </>,
   ),
+  publicApi: icon(
+    <>
+      <path d="M4 7h16" />
+      <path d="M4 12h10" />
+      <path d="M4 17h7" />
+      <path d="M16 14l4 3-4 3" />
+    </>,
+  ),
   mcp: icon(
     <>
       <rect x="3" y="4" width="18" height="7" rx="2" />
@@ -174,7 +183,7 @@ const navGroups: Array<{
       {
         href: "/admin/workflows",
         label: "Workflows",
-        hint: "Orchestrate teams and agents",
+        hint: "What users and APIs can run",
         icon: icons.workflows,
       },
       {
@@ -186,20 +195,14 @@ const navGroups: Array<{
       {
         href: "/admin/agents",
         label: "Agents",
-        hint: "Create and publish AI agents",
+        hint: "Specialists with prompts and tools",
         icon: icons.agents,
       },
       {
         href: "/admin/tools",
         label: "Tools",
-        hint: "HTTP, OpenAPI, toolkits, MCP",
+        hint: "API, Python, and MCP tools",
         icon: icons.tools,
-      },
-      {
-        href: "/admin/knowledge",
-        label: "Knowledge",
-        hint: "Upload docs for RAG",
-        icon: icons.knowledge,
       },
     ],
   },
@@ -207,28 +210,28 @@ const navGroups: Array<{
     label: "Monitor",
     items: [
       {
+        href: "/admin/approvals",
+        label: "Approvals",
+        hint: "Actions waiting on you",
+        icon: icons.approvals,
+      },
+      {
         href: "/admin/sessions",
         label: "Sessions",
         hint: "Conversation history",
         icon: icons.sessions,
       },
       {
-        href: "/admin/approvals",
-        label: "Approvals",
-        hint: "Pending human sign-offs",
-        icon: icons.approvals,
+        href: "/admin/traces",
+        label: "Traces",
+        hint: "Debug runs and tool calls",
+        icon: icons.traces,
       },
       {
         href: "/admin/schedules",
         label: "Schedules",
-        hint: "Cron-triggered runs",
+        hint: "Timed and recurring runs",
         icon: icons.schedules,
-      },
-      {
-        href: "/admin/traces",
-        label: "Traces",
-        hint: "Run and tool-call debugging",
-        icon: icons.traces,
       },
       {
         href: "/admin/metrics",
@@ -248,36 +251,41 @@ const navGroups: Array<{
     label: "Configure",
     items: [
       {
-        href: "/admin/users",
-        label: "Users",
-        hint: "CRUD users and assign workflows",
-        icon: icons.users,
+        href: "/admin/knowledge",
+        label: "Knowledge",
+        hint: "Documents agents can use",
+        icon: icons.knowledge,
       },
       {
-        href: "/admin/integrations",
-        label: "Integrations",
-        hint: "Configure Python toolkit requirements",
-        icon: icons.integrations,
+        href: "/admin/users",
+        label: "Users",
+        hint: "People and workflow access",
+        icon: icons.users,
       },
       {
         href: "/admin/credentials",
         label: "Credentials",
-        hint: "API keys (BYOK)",
+        hint: "API keys kept server-side",
         icon: icons.credentials,
+      },
+      {
+        href: "/admin/integrations",
+        label: "Integrations",
+        hint: "Python toolkit settings",
+        icon: icons.integrations,
+      },
+      {
+        href: "/admin/public-api",
+        label: "Public API",
+        hint: "Secret keys and try-it calls",
+        icon: icons.publicApi,
       },
       {
         href: "/admin/service-accounts",
         label: "Service accounts",
-        hint: "Machine API access",
+        hint: "Scoped machine tokens",
         icon: icons.access,
       },
-
-    {
-      href: "/admin/platform/sandbox-packages",
-      label: "Sandbox packages",
-      hint: "Allowlist pins for editable Python",
-      icon: icons.platform,
-    },
       {
         href: "/admin/mcp",
         label: "MCP server",
@@ -295,6 +303,12 @@ const platformGroup = {
       href: "/admin/platform/tenants",
       label: "Super admin",
       hint: "Manage and enter tenant workspaces",
+      icon: icons.platform,
+    },
+    {
+      href: "/admin/platform/sandbox-packages",
+      label: "Sandbox packages",
+      hint: "Allowlist pins for editable Python",
       icon: icons.platform,
     },
   ],
@@ -349,12 +363,14 @@ function NavLinks({
 
 export function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [theme, setTheme] = useState<AdminTheme>("light");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [selectedTenantName, setSelectedTenantName] = useState<string | null>(
     null,
   );
+  const onOnboardingRoute = pathname.startsWith("/admin/onboarding");
 
   useEffect(() => {
     setTheme(readStoredTheme());
@@ -371,6 +387,26 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
       );
     }
   }, []);
+
+  useEffect(() => {
+    if (onOnboardingRoute) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await getAccessToken();
+        if (!token || cancelled) return;
+        const status = await getOnboardingStatus(token);
+        if (!cancelled && !status.provisioned) {
+          router.replace("/admin/onboarding");
+        }
+      } catch {
+        // Ignore — individual pages still surface API errors.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [onOnboardingRoute, pathname, router]);
 
   useEffect(() => {
     setMobileNavOpen(false);

@@ -9,8 +9,10 @@ from app.api.schemas import (
     AgentCatalogPageOut,
     AgentConfigOut,
     AgentCreateIn,
+    AgentRestoreIn,
     AgentUpdateIn,
     AgentVersionOut,
+    AgentVersionSummaryOut,
     ToolBindingIn,
 )
 from app.auth.dependencies import require_roles, require_tenant
@@ -216,3 +218,82 @@ async def publish_agent(
     config = await repo.get_config(agent_id)
     assert config is not None
     return await _config_out(repo, config)
+
+
+@router.get("/{agent_id}/versions", response_model=list[AgentVersionSummaryOut])
+async def list_agent_versions(
+    agent_id: uuid.UUID,
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> list[AgentVersionSummaryOut]:
+    repo = AgentRepository(session, context)
+    config = await repo.get_config(agent_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return [
+        AgentVersionSummaryOut(
+            id=version.id,
+            version=version.version,
+            status=version.status.value,
+            model_id=version.model_id,
+            is_live=config.published_version_id == version.id,
+            created_at=version.created_at,
+        )
+        for version in await repo.list_versions(agent_id)
+    ]
+
+
+@router.get("/{agent_id}/versions/{version_id}", response_model=AgentVersionOut)
+async def get_agent_version(
+    agent_id: uuid.UUID,
+    version_id: uuid.UUID,
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> AgentVersionOut:
+    repo = AgentRepository(session, context)
+    config = await repo.get_config(agent_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    version = await repo.get_version(version_id, allow_draft=True)
+    if version is None or version.agent_config_id != agent_id:
+        raise HTTPException(status_code=404, detail="Agent version not found")
+    return _version_out(version)
+
+
+@router.post("/{agent_id}/versions/{version_id}/restore", response_model=AgentConfigOut)
+async def restore_agent_version(
+    agent_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: AgentRestoreIn,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> AgentConfigOut:
+    repo = AgentRepository(session, context)
+    try:
+        await repo.restore_version(agent_id, version_id, as_draft=body.as_draft)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    config = await repo.get_config(agent_id)
+    assert config is not None
+    return await _config_out(repo, config)
+
+
+@router.delete("/{agent_id}", status_code=204)
+async def delete_agent(
+    agent_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> None:
+    repo = AgentRepository(session, context)
+    try:
+        await repo.delete_config(agent_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

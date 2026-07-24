@@ -73,6 +73,69 @@ async def test_publish_pins_immutable_version(session, tenant_a):
 
 
 @pytest.mark.asyncio
+async def test_agent_list_versions_and_restore_published_pointer(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = AgentRepository(session, tenant_a)
+    config = await repo.create_config(slug="history-agent", name="History")
+    v1 = await repo.create_draft(
+        config_id=config.id,
+        instructions="first",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.1,
+    )
+    await repo.publish(v1.id)
+    v2 = await repo.create_draft(
+        config_id=config.id,
+        instructions="second",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+    )
+    await repo.publish(v2.id)
+
+    versions = list(await repo.list_versions(config.id))
+    assert [row.version for row in versions] == [2, 1]
+    assert (await repo.get_config(config.id)).published_version_id == v2.id
+
+    restored = await repo.restore_version(config.id, v1.id)
+    assert restored.id == v1.id
+    assert (await repo.get_config(config.id)).published_version_id == v1.id
+    still = await repo.get_version(v2.id, allow_draft=False)
+    assert still is not None and still.instructions == "second"
+
+
+@pytest.mark.asyncio
+async def test_agent_restore_as_draft_clones_tools(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = AgentRepository(session, tenant_a)
+    config = await repo.create_config(slug="clone-agent", name="Clone")
+    v1 = await repo.create_draft(
+        config_id=config.id,
+        instructions="with tool",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        tools=[{"tool_key": "web_search", "config": {"max_results": 3}}],
+    )
+    await repo.publish(v1.id)
+    v2 = await repo.create_draft(
+        config_id=config.id,
+        instructions="without tool",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        tools=[],
+    )
+    await repo.publish(v2.id)
+
+    draft = await repo.restore_version(config.id, v1.id, as_draft=True)
+    assert draft.status == AgentStatus.draft
+    assert draft.version == 3
+    assert draft.instructions == "with tool"
+    bindings = list(await repo.bindings(draft.id))
+    assert len(bindings) == 1
+    assert bindings[0].tool_key == "web_search"
+    assert (await repo.get_config(config.id)).published_version_id == v2.id
+
+
+@pytest.mark.asyncio
 async def test_end_user_cannot_resolve_approvals(session, tenant_a):
     session.info["tenant_id"] = tenant_a.tenant_id
     conv = ConversationSession(

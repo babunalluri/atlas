@@ -21,12 +21,10 @@ import {
   type RunEventBase,
 } from "@/lib/agentos/sse";
 import {
-  deleteChatSession,
-  getChatSession,
-  listChatSessions,
-  streamConfiguredAgent,
-  streamConfiguredTeam,
-  streamConfiguredWorkflow,
+  getOrCreateGuestId,
+  streamPublicAgent,
+  streamPublicTeam,
+  streamPublicWorkflow,
 } from "@/lib/agentos/client";
 import type {
   ChatMessage,
@@ -35,7 +33,6 @@ import type {
   PublicTeamSurface,
   PublicWorkflowSurface,
 } from "@/lib/api/types";
-import { useAgentOsToken } from "@/lib/auth/token";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -62,18 +59,45 @@ function sourceLabels(value: unknown): string[] {
 
 export function CustomerChat({
   surface,
+  embedded = false,
 }: {
   surface: PublicAgentSurface | PublicTeamSurface | PublicWorkflowSurface;
+  /** Compact layout for iframe embeds (no session sidebar). */
+  embedded?: boolean;
 }) {
+  const workflowTeams =
+    "workflow" in surface ? (surface.workflow.teams ?? []) : [];
+  const [runMode, setRunMode] = useState<"workflow" | "team">(
+    "workflow" in surface && workflowTeams.length > 0 ? "workflow" : "workflow",
+  );
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(
+    workflowTeams[0]?.id ?? null,
+  );
+  const selectedTeam =
+    workflowTeams.find((team) => team.id === selectedTeamId) ?? null;
+
   const target =
     "workflow" in surface
       ? surface.workflow
       : "team" in surface
         ? surface.team
         : surface.agent;
-  const targetType =
+  const baseTargetType =
     "workflow" in surface ? "workflow" : "team" in surface ? "team" : "agent";
-  const { getAccessToken, isSignedIn } = useAgentOsToken();
+  const activeTargetType =
+    baseTargetType === "workflow" && runMode === "team" && selectedTeam
+      ? "team"
+      : baseTargetType;
+  const activeTargetName =
+    activeTargetType === "team" && "workflow" in surface && selectedTeam
+      ? selectedTeam.name
+      : target.name;
+  const activeTargetSlug =
+    activeTargetType === "team" && "workflow" in surface && selectedTeam
+      ? selectedTeam.slug
+      : target.slug;
+
+  const guestId = useMemo(() => getOrCreateGuestId(), []);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -87,12 +111,15 @@ export function CustomerChat({
       {
         id: newId("welcome"),
         role: "assistant",
-        content: target.welcomeMessage,
+        content:
+          activeTargetType === "team" && selectedTeam
+            ? `You're chatting with ${selectedTeam.name} inside ${target.name}.`
+            : target.welcomeMessage,
         createdAt: new Date().toISOString(),
         status: "complete",
       },
     ],
-    [target.welcomeMessage],
+    [activeTargetType, selectedTeam, target.name, target.welcomeMessage],
   );
 
   const cssVars = useMemo(
@@ -104,81 +131,30 @@ export function CustomerChat({
     [surface.tenant.accentColor, surface.tenant.primaryColor],
   );
 
-  const loadSession = useCallback(
-    async (sessionId: string) => {
-      const token = await getAccessToken();
-      const detail = await getChatSession(token, sessionId);
-      setSessions((current) =>
-        current.map((item) =>
-          item.id === detail.session.id ? detail.session : item,
-        ),
-      );
-      setMessages(
-        detail.messages.length > 0 ? detail.messages : welcomeMessages(),
-      );
-      setPaused(detail.session.pausedForApproval);
-      return detail.session;
-    },
-    [getAccessToken, welcomeMessages],
-  );
-
   useEffect(() => {
-    if (!isSignedIn) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const rows = await listChatSessions(
-          await getAccessToken(),
-          targetType,
-          target.id,
-        );
-        if (cancelled) return;
-        setSessions(rows);
-        if (rows[0]) {
-          setActiveSessionId(rows[0].id);
-          await loadSession(rows[0].id);
-        } else {
-          setMessages(welcomeMessages());
-        }
-      } catch (reason) {
-        if (!cancelled) {
-          setError(
-            reason instanceof Error ? reason.message : "Could not load sessions",
-          );
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
+    const session: ConversationSession = {
+      id: crypto.randomUUID(),
+      title: "New conversation",
+      targetType: activeTargetType,
+      versionId: "",
+      updatedAt: new Date().toISOString(),
+      pausedForApproval: false,
+      status: "active",
     };
-  }, [
-    getAccessToken,
-    isSignedIn,
-    loadSession,
-    target.id,
-    targetType,
-    welcomeMessages,
-  ]);
-
-  useEffect(() => {
-    if (!paused || !activeSessionId || !isSignedIn) return;
-    const interval = window.setInterval(() => {
-      void loadSession(activeSessionId)
-        .then((session) => {
-          if (!session.pausedForApproval) {
-            window.clearInterval(interval);
-          }
-        })
-        .catch(() => undefined);
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [activeSessionId, isSignedIn, loadSession, paused]);
+    setSessions([session]);
+    setActiveSessionId(session.id);
+    setMessages(welcomeMessages());
+    setPaused(false);
+    setError(null);
+    // Reset only when the public target changes — not when welcome text identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional target switch
+  }, [activeTargetSlug, activeTargetType]);
 
   function createSession() {
     const session: ConversationSession = {
       id: crypto.randomUUID(),
       title: "New conversation",
-      targetType,
+      targetType: activeTargetType,
       versionId: "",
       updatedAt: new Date().toISOString(),
       pausedForApproval: false,
@@ -191,31 +167,25 @@ export function CustomerChat({
     setError(null);
   }
 
-  async function selectSession(sessionId: string) {
+  function selectSession(sessionId: string) {
     setActiveSessionId(sessionId);
     setError(null);
-    try {
-      await loadSession(sessionId);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load session");
-    }
+    setPaused(false);
+    // Guest sessions are local-only; history for prior turns is kept in-memory
+    // on the active message list. Switching resets to welcome for simplicity.
+    setMessages(welcomeMessages());
   }
 
-  async function removeSession(sessionId: string) {
-    try {
-      await deleteChatSession(await getAccessToken(), sessionId);
-      const remaining = sessions.filter((item) => item.id !== sessionId);
-      setSessions(remaining);
-      if (activeSessionId === sessionId) {
-        setActiveSessionId(remaining[0]?.id);
-        if (remaining[0]) {
-          await loadSession(remaining[0].id);
-        } else {
-          setMessages(welcomeMessages());
-        }
+  function removeSession(sessionId: string) {
+    const remaining = sessions.filter((item) => item.id !== sessionId);
+    setSessions(remaining);
+    if (activeSessionId === sessionId) {
+      if (remaining[0]) {
+        setActiveSessionId(remaining[0].id);
+        setMessages(welcomeMessages());
+      } else {
+        createSession();
       }
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not delete session");
     }
   }
 
@@ -247,7 +217,10 @@ export function CustomerChat({
         s.id === activeSessionId
           ? {
               ...s,
-              title: s.title === "Welcome" || s.title === "New conversation" ? text.slice(0, 42) : s.title,
+              title:
+                s.title === "Welcome" || s.title === "New conversation"
+                  ? text.slice(0, 42)
+                  : s.title,
               updatedAt: new Date().toISOString(),
               status: "running",
             }
@@ -260,15 +233,11 @@ export function CustomerChat({
     setStreaming(true);
 
     try {
-      if (!isSignedIn) {
-        throw new Error("Sign in required to chat with this agent");
-      }
-      const token = await getAccessToken();
       const runOptions = {
-        accessToken: token,
+        tenantSlug: surface.tenant.slug,
         message: text,
         sessionId: activeSessionId,
-        preview: false,
+        guestId,
         signal: controller.signal,
         onEvent: (event: RunEventBase) => {
           if (event.event === "RunContent") {
@@ -353,15 +322,21 @@ export function CustomerChat({
           }
         },
       };
-      if (targetType === "team") {
-        await streamConfiguredTeam({ ...runOptions, teamConfigId: target.id });
-      } else if (targetType === "workflow") {
-        await streamConfiguredWorkflow({
+      if (activeTargetType === "team") {
+        await streamPublicTeam({
           ...runOptions,
-          workflowConfigId: target.id,
+          teamSlug: activeTargetSlug,
+        });
+      } else if (activeTargetType === "workflow") {
+        await streamPublicWorkflow({
+          ...runOptions,
+          workflowSlug: activeTargetSlug,
         });
       } else {
-        await streamConfiguredAgent({ ...runOptions, agentConfigId: target.id });
+        await streamPublicAgent({
+          ...runOptions,
+          agentSlug: activeTargetSlug,
+        });
       }
     } catch (err) {
       if (controller.signal.aborted) {
@@ -390,10 +365,14 @@ export function CustomerChat({
     }
   }
 
+  const shellClass = embedded
+    ? "min-h-[100dvh] text-white"
+    : "min-h-screen text-white";
+
   return (
-    <div style={cssVars} data-theme="dark" className="min-h-screen text-white">
+    <div style={cssVars} data-theme="dark" className={shellClass}>
       <div
-        className="relative min-h-screen overflow-hidden"
+        className={`relative overflow-hidden ${embedded ? "min-h-[100dvh]" : "min-h-screen"}`}
         style={{
           background: `
             radial-gradient(1000px 500px at 15% 0%, color-mix(in oklab, var(--tenant-accent) 35%, transparent), transparent 55%),
@@ -402,32 +381,44 @@ export function CustomerChat({
         }}
       >
         <div className="pointer-events-none absolute inset-0 opacity-[0.18] grid-noise" />
-        <div className="relative mx-auto grid min-h-screen max-w-6xl gap-0 lg:grid-cols-[240px_minmax(0,1fr)]">
-          <aside className="border-b border-white/10 p-5 lg:border-b-0 lg:border-r">
-            <p className="font-display text-3xl font-semibold tracking-tight">
-              {surface.tenant.name}
-            </p>
-            {surface.tenant.tagline ? (
-              <p className="mt-2 text-sm text-white/65">{surface.tenant.tagline}</p>
-            ) : null}
-            <div className="mt-8">
-              <SessionPicker
-                sessions={sessions}
-                activeId={activeSessionId}
-                onSelect={(id) => void selectSession(id)}
-                onCreate={createSession}
-                onDelete={(id) => void removeSession(id)}
-              />
-            </div>
-          </aside>
+        <div
+          className={`relative mx-auto grid gap-0 ${
+            embedded
+              ? "min-h-[100dvh] max-w-none"
+              : "min-h-screen max-w-6xl lg:grid-cols-[240px_minmax(0,1fr)]"
+          }`}
+        >
+          {!embedded ? (
+            <aside className="border-b border-white/10 p-5 lg:border-b-0 lg:border-r">
+              <p className="font-display text-3xl font-semibold tracking-tight">
+                {surface.tenant.name}
+              </p>
+              {surface.tenant.tagline ? (
+                <p className="mt-2 text-sm text-white/65">
+                  {surface.tenant.tagline}
+                </p>
+              ) : null}
+              <div className="mt-8">
+                <SessionPicker
+                  sessions={sessions}
+                  activeId={activeSessionId}
+                  onSelect={(id) => selectSession(id)}
+                  onCreate={createSession}
+                  onDelete={(id) => removeSession(id)}
+                />
+              </div>
+            </aside>
+          ) : null}
 
-          <section className="flex min-h-[70vh] flex-col">
-            <header className="border-b border-white/10 px-5 py-5">
+          <section
+            className={`flex flex-col ${embedded ? "min-h-[100dvh]" : "min-h-[70vh]"}`}
+          >
+            <header className="border-b border-white/10 px-5 py-4">
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--tenant-accent)]">
-                  {target.slug}
+                  {embedded ? surface.tenant.name : target.slug}
                 </p>
-                {targetType === "workflow" ? (
+                {!embedded && baseTargetType === "workflow" ? (
                   <Link
                     href={`/t/${surface.tenant.slug}/chat`}
                     className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-white/70 transition hover:border-[var(--tenant-accent)]/60 hover:text-white"
@@ -436,12 +427,52 @@ export function CustomerChat({
                   </Link>
                 ) : null}
               </div>
-              <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
-                {target.name}
+              <h1
+                className={`mt-1 font-display font-semibold tracking-tight ${
+                  embedded ? "text-xl" : "text-3xl"
+                }`}
+              >
+                {activeTargetName}
               </h1>
-              <p className="mt-1 max-w-2xl text-sm text-white/65">
-                {target.description}
-              </p>
+              {!embedded ? (
+                <p className="mt-1 max-w-2xl text-sm text-white/65">
+                  {target.description}
+                </p>
+              ) : null}
+              {baseTargetType === "workflow" && workflowTeams.length > 0 ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRunMode("workflow");
+                    }}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                      runMode === "workflow"
+                        ? "border-[var(--tenant-accent)] bg-white/10 text-white"
+                        : "border-white/15 text-white/65 hover:border-white/30 hover:text-white"
+                    }`}
+                  >
+                    Full workflow
+                  </button>
+                  {workflowTeams.map((team) => (
+                    <button
+                      key={team.id}
+                      type="button"
+                      onClick={() => {
+                        setRunMode("team");
+                        setSelectedTeamId(team.id);
+                      }}
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                        runMode === "team" && selectedTeamId === team.id
+                          ? "border-[var(--tenant-accent)] bg-white/10 text-white"
+                          : "border-white/15 text-white/65 hover:border-white/30 hover:text-white"
+                      }`}
+                    >
+                      {team.stepName || team.name}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </header>
             <ApprovalBanner visible={paused} />
             <ChatMessageList messages={messages} dark />
@@ -454,7 +485,7 @@ export function CustomerChat({
               streaming={streaming}
               onSend={send}
               onCancel={() => abortRef.current?.abort()}
-              placeholder={`Message ${target.name}…`}
+              placeholder={`Message ${activeTargetName}…`}
             />
           </section>
         </div>

@@ -42,6 +42,19 @@ async def list_service_accounts(
     return [_serialize(row) for row in rows]
 
 
+@router.get("/{account_id}", response_model=ServiceAccountOut)
+async def get_service_account(
+    account_id: uuid.UUID,
+    context: Context,
+    session: TenantSession,
+) -> ServiceAccountOut:
+    _authorize(context, "service_accounts:read")
+    account = await ServiceAccountRepository(session, context).get(account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Service account not found")
+    return _serialize(account)
+
+
 @router.post("", response_model=ServiceAccountCreatedOut, status_code=status.HTTP_201_CREATED)
 async def create_service_account(
     payload: ServiceAccountCreateIn,

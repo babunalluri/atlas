@@ -11,9 +11,11 @@ from app.api.schemas import (
     WorkflowCatalogPageOut,
     WorkflowConfigOut,
     WorkflowCreateIn,
+    WorkflowRestoreIn,
     WorkflowStepOut,
     WorkflowUpdateIn,
     WorkflowVersionOut,
+    WorkflowVersionSummaryOut,
 )
 from app.auth.dependencies import require_roles, require_tenant
 from app.db.models import Role, WorkflowConfig, WorkflowVersion
@@ -305,3 +307,88 @@ async def publish_workflow(
     config = await repo.get_config(workflow_id)
     assert config is not None
     return await workflow_config_out(repo, config)
+
+
+@router.get("/{workflow_id}/versions", response_model=list[WorkflowVersionSummaryOut])
+async def list_workflow_versions(
+    workflow_id: uuid.UUID,
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> list[WorkflowVersionSummaryOut]:
+    repo = WorkflowRepository(session, context)
+    config = await repo.get_config(workflow_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    summaries: list[WorkflowVersionSummaryOut] = []
+    for version in await repo.list_versions(workflow_id):
+        steps = await repo.steps(version.id)
+        summaries.append(
+            WorkflowVersionSummaryOut(
+                id=version.id,
+                version=version.version,
+                status=version.status.value,
+                mode=version.mode,
+                step_count=len(steps),
+                is_live=config.published_version_id == version.id,
+                created_at=version.created_at,
+            )
+        )
+    return summaries
+
+
+@router.get("/{workflow_id}/versions/{version_id}", response_model=WorkflowVersionOut)
+async def get_workflow_version(
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> WorkflowVersionOut:
+    repo = WorkflowRepository(session, context)
+    config = await repo.get_config(workflow_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    version = await repo.get_version(version_id, allow_draft=True)
+    if version is None or version.workflow_config_id != workflow_id:
+        raise HTTPException(status_code=404, detail="Workflow version not found")
+    return await _version_out(repo, version)
+
+
+@router.post(
+    "/{workflow_id}/versions/{version_id}/restore", response_model=WorkflowConfigOut
+)
+async def restore_workflow_version(
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: WorkflowRestoreIn,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> WorkflowConfigOut:
+    repo = WorkflowRepository(session, context)
+    try:
+        await repo.restore_version(workflow_id, version_id, as_draft=body.as_draft)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    config = await repo.get_config(workflow_id)
+    assert config is not None
+    return await workflow_config_out(repo, config)
+
+
+@router.delete("/{workflow_id}", status_code=204)
+async def delete_workflow(
+    workflow_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> None:
+    repo = WorkflowRepository(session, context)
+    try:
+        await repo.delete_config(workflow_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

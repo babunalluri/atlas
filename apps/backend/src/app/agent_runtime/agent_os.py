@@ -41,8 +41,11 @@ from app.api import knowledge as knowledge_api
 from app.api import mcp as mcp_api
 from app.api import metrics as metrics_api
 from app.api import platform as platform_api
+from app.api import onboarding as onboarding_api
 from app.api import public as public_api
+from app.api import public_chat as public_chat_api
 from app.api import sandbox_internal as sandbox_internal_api
+from app.api import workspace as workspace_api
 from app.api import schedules as schedules_api
 from app.api import service_accounts as service_accounts_api
 from app.api import sessions as sessions_api
@@ -523,6 +526,9 @@ def create_app() -> FastAPI:
     base_app.include_router(tools_api.router)
     base_app.include_router(sandbox_internal_api.router)
     base_app.include_router(public_api.router)
+    base_app.include_router(public_chat_api.router)
+    base_app.include_router(onboarding_api.router)
+    base_app.include_router(workspace_api.router)
     base_app.include_router(schedules_api.router)
     base_app.include_router(sessions_api.router)
     base_app.include_router(service_accounts_api.router)
@@ -918,6 +924,166 @@ def create_app() -> FastAPI:
             if not stream:
                 logger.info("workflow_non_stream_requested", workflow_id=workflow_config_id)
             return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @base_app.post("/api/v1/public/runs")
+    async def run_public_workflow_team(
+        request: Request,
+        message: str = Form(...),
+        workflow_id: str = Form(...),
+        team_id: str = Form(...),
+        session_id: str | None = Form(None),
+        new_session: bool = Form(False),
+        stream: bool = Form(True),
+        authorization: str | None = Header(default=None),
+    ) -> StreamingResponse:
+        """Run a team that is a published step of a workflow, keyed by org secret.
+
+        Session handling:
+        - Omit ``session_id`` (or pass ``new_session=true``) to start a conversation;
+          the server mints an id and returns it via ``X-Session-Id`` plus a
+          ``SessionStarted`` SSE event.
+        - Pass a prior ``session_id`` to continue that conversation with the same
+          workflow/team pair.
+        """
+        context = getattr(request.state, "tenant", None)
+        if context is None:
+            context = await require_tenant(
+                request, authorization=authorization, settings=settings
+            )
+            set_tenant_context(context)
+
+        message = message.strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message must not be empty")
+
+        provided_session = (session_id or "").strip() or None
+        if new_session or provided_session is None:
+            external_session_id = str(uuid.uuid4())
+        else:
+            external_session_id = provided_session
+
+        async with SessionFactory() as session:
+            if session.bind and session.bind.dialect.name == "postgresql":
+                from sqlalchemy import text
+
+                await session.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(context.tenant_id)},
+                )
+            session.info["tenant_id"] = context.tenant_id
+            workflows = WorkflowRepository(session, context)
+            teams = TeamRepository(session, context)
+            session_repo = SessionRepository(session, context)
+            try:
+                workflow_uuid = uuid.UUID(workflow_id)
+                team_uuid = uuid.UUID(team_id)
+                team_version_id = await workflows.resolve_published_team_step(
+                    workflow_uuid, team_uuid
+                )
+                team_config = await teams.get_config(team_uuid)
+                if team_config is None or team_config.published_version_id is None:
+                    raise LookupError("Published team not found")
+
+                existing = await session_repo.get_by_external(external_session_id)
+                if new_session and existing is not None:
+                    external_session_id = str(uuid.uuid4())
+                    existing = await session_repo.get_by_external(external_session_id)
+
+                if existing is not None:
+                    if existing.user_id != context.user_id:
+                        raise PermissionError("Session belongs to another user")
+                    if existing.target_type != "team":
+                        raise ValueError("Session is pinned to another target")
+                    if existing.team_config_id != team_uuid:
+                        raise ValueError(
+                            "Session is pinned to another team; omit session_id "
+                            "or pass new_session=true to start a new conversation"
+                        )
+                    resolved_version_id = existing.team_version_id
+                    if resolved_version_id is None:
+                        raise ValueError("Session is missing a pinned team version")
+                    session_started_new = False
+                else:
+                    resolved_version_id = team_version_id
+                    session_started_new = True
+
+                team = await TeamFactoryService(AgentFactoryService(session, context)).create(
+                    TeamRuntimeRequest(
+                        version_id=resolved_version_id,
+                        session_id=external_session_id,
+                        preview=False,
+                    )
+                )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await session.commit()
+
+            durable_user_id = runtime_user_id(context)
+            durable_session_id = runtime_session_id(context, external_session_id)
+            team_metadata = dict(getattr(team, "_saas_metadata", {}) or {})
+            team_metadata["workflow_id"] = workflow_id
+            team_metadata["public_api"] = True
+            team_metadata["session_id"] = external_session_id
+            trace_id = await _start_runtime_trace(
+                context=context,
+                external_session_id=external_session_id,
+                target_id=uuid.UUID(str(team_metadata["team_id"])),
+                version_id=resolved_version_id,
+                name="Public API team run",
+                message=message,
+                metadata=team_metadata,
+            )
+
+            async def event_stream() -> AsyncIterator[bytes]:
+                started = {
+                    "event": "SessionStarted",
+                    "session_id": external_session_id,
+                    "workflow_id": workflow_id,
+                    "team_id": team_id,
+                    "new_session": session_started_new,
+                }
+                yield f"data: {json.dumps(started)}\n\n".encode()
+                try:
+                    async for item in _sse_from_agent(
+                        team,
+                        message,
+                        user_id=durable_user_id,
+                        session_id=durable_session_id,
+                        event_handler=lambda payload: _persist_runtime_event(
+                            payload,
+                            context=context,
+                            trace_id=trace_id,
+                            external_session_id=external_session_id,
+                            initial_title=message[:255],
+                        ),
+                    ):
+                        yield item
+                except Exception as exc:
+                    logger.exception("public_api_team_run_failed", error=str(exc))
+                    await _fail_runtime_trace(
+                        context, trace_id, "Public API team run failed"
+                    )
+                    yield b'data: {"event":"RunError","error":"Team run failed"}\n\n'
+
+            if not stream:
+                logger.info(
+                    "public_api_non_stream_requested",
+                    workflow_id=workflow_id,
+                    team_id=team_id,
+                )
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-Session-Id": external_session_id,
+                },
+            )
 
     agent_os = _try_build_agent_os(base_app)
     if agent_os is not None:

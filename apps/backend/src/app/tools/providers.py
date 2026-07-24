@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -666,6 +668,35 @@ class CustomPythonProvider(BaseProvider):
         return functions
 
 
+CC_PBX_BODY_TOKEN_KEYS = frozenset({"pbx_token_id", "ccpl_token_id", "ccpl_unique_token"})
+
+
+def merge_tenant_python_settings(
+    settings: Mapping[str, Any],
+    credential_value: str | None,
+) -> tuple[dict[str, Any], bool]:
+    """Merge credential JSON into sandbox settings.
+
+    Returns ``(merged_settings, use_bearer_auth)``. Body-token credentials
+    (``pbx_token_id``, ``ccpl_token_id``, ``ccpl_unique_token``) skip Bearer
+    injection because CC PBX APIs expect ``token_id`` in POST bodies.
+    """
+    merged = dict(settings)
+    use_bearer = True
+    if not credential_value:
+        return merged, use_bearer
+    try:
+        parsed = json.loads(credential_value)
+    except json.JSONDecodeError:
+        return merged, use_bearer
+    if not isinstance(parsed, dict):
+        return merged, use_bearer
+    merged.update(parsed)
+    if CC_PBX_BODY_TOKEN_KEYS & parsed.keys():
+        use_bearer = False
+    return merged, use_bearer
+
+
 class TenantPythonProvider(BaseProvider):
     key = "tenant_python"
     label = "Editable Python"
@@ -721,8 +752,15 @@ class TenantPythonProvider(BaseProvider):
             concurrency_limit=settings.sandbox_tenant_concurrency,
             image=settings.sandbox_python_image,
         )
+        merged_settings, use_bearer = merge_tenant_python_settings(
+            parsed.settings, context.credential_value
+        )
         proxy_headers = dict(context.headers)
-        if context.credential_value and "Authorization" not in proxy_headers:
+        if (
+            use_bearer
+            and context.credential_value
+            and "Authorization" not in proxy_headers
+        ):
             proxy_headers["Authorization"] = f"Bearer {context.credential_value}"
 
         return [
@@ -734,6 +772,7 @@ class TenantPythonProvider(BaseProvider):
                 headers=proxy_headers,
                 force_approval=context.approval_required,
                 wall_seconds=settings.sandbox_wall_seconds,
+                runtime_settings=merged_settings,
             )
             for capability in parsed.capabilities
         ]
@@ -748,14 +787,19 @@ class TenantPythonProvider(BaseProvider):
         headers: dict[str, str],
         force_approval: bool,
         wall_seconds: int,
+        runtime_settings: dict[str, Any] | None = None,
     ) -> Any:
         from app.tools.sandbox.orchestrator import SandboxRunRequest
+
+        sandbox_settings = runtime_settings if runtime_settings is not None else dict(
+            parsed.settings
+        )
 
         async def _runner(**kwargs: Any) -> Any:
             result = await orchestrator.run(
                 SandboxRunRequest(
                     source_code=parsed.source_code,
-                    settings=dict(parsed.settings),
+                    settings=sandbox_settings,
                     capability=capability.name,
                     arguments=dict(kwargs),
                     headers=headers,

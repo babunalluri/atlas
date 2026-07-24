@@ -1,9 +1,11 @@
-import { IngestionPanel } from "@/components/agent-builder/IngestionPanel";
+import { KnowledgeList } from "@/components/knowledge/KnowledgeList";
 import {
   listIngestionStatuses,
   listKnowledgeBases,
 } from "@/lib/api/admin";
 import { getServerAgentOsToken } from "@/lib/auth/server-token";
+
+export const dynamic = "force-dynamic";
 
 export default async function KnowledgePage() {
   const token = await getServerAgentOsToken();
@@ -11,5 +13,5 @@ export default async function KnowledgePage() {
     listIngestionStatuses(token),
     listKnowledgeBases(token),
   ]);
-  return <IngestionPanel sources={sources} initialBases={bases} />;
+  return <KnowledgeList bases={bases} sources={sources} />;
 }

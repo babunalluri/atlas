@@ -266,7 +266,6 @@ class PlatformPythonPackageOut(BaseModel):
     updated_at: datetime
 
 
-
 class ToolProviderCatalogOut(BaseModel):
     key: str
     label: str
@@ -319,6 +318,25 @@ class AgentVersionOut(BaseModel):
     temperature: float
     memory_mode: str
     created_at: datetime
+
+
+class AgentVersionSummaryOut(BaseModel):
+    id: uuid.UUID
+    version: int
+    status: str
+    model_id: str
+    is_live: bool
+    created_at: datetime
+
+
+class AgentRestoreIn(BaseModel):
+    """Restore a historical agent version.
+
+    ``as_draft=False`` (default) points live traffic at the selected snapshot.
+    ``as_draft=True`` clones the snapshot into a new editable draft.
+    """
+
+    as_draft: bool = False
 
 
 class AgentConfigOut(BaseModel):
@@ -377,6 +395,26 @@ class TeamVersionOut(BaseModel):
     created_at: datetime
 
 
+class TeamVersionSummaryOut(BaseModel):
+    id: uuid.UUID
+    version: int
+    status: str
+    mode: str
+    member_count: int
+    is_live: bool
+    created_at: datetime
+
+
+class TeamRestoreIn(BaseModel):
+    """Restore a historical team version.
+
+    ``as_draft=False`` (default) points live traffic at the selected snapshot.
+    ``as_draft=True`` clones the snapshot into a new editable draft.
+    """
+
+    as_draft: bool = False
+
+
 class TeamConfigOut(BaseModel):
     id: uuid.UUID
     slug: str
@@ -431,6 +469,26 @@ class WorkflowVersionOut(BaseModel):
     mode: str
     steps: list[WorkflowStepOut] = Field(default_factory=list)
     created_at: datetime
+
+
+class WorkflowVersionSummaryOut(BaseModel):
+    id: uuid.UUID
+    version: int
+    status: str
+    mode: str
+    step_count: int
+    is_live: bool
+    created_at: datetime
+
+
+class WorkflowRestoreIn(BaseModel):
+    """Restore a historical workflow version.
+
+    ``as_draft=False`` (default) points live traffic at the selected snapshot.
+    ``as_draft=True`` clones the snapshot into a new editable draft.
+    """
+
+    as_draft: bool = False
 
 
 class WorkflowConfigOut(BaseModel):
@@ -526,6 +584,11 @@ class TenantUserOut(BaseModel):
 class KnowledgeBaseIn(BaseModel):
     name: str
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeBaseUpdateIn(BaseModel):
+    name: str | None = None
+    config: dict[str, Any] | None = None
 
 
 class KnowledgeBaseOut(BaseModel):

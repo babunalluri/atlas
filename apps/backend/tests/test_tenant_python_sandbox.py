@@ -47,8 +47,31 @@ def test_ast_rejects_dangerous_imports_and_builtins():
 
 def test_ast_accepts_starter_and_discovers_capabilities():
     names = validate_tenant_python_source(CC_PBX_STARTER_SOURCE)
-    assert "list_campaigns" in names
-    assert "create_campaign" in names
+    assert "create_tenant" in names
+    assert "get_call_log" in names
+    assert "list_campaigns" not in names
+    assert len(names) == 11
+
+
+def test_merge_tenant_python_credential_json_into_settings():
+    from app.tools.providers import merge_tenant_python_settings
+
+    merged, use_bearer = merge_tenant_python_settings(
+        {"base_url": "https://dev2.cloud-connect.in", "timeout": 60},
+        '{"pbx_token_id":"pbx-secret","ccpl_token_id":"ccpl-secret","ccpl_unique_token":"tenant-unique"}',
+    )
+    assert merged["pbx_token_id"] == "pbx-secret"
+    assert merged["ccpl_token_id"] == "ccpl-secret"
+    assert merged["ccpl_unique_token"] == "tenant-unique"
+    assert merged["base_url"] == "https://dev2.cloud-connect.in"
+    assert use_bearer is False
+
+    plain, use_bearer_plain = merge_tenant_python_settings(
+        {"base_url": "https://api.example.com"},
+        "plain-bearer-token",
+    )
+    assert plain == {"base_url": "https://api.example.com"}
+    assert use_bearer_plain is True
 
 
 def test_dependencies_must_be_allowlisted():

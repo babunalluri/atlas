@@ -1,27 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { Button, buttonClassName } from "@/components/ui/Button";
 import {
   CatalogControls,
   DEFAULT_CATALOG_QUERY,
   type CatalogQuery,
 } from "@/components/ui/CatalogControls";
-import { Input, Label } from "@/components/ui/Field";
-import { createAgent, getAgent, listAgentCatalog } from "@/lib/api/admin";
-import type {
-  AgentConfig,
-  AgentSummary,
-  CatalogPage,
-  ToolBinding,
-} from "@/lib/api/types";
+import { TrashIcon } from "@/components/ui/icons";
+import { deleteAgent, listAgentCatalog } from "@/lib/api/admin";
+import type { AgentSummary, CatalogPage } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
-import { slugifyName } from "@/lib/validation/agent-form";
-import { cn, formatRelative } from "@/lib/utils";
+import { formatRelative } from "@/lib/utils";
 
 function statusTone(status: AgentSummary["status"]) {
   if (status === "published") return "success" as const;
@@ -29,50 +22,26 @@ function statusTone(status: AgentSummary["status"]) {
   return "warning" as const;
 }
 
-function ToolRow({ tool }: { tool: ToolBinding }) {
-  return (
-    <li className="rounded-lg border border-line/70 bg-raised/80 px-3 py-2.5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-ink">{tool.label}</p>
-          <p className="mono-cell truncate text-slate-muted">{tool.kind}</p>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1">
-          <Badge tone={tool.enabled ? "success" : "neutral"} dot>
-            {tool.enabled ? "On" : "Off"}
-          </Badge>
-          {tool.requiresApproval ? (
-            <Badge tone="warning">Approval</Badge>
-          ) : null}
-        </div>
-      </div>
-    </li>
-  );
-}
-
 export function AgentList({
   initial,
 }: {
   initial: CatalogPage<AgentSummary>;
 }) {
-  const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(
-    initial.items[0]?.id ?? null,
-  );
-  const [detail, setDetail] = useState<AgentConfig | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const skipInitialFetch = useRef(true);
 
   useEffect(() => {
+    if (skipInitialFetch.current) {
+      skipInitialFetch.current = false;
+      return;
+    }
+    let cancelled = false;
     const handle = window.setTimeout(() => {
-      let cancelled = false;
       setLoading(true);
       void (async () => {
         try {
@@ -84,9 +53,7 @@ export function AgentList({
           });
           if (cancelled) return;
           setPageData(next);
-          if (!next.items.some((item) => item.id === selectedId)) {
-            setSelectedId(next.items[0]?.id ?? null);
-          }
+          setError(null);
         } catch (reason) {
           if (!cancelled) {
             setError(
@@ -97,249 +64,125 @@ export function AgentList({
           if (!cancelled) setLoading(false);
         }
       })();
-      return () => {
-        cancelled = true;
-      };
     }, 250);
-    return () => window.clearTimeout(handle);
-  }, [getAccessToken, query, selectedId]);
-
-  useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setDetailLoading(true);
-    setDetailError(null);
-    void (async () => {
-      try {
-        const next = await getAgent(await getAccessToken(), selectedId);
-        if (!cancelled) setDetail(next);
-      } catch (reason) {
-        if (!cancelled) {
-          setDetail(null);
-          setDetailError(
-            reason instanceof Error ? reason.message : "Failed to load agent",
-          );
-        }
-      } finally {
-        if (!cancelled) setDetailLoading(false);
-      }
-    })();
     return () => {
       cancelled = true;
+      window.clearTimeout(handle);
     };
-  }, [getAccessToken, selectedId]);
+  }, [getAccessToken, query]);
 
-  async function onCreate() {
-    setBusy(true);
+  async function onDelete(agent: AgentSummary) {
+    if (
+      !window.confirm(
+        `Delete “${agent.name}”? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(agent.id);
     setError(null);
     try {
-      const token = await getAccessToken();
-      const slug = slugifyName(name || "untitled-agent");
-      const created = await createAgent(token, {
-        name: name.trim() || "Untitled agent",
-        slug,
-      });
-      router.push(`/admin/agents/${created.id}`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create agent");
+      await deleteAgent(await getAccessToken(), agent.id);
+      setPageData((prev) => ({
+        ...prev,
+        items: prev.items.filter((item) => item.id !== agent.id),
+        total: Math.max(0, prev.total - 1),
+      }));
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Failed to delete agent",
+      );
     } finally {
-      setBusy(false);
+      setDeletingId(null);
     }
   }
 
-  const agents = pageData.items;
-  const selectedSummary = agents.find((agent) => agent.id === selectedId);
-
   return (
-    <div className="space-y-8">
-      <section className="surface-panel relative overflow-hidden rounded-2xl p-6 md:p-8">
-        <div className="pointer-events-none absolute inset-0 grid-noise opacity-60" />
-        <div className="relative grid gap-6 md:grid-cols-[1.4fr_1fr] md:items-end">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-              Tenant fleet
-            </p>
-            <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight text-ink md:text-5xl">
-              Configure agents your customers will recognize.
-            </h1>
-            <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-muted">
-              Search and page through large agent catalogs, then open one to
-              inspect tools and publish versions.
-            </p>
-          </div>
-          <div className="rounded-xl border border-line bg-raised/90 p-4">
-            <Label htmlFor="new-agent">New agent</Label>
-            <div className="flex gap-2">
-              <Input
-                id="new-agent"
-                placeholder="e.g. Claims navigator"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-              <Button onClick={onCreate} disabled={busy} variant="accent">
-                {busy ? "Creating…" : "Create"}
-              </Button>
-            </div>
-            {error ? <p className="mt-2 text-xs text-rose">{error}</p> : null}
-          </div>
+    <div className="space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            Agents
+          </h1>
+          <p className="mt-0.5 text-sm text-slate-muted">
+            Build one specialist, add tools, then publish.
+          </p>
         </div>
-      </section>
+        <Link
+          href="/admin/agents/new"
+          className={buttonClassName({ variant: "accent" })}
+        >
+          Create
+        </Link>
+      </header>
+      {error ? <p className="text-sm text-rose">{error}</p> : null}
 
-      <section className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.85fr)]">
-        <div className="table-shell rounded-xl">
-          <CatalogControls
-            query={query}
-            total={pageData.total}
-            noun="agents"
-            loading={loading}
-            onChange={setQuery}
-          />
-          <div className="grid grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] gap-3 border-b border-line px-4 py-2.5">
-            <span className="th-label">Agent</span>
+      <section className="table-shell rounded-xl">
+        <CatalogControls
+          query={query}
+          total={pageData.total}
+          noun="agents"
+          loading={loading}
+          onChange={setQuery}
+        />
+        <div className="flex items-center gap-3 border-b border-line px-4 py-2">
+          <div className="grid min-w-0 flex-1 grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] gap-3">
+            <span className="th-label">Name</span>
             <span className="th-label">Model</span>
             <span className="th-label">Status</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <ul>
-            {agents.map((agent) => {
-              const active = agent.id === selectedId;
-              return (
-                <li key={agent.id} className="border-b border-line/60 last:border-0">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedId(agent.id)}
-                    className={cn(
-                      "grid w-full grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] items-center gap-3 px-4 py-2.5 text-left transition",
-                      active ? "bg-ink text-canvas" : "hover:bg-mist/70",
-                    )}
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{agent.name}</p>
-                      <p
-                        className={cn(
-                          "mono-cell truncate",
-                          active ? "text-canvas/70" : "text-slate-muted",
-                        )}
-                      >
-                        /{agent.slug}
-                      </p>
-                    </div>
-                    <p
-                      className={cn(
-                        "mono-cell",
-                        active ? "text-canvas/80" : "text-ink-soft",
-                      )}
-                    >
-                      {agent.model}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <Badge
-                        dot
-                        tone={statusTone(agent.status)}
-                        className={active ? "bg-canvas/15 text-canvas" : undefined}
-                      >
-                        {agent.status}
-                      </Badge>
-                      {agent.publishedVersion ? (
-                        <span
-                          className={cn(
-                            "mono-cell",
-                            active ? "text-canvas/70" : "text-slate-muted",
-                          )}
-                        >
-                          v{agent.publishedVersion}
-                        </span>
-                      ) : null}
-                    </div>
-                    <p
-                      className={cn(
-                        "mono-cell text-right",
-                        active ? "text-canvas/70" : "text-slate-muted",
-                      )}
-                    >
-                      {formatRelative(agent.updatedAt)}
-                    </p>
-                  </button>
-                </li>
-              );
-            })}
-            {agents.length === 0 ? (
-              <li className="px-4 py-10 text-center text-sm text-slate-muted">
-                No agents match this search.
-              </li>
-            ) : null}
-          </ul>
+          <span className="th-label w-9 shrink-0 text-right"> </span>
         </div>
-
-        <aside className="table-shell flex min-h-[320px] flex-col rounded-xl">
-          {selectedSummary ? (
-            <>
-              <div className="border-b border-line px-4 py-3">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-muted">
-                  Selected agent
-                </p>
-                <div className="mt-1 flex items-start justify-between gap-3">
+        <ul>
+          {pageData.items.map((agent) => (
+            <li key={agent.id} className="border-b border-line/60 last:border-0">
+              <div className="flex items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70">
+                <Link
+                  href={`/admin/agents/${agent.id}`}
+                  className="grid min-w-0 flex-1 grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] items-center gap-3"
+                >
                   <div className="min-w-0">
-                    <h2 className="truncate font-display text-xl font-semibold">
-                      {selectedSummary.name}
-                    </h2>
+                    <p className="truncate text-sm font-medium">{agent.name}</p>
                     <p className="mono-cell truncate text-slate-muted">
-                      /{selectedSummary.slug}
+                      /{agent.slug}
                     </p>
                   </div>
-                  <Link
-                    href={`/admin/agents/${selectedSummary.id}`}
-                    className="shrink-0 rounded-md border border-line bg-raised px-2.5 py-1 text-xs font-medium text-ink hover:bg-mist"
-                  >
-                    Open editor
-                  </Link>
-                </div>
-              </div>
-              <div className="flex-1 space-y-3 px-4 py-4">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-ink">Tools</h3>
-                  {detail && !detailLoading ? (
-                    <span className="mono-cell text-slate-muted">
-                      {detail.tools.length} attached
-                    </span>
-                  ) : null}
-                </div>
-                {detailLoading ? (
-                  <p className="text-sm text-slate-muted">Loading tools…</p>
-                ) : detailError ? (
-                  <p className="text-sm text-rose">{detailError}</p>
-                ) : detail && detail.tools.length > 0 ? (
-                  <ul className="space-y-2">
-                    {detail.tools.map((tool) => (
-                      <ToolRow key={tool.id} tool={tool} />
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="rounded-lg border border-dashed border-line px-3 py-6 text-center text-sm text-slate-muted">
-                    No tools attached yet. Open the editor to bind tools.
+                  <p className="mono-cell text-ink-soft">{agent.model}</p>
+                  <div className="flex items-center gap-2">
+                    <Badge dot tone={statusTone(agent.status)}>
+                      {agent.status}
+                    </Badge>
+                    {agent.publishedVersion ? (
+                      <span className="mono-cell text-slate-muted">
+                        v{agent.publishedVersion}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mono-cell text-right text-slate-muted">
+                    {formatRelative(agent.updatedAt)}
                   </p>
-                )}
-                {detail?.knowledgeBase ? (
-                  <div className="rounded-lg border border-line/70 bg-raised/80 px-3 py-2.5">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-muted">
-                      Knowledge
-                    </p>
-                    <p className="mt-1 text-sm font-medium text-ink">
-                      {detail.knowledgeBase.name}
-                    </p>
-                  </div>
-                ) : null}
+                </Link>
+                <div className="flex w-9 shrink-0 items-center justify-end">
+                  <Button
+                    size="icon"
+                    variant="danger"
+                    aria-label={`Delete ${agent.name}`}
+                    disabled={deletingId === agent.id}
+                    onClick={() => void onDelete(agent)}
+                  >
+                    {deletingId === agent.id ? "…" : <TrashIcon />}
+                  </Button>
+                </div>
               </div>
-            </>
-          ) : (
-            <div className="flex flex-1 items-center justify-center px-4 py-10 text-center text-sm text-slate-muted">
-              Select an agent to inspect its tools.
-            </div>
-          )}
-        </aside>
+            </li>
+          ))}
+          {pageData.items.length === 0 ? (
+            <li className="px-4 py-10 text-center text-sm text-slate-muted">
+              No agents yet — create one above.
+            </li>
+          ) : null}
+        </ul>
       </section>
     </div>
   );

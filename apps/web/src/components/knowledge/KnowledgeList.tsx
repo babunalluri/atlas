@@ -1,0 +1,228 @@
+"use client";
+
+import Link from "next/link";
+import { useMemo, useState } from "react";
+
+import { Badge } from "@/components/ui/Badge";
+import { Button, buttonClassName } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Field";
+import type { KnowledgeSource } from "@/lib/api/types";
+import { cn, formatRelative } from "@/lib/utils";
+
+type StatusFilter = "all" | "ready" | "processing" | "failed";
+
+type KnowledgeBaseRow = {
+  id: string;
+  name: string;
+  sourceCount: number;
+  readyCount: number;
+  latestUpdatedAt: string | null;
+};
+
+const PAGE_SIZE = 25;
+
+export function KnowledgeList({
+  bases,
+  sources,
+}: {
+  bases: Array<{ id: string; name: string }>;
+  sources: KnowledgeSource[];
+}) {
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [page, setPage] = useState(1);
+
+  const rows = useMemo<KnowledgeBaseRow[]>(() => {
+    return bases.map((base) => {
+      const baseSources = sources.filter(
+        (source) => source.knowledgeBaseId === base.id,
+      );
+      const latest = baseSources.reduce<string | null>((current, source) => {
+        if (!current) return source.updatedAt;
+        return source.updatedAt > current ? source.updatedAt : current;
+      }, null);
+      return {
+        id: base.id,
+        name: base.name,
+        sourceCount: baseSources.length,
+        readyCount: baseSources.filter((source) => source.status === "ready")
+          .length,
+        latestUpdatedAt: latest,
+      };
+    });
+  }, [bases, sources]);
+
+  const filtered = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return rows.filter((row) => {
+      if (status === "ready" && row.readyCount === 0) return false;
+      if (
+        status === "processing" &&
+        !sources.some(
+          (source) =>
+            source.knowledgeBaseId === row.id &&
+            (source.status === "processing" || source.status === "uploading"),
+        )
+      ) {
+        return false;
+      }
+      if (
+        status === "failed" &&
+        !sources.some(
+          (source) =>
+            source.knowledgeBaseId === row.id && source.status === "failed",
+        )
+      ) {
+        return false;
+      }
+      if (!query) return true;
+      return row.name.toLowerCase().includes(query) || row.id.toLowerCase().includes(query);
+    });
+  }, [q, rows, sources, status]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + PAGE_SIZE);
+  const end = Math.min(filtered.length, start + PAGE_SIZE);
+
+  return (
+    <div className="space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            Knowledge
+          </h1>
+          <p className="mt-0.5 text-sm text-slate-muted">
+            Document bases agents can search. Upload, then attach on an agent.
+          </p>
+        </div>
+        <Link
+          href="/admin/knowledge/new"
+          className={buttonClassName({ variant: "accent" })}
+        >
+          Create
+        </Link>
+      </header>
+
+      <section className="table-shell rounded-xl">
+        <div className="space-y-3 border-b border-line px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={q}
+              placeholder="Search knowledge bases…"
+              className="min-w-[220px] flex-1"
+              onChange={(event) => {
+                setQ(event.target.value);
+                setPage(1);
+              }}
+            />
+            {(
+              [
+                ["all", "All"],
+                ["ready", "Has ready"],
+                ["processing", "Processing"],
+                ["failed", "Failed"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => {
+                  setStatus(value);
+                  setPage(1);
+                }}
+                className={cn(
+                  "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
+                  status === value
+                    ? "border-line-strong bg-mist text-ink"
+                    : "border-transparent bg-raised text-slate-muted hover:bg-mist",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-muted">
+            <p>
+              {filtered.length === 0
+                ? "No knowledge bases match"
+                : `Showing ${start + 1}–${end} of ${filtered.length} bases`}
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={safePage <= 1}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+              >
+                Previous
+              </Button>
+              <span className="mono-cell">
+                {safePage} / {totalPages}
+              </span>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={safePage >= totalPages}
+                onClick={() =>
+                  setPage((current) => Math.min(totalPages, current + 1))
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="hidden grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] gap-3 border-b border-line px-4 py-2 md:grid">
+          <span className="th-label">Name</span>
+          <span className="th-label">Sources</span>
+          <span className="th-label">Ready</span>
+          <span className="th-label text-right">Updated</span>
+        </div>
+        <ul>
+          {pageItems.map((row) => (
+            <li key={row.id} className="border-b border-line/60 last:border-0">
+              <Link
+                href={`/admin/knowledge/${row.id}`}
+                className="grid items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70 md:grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr]"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{row.name}</p>
+                  <p className="mono-cell truncate text-slate-muted">{row.id}</p>
+                </div>
+                <p className="text-sm text-slate-muted">{row.sourceCount}</p>
+                <div>
+                  <Badge
+                    tone={
+                      row.readyCount > 0
+                        ? "success"
+                        : row.sourceCount > 0
+                          ? "warning"
+                          : "neutral"
+                    }
+                  >
+                    {row.readyCount}/{row.sourceCount}
+                  </Badge>
+                </div>
+                <p className="mono-cell text-right text-slate-muted">
+                  {row.latestUpdatedAt
+                    ? formatRelative(row.latestUpdatedAt)
+                    : "—"}
+                </p>
+              </Link>
+            </li>
+          ))}
+          {filtered.length === 0 ? (
+            <li className="px-4 py-10 text-center text-sm text-slate-muted">
+              {bases.length === 0
+                ? "No knowledge bases yet — create one above."
+                : "No knowledge bases match this search."}
+            </li>
+          ) : null}
+        </ul>
+      </section>
+    </div>
+  );
+}

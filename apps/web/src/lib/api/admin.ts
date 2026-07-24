@@ -24,6 +24,8 @@ import type {
   TeamConfig,
   TeamDraftInput,
   TeamSummary,
+  TeamVersionDetail,
+  TeamVersionSummary,
   TenantBranding,
   TenantUser,
   TenantUserInput,
@@ -38,6 +40,12 @@ import type {
   WorkflowSummary,
 } from "./types";
 import { TOOL_CATALOG } from "./types";
+import {
+  buildPublicApiRunCatalog,
+  teamStepsFromPublished,
+  type PublicApiCatalogLoad,
+  type PublicApiTeamOption,
+} from "@/lib/api/public-api-catalog";
 import { agentOsUrl, apiFetch } from "@/lib/agentos/client";
 import { devTenantHeaders } from "@/lib/auth/token";
 
@@ -526,7 +534,7 @@ export function saveAgentDraft(
   );
 }
 
-export function publishAgent(
+export async function publishAgent(
   accessToken: string,
   agentId: string,
 ): Promise<AgentConfig> {
@@ -544,6 +552,103 @@ export function publishAgent(
       updatedAt: new Date().toISOString(),
     },
   );
+}
+
+export async function listAgentVersions(
+  accessToken: string,
+  agentId: string,
+): Promise<
+  Array<{
+    id: string;
+    version: number;
+    status: AgentConfig["status"];
+    modelId: string;
+    isLive: boolean;
+    createdAt: string;
+  }>
+> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      version: number;
+      status: AgentConfig["status"];
+      model_id: string;
+      is_live: boolean;
+      created_at: string;
+    }>
+  >(`/admin/agents/${agentId}/versions`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    version: row.version,
+    status: row.status,
+    modelId: row.model_id,
+    isLive: row.is_live,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function getAgentVersion(
+  accessToken: string,
+  agentId: string,
+  versionId: string,
+): Promise<{
+  id: string;
+  version: number;
+  status: AgentConfig["status"];
+  instructions: string;
+  modelId: string;
+  temperature: number;
+  memoryMode: string;
+  createdAt: string;
+}> {
+  const raw = await apiFetch<{
+    id: string;
+    version: number;
+    status: AgentConfig["status"];
+    instructions: string;
+    model_id: string;
+    temperature: number;
+    memory_mode: string;
+    created_at: string;
+  }>(`/admin/agents/${agentId}/versions/${versionId}`, { accessToken });
+  return {
+    id: raw.id,
+    version: raw.version,
+    status: raw.status,
+    instructions: raw.instructions,
+    modelId: raw.model_id,
+    temperature: raw.temperature,
+    memoryMode: raw.memory_mode,
+    createdAt: raw.created_at,
+  };
+}
+
+export async function restoreAgentVersion(
+  accessToken: string,
+  agentId: string,
+  versionId: string,
+  options: { asDraft?: boolean } = {},
+): Promise<AgentConfig> {
+  return mapAgent(
+    await apiFetch<BackendAgent>(
+      `/admin/agents/${agentId}/versions/${versionId}/restore`,
+      {
+        accessToken,
+        method: "POST",
+        body: { as_draft: options.asDraft ?? false },
+      },
+    ),
+  );
+}
+
+export async function deleteAgent(
+  accessToken: string,
+  agentId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/agents/${agentId}`, {
+    accessToken,
+    method: "DELETE",
+  });
 }
 
 export function createAgent(
@@ -654,6 +759,90 @@ export async function publishTeam(
   );
 }
 
+export async function listTeamVersions(
+  accessToken: string,
+  teamId: string,
+): Promise<TeamVersionSummary[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      version: number;
+      status: TeamConfig["status"];
+      mode: TeamConfig["mode"];
+      member_count: number;
+      is_live: boolean;
+      created_at: string;
+    }>
+  >(`/admin/teams/${teamId}/versions`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    version: row.version,
+    status: row.status,
+    mode: row.mode,
+    memberCount: row.member_count,
+    isLive: row.is_live,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function getTeamVersion(
+  accessToken: string,
+  teamId: string,
+  versionId: string,
+): Promise<TeamVersionDetail> {
+  const raw = await apiFetch<BackendTeamVersion>(
+    `/admin/teams/${teamId}/versions/${versionId}`,
+    { accessToken },
+  );
+  return {
+    id: raw.id,
+    version: raw.version,
+    status: raw.status,
+    instructions: raw.instructions,
+    mode: raw.mode,
+    model: frontendModel(raw.model_id),
+    temperature: raw.temperature,
+    members: (raw.members ?? []).map((member) => ({
+      agentConfigId: member.agent_config_id,
+      agentVersionId: member.agent_version_id,
+      position: member.position,
+      name: member.name,
+      slug: member.slug,
+      version: member.version,
+      status: member.status,
+    })),
+    createdAt: raw.created_at,
+  };
+}
+
+export async function restoreTeamVersion(
+  accessToken: string,
+  teamId: string,
+  versionId: string,
+  options: { asDraft?: boolean } = {},
+): Promise<TeamConfig> {
+  return mapTeam(
+    await apiFetch<BackendTeam>(
+      `/admin/teams/${teamId}/versions/${versionId}/restore`,
+      {
+        accessToken,
+        method: "POST",
+        body: { as_draft: options.asDraft ?? false },
+      },
+    ),
+  );
+}
+
+export async function deleteTeam(
+  accessToken: string,
+  teamId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/teams/${teamId}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
 export async function listWorkflows(
   accessToken: string,
 ): Promise<WorkflowSummary[]> {
@@ -673,6 +862,23 @@ export async function listWorkflows(
   });
 }
 
+/**
+ * Catalog for Public API try-it: all published workflows, with team options from
+ * workflow steps when present, otherwise all published teams as a fallback list.
+ */
+export async function listPublicApiRunCatalog(
+  accessToken: string,
+): Promise<PublicApiCatalogLoad> {
+  const [workflows, teams] = await Promise.all([
+    apiFetch<BackendWorkflow[]>("/admin/workflows", { accessToken }),
+    apiFetch<BackendTeam[]>("/admin/teams", { accessToken }),
+  ]);
+  const publishedTeams = teams
+    .filter((team) => team.published != null)
+    .map((team) => ({ id: team.id, name: team.name, slug: team.slug }));
+  return buildPublicApiRunCatalog(workflows, publishedTeams);
+}
+
 export async function getWorkflow(
   accessToken: string,
   workflowId: string,
@@ -682,6 +888,16 @@ export async function getWorkflow(
       accessToken,
     }),
   );
+}
+
+export async function getPublishedWorkflowTeamSteps(
+  accessToken: string,
+  workflowId: string,
+): Promise<PublicApiTeamOption[]> {
+  const raw = await apiFetch<BackendWorkflow>(`/admin/workflows/${workflowId}`, {
+    accessToken,
+  });
+  return teamStepsFromPublished(raw.published);
 }
 
 export async function getWorkflowAssignments(
@@ -752,6 +968,17 @@ export async function listTenantUsers(
     accessToken,
   });
   return rows.map(mapTenantUser);
+}
+
+export async function getTenantUser(
+  accessToken: string,
+  membershipId: string,
+): Promise<TenantUser> {
+  return mapTenantUser(
+    await apiFetch<BackendTenantUser>(`/admin/users/${membershipId}`, {
+      accessToken,
+    }),
+  );
 }
 
 export async function createTenantUser(
@@ -855,6 +1082,107 @@ export async function publishWorkflow(
       method: "POST",
     }),
   );
+}
+
+export async function listWorkflowVersions(
+  accessToken: string,
+  workflowId: string,
+): Promise<
+  Array<{
+    id: string;
+    version: number;
+    status: WorkflowConfig["status"];
+    mode: WorkflowConfig["mode"];
+    stepCount: number;
+    isLive: boolean;
+    createdAt: string;
+  }>
+> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      version: number;
+      status: WorkflowConfig["status"];
+      mode: WorkflowConfig["mode"];
+      step_count: number;
+      is_live: boolean;
+      created_at: string;
+    }>
+  >(`/admin/workflows/${workflowId}/versions`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    version: row.version,
+    status: row.status,
+    mode: row.mode,
+    stepCount: row.step_count,
+    isLive: row.is_live,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function getWorkflowVersion(
+  accessToken: string,
+  workflowId: string,
+  versionId: string,
+): Promise<{
+  id: string;
+  version: number;
+  status: WorkflowConfig["status"];
+  mode: WorkflowConfig["mode"];
+  steps: WorkflowConfig["steps"];
+  createdAt: string;
+}> {
+  const raw = await apiFetch<BackendWorkflowVersion>(
+    `/admin/workflows/${workflowId}/versions/${versionId}`,
+    { accessToken },
+  );
+  return {
+    id: raw.id,
+    version: raw.version,
+    status: raw.status,
+    mode: raw.mode,
+    steps: (raw.steps ?? []).map((step) => ({
+      id: step.id,
+      name: step.name,
+      targetType: step.target_type,
+      targetConfigId: step.target_config_id,
+      targetVersionId: step.target_version_id,
+      targetName: step.target_name,
+      targetSlug: step.target_slug,
+      targetVersion: step.target_version,
+      targetStatus: step.target_status,
+      conditionExpression: step.condition_expression,
+    })),
+    createdAt: raw.created_at,
+  };
+}
+
+export async function restoreWorkflowVersion(
+  accessToken: string,
+  workflowId: string,
+  versionId: string,
+  options: { asDraft?: boolean } = {},
+): Promise<WorkflowConfig> {
+  return mapWorkflow(
+    await apiFetch<BackendWorkflow>(
+      `/admin/workflows/${workflowId}/versions/${versionId}/restore`,
+      {
+        accessToken,
+        method: "POST",
+        body: { as_draft: options.asDraft ?? false },
+      },
+    ),
+  );
+}
+
+export async function deleteWorkflow(
+  accessToken: string,
+  workflowId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/workflows/${workflowId}`, {
+    accessToken,
+    method: "DELETE",
+  });
 }
 
 export function listApprovals(accessToken: string): Promise<ApprovalRequest[]> {
@@ -984,6 +1312,21 @@ export async function createKnowledgeBase(
   });
 }
 
+export async function updateKnowledgeBase(
+  accessToken: string,
+  knowledgeBaseId: string,
+  input: { name: string },
+): Promise<{ id: string; name: string }> {
+  return apiFetch<{ id: string; name: string }>(
+    `/admin/knowledge/bases/${knowledgeBaseId}`,
+    {
+      accessToken,
+      method: "PATCH",
+      body: { name: input.name },
+    },
+  );
+}
+
 export async function listKnowledgeBases(
   accessToken: string,
 ): Promise<Array<Pick<KnowledgeBaseSummary, "id" | "name">>> {
@@ -991,6 +1334,52 @@ export async function listKnowledgeBases(
     "/admin/knowledge/bases",
     { accessToken },
   );
+}
+
+function mapKnowledgeSource(row: {
+  id: string;
+  knowledge_base_id: string;
+  status: string;
+  uri: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}): KnowledgeSource {
+  return {
+    id: row.id,
+    knowledgeBaseId: row.knowledge_base_id,
+    name: String(row.metadata.filename ?? row.uri.split("/").pop() ?? "source"),
+    mimeType: String(row.metadata.content_type ?? "application/octet-stream"),
+    byteSize: Number(row.metadata.bytes ?? 0),
+    status:
+      row.status === "queued" || row.status === "indexing"
+        ? "processing"
+        : (row.status as KnowledgeSource["status"]),
+    errorMessage:
+      typeof row.metadata.error_message === "string"
+        ? row.metadata.error_message
+        : null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listKnowledgeSources(
+  accessToken: string,
+  knowledgeBaseId: string,
+): Promise<KnowledgeSource[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      knowledge_base_id: string;
+      status: string;
+      uri: string;
+      metadata: Record<string, unknown>;
+      created_at: string;
+      updated_at: string;
+    }>
+  >(`/admin/knowledge/bases/${knowledgeBaseId}/sources`, { accessToken });
+  return rows.map(mapKnowledgeSource);
 }
 
 export async function reindexKnowledgeSource(
@@ -1317,6 +1706,18 @@ export async function listServiceAccounts(
   return rows.map(mapServiceAccount);
 }
 
+export async function getServiceAccount(
+  accessToken: string,
+  accountId: string,
+): Promise<ServiceAccountSummary> {
+  return mapServiceAccount(
+    await apiFetch<BackendServiceAccount>(
+      `/admin/service-accounts/${accountId}`,
+      { accessToken },
+    ),
+  );
+}
+
 export async function createServiceAccount(
   accessToken: string,
   input: { name: string; scopes: string[]; expiresAt: string | null },
@@ -1495,6 +1896,7 @@ interface BackendToolDefinition {
   connection_status: ToolDefinition["connectionStatus"];
   last_validated_at: string | null;
   last_validation_error: string | null;
+  published_version_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1520,6 +1922,7 @@ function mapToolDefinition(row: BackendToolDefinition): ToolDefinition {
     connectionStatus: row.connection_status,
     lastValidatedAt: row.last_validated_at,
     lastValidationError: row.last_validation_error,
+    publishedVersionId: row.published_version_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1644,6 +2047,163 @@ export async function enumerateToolCapabilities(
   );
 }
 
+export async function validateToolDefinition(
+  accessToken: string,
+  input: Omit<ToolDefinition, "id" | "createdAt" | "updatedAt">,
+): Promise<ToolValidation> {
+  return mapToolValidation(
+    await apiFetch<Parameters<typeof mapToolValidation>[0]>("/admin/tools/validate", {
+      accessToken,
+      method: "POST",
+      body: backendToolDefinition(input),
+    }),
+  );
+}
+
+export async function validateTenantPythonSource(
+  accessToken: string,
+  toolId: string,
+): Promise<ToolValidation> {
+  return mapToolValidation(
+    await apiFetch<Parameters<typeof mapToolValidation>[0]>(
+      `/admin/tools/${toolId}/validate-source`,
+      { accessToken, method: "POST" },
+    ),
+  );
+}
+
+export async function publishTenantPythonTool(
+  accessToken: string,
+  toolId: string,
+): Promise<ToolDefinition> {
+  return mapToolDefinition(
+    await apiFetch<BackendToolDefinition>(`/admin/tools/${toolId}/publish`, {
+      accessToken,
+      method: "POST",
+    }),
+  );
+}
+
+export async function listSandboxPackages(
+  accessToken: string,
+): Promise<import("./types").SandboxPythonPackage[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      name: string;
+      version: string;
+      sha256: string;
+      active: boolean;
+      created_at: string;
+      updated_at: string;
+    }>
+  >("/admin/tools/sandbox-packages", { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function listTenantPythonTemplates(
+  accessToken: string,
+): Promise<import("./types").TenantPythonTemplate[]> {
+  return apiFetch("/admin/tools/tenant-python/templates", { accessToken });
+}
+
+export async function listPlatformSandboxPackages(
+  accessToken: string,
+  activeOnly = false,
+): Promise<import("./types").SandboxPythonPackage[]> {
+  const query = activeOnly ? "?active_only=true" : "";
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      name: string;
+      version: string;
+      sha256: string;
+      active: boolean;
+      created_at: string;
+      updated_at: string;
+    }>
+  >(`/admin/platform/sandbox-packages${query}`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function createPlatformSandboxPackage(
+  accessToken: string,
+  input: { name: string; version: string; sha256: string; active?: boolean },
+): Promise<import("./types").SandboxPythonPackage> {
+  const row = await apiFetch<{
+    id: string;
+    name: string;
+    version: string;
+    sha256: string;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>("/admin/platform/sandbox-packages", {
+    accessToken,
+    method: "POST",
+    body: {
+      name: input.name,
+      version: input.version,
+      sha256: input.sha256,
+      active: input.active ?? true,
+    },
+  });
+  return {
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function updatePlatformSandboxPackage(
+  accessToken: string,
+  packageId: string,
+  input: { sha256?: string; active?: boolean },
+): Promise<import("./types").SandboxPythonPackage> {
+  const row = await apiFetch<{
+    id: string;
+    name: string;
+    version: string;
+    sha256: string;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>(`/admin/platform/sandbox-packages/${packageId}`, {
+    accessToken,
+    method: "PATCH",
+    body: input,
+  });
+  return {
+    id: row.id,
+    name: row.name,
+    version: row.version,
+    sha256: row.sha256,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export function getPublicChatSurface(
   tenantSlug: string,
   agentSlug: string,
@@ -1711,6 +2271,48 @@ export function getPublicWorkflowSurface(
     `/public/t/${tenantSlug}/workflows/${workflowSlug}`,
     { accessToken: "public" },
   );
+}
+
+export interface WorkspaceInfo {
+  id: string;
+  name: string;
+  slug: string;
+  branding: Record<string, unknown>;
+}
+
+export async function getWorkspaceInfo(
+  accessToken: string,
+): Promise<WorkspaceInfo> {
+  return apiFetch<WorkspaceInfo>("/admin/workspace", { accessToken });
+}
+
+export interface OnboardingStatus {
+  provisioned: boolean;
+  can_create: boolean;
+  org_id: string | null;
+  org_role: string | null;
+  tenant_id: string | null;
+  tenant_slug: string | null;
+  tenant_name: string | null;
+}
+
+export async function getOnboardingStatus(
+  accessToken: string,
+): Promise<OnboardingStatus> {
+  return apiFetch<OnboardingStatus>("/admin/onboarding/status", {
+    accessToken,
+  });
+}
+
+export async function createSelfServeWorkspace(
+  accessToken: string,
+  input: { name: string; slug: string },
+): Promise<WorkspaceInfo & { clerk_org_id: string; is_active: boolean }> {
+  return apiFetch("/admin/onboarding/workspace", {
+    accessToken,
+    method: "POST",
+    body: input,
+  });
 }
 
 export interface EvalCase {
@@ -2125,124 +2727,4 @@ export async function listPlatformAudit(
     details: row.details,
     createdAt: row.created_at,
   }));
-}
-
-export async function listSandboxPackages(
-  accessToken: string,
-): Promise<import("./types").SandboxPythonPackage[]> {
-  const rows = await apiFetch<
-    Array<{
-      id: string;
-      name: string;
-      version: string;
-      sha256: string;
-      active: boolean;
-      created_at: string;
-      updated_at: string;
-    }>
-  >("/admin/tools/sandbox-packages", { accessToken });
-  return rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    version: row.version,
-    sha256: row.sha256,
-    active: row.active,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
-}
-
-export async function listTenantPythonTemplates(
-  accessToken: string,
-): Promise<import("./types").TenantPythonTemplate[]> {
-  return apiFetch("/admin/tools/tenant-python/templates", { accessToken });
-}
-
-export async function listPlatformSandboxPackages(
-  accessToken: string,
-  activeOnly = false,
-): Promise<import("./types").SandboxPythonPackage[]> {
-  const query = activeOnly ? "?active_only=true" : "";
-  const rows = await apiFetch<
-    Array<{
-      id: string;
-      name: string;
-      version: string;
-      sha256: string;
-      active: boolean;
-      created_at: string;
-      updated_at: string;
-    }>
-  >(`/admin/platform/sandbox-packages${query}`, { accessToken });
-  return rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    version: row.version,
-    sha256: row.sha256,
-    active: row.active,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
-}
-
-export async function createPlatformSandboxPackage(
-  accessToken: string,
-  input: { name: string; version: string; sha256: string; active?: boolean },
-): Promise<import("./types").SandboxPythonPackage> {
-  const row = await apiFetch<{
-    id: string;
-    name: string;
-    version: string;
-    sha256: string;
-    active: boolean;
-    created_at: string;
-    updated_at: string;
-  }>("/admin/platform/sandbox-packages", {
-    accessToken,
-    method: "POST",
-    body: {
-      name: input.name,
-      version: input.version,
-      sha256: input.sha256,
-      active: input.active ?? true,
-    },
-  });
-  return {
-    id: row.id,
-    name: row.name,
-    version: row.version,
-    sha256: row.sha256,
-    active: row.active,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-export async function updatePlatformSandboxPackage(
-  accessToken: string,
-  packageId: string,
-  input: { sha256?: string; active?: boolean },
-): Promise<import("./types").SandboxPythonPackage> {
-  const row = await apiFetch<{
-    id: string;
-    name: string;
-    version: string;
-    sha256: string;
-    active: boolean;
-    created_at: string;
-    updated_at: string;
-  }>(`/admin/platform/sandbox-packages/${packageId}`, {
-    accessToken,
-    method: "PATCH",
-    body: input,
-  });
-  return {
-    id: row.id,
-    name: row.name,
-    version: row.version,
-    sha256: row.sha256,
-    active: row.active,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
 }

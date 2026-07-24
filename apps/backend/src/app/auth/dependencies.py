@@ -54,6 +54,75 @@ def _role(claims: ClerkClaims) -> Role:
     return Role.end_user
 
 
+def _flatten_clerk_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    org_from_o: str | None = None
+    org_role_from_o: str | None = None
+    if "o" in payload and isinstance(payload["o"], dict):
+        org_from_o = payload["o"].get("id") or payload["o"].get("org_id")
+        org_role_from_o = payload["o"].get("rol") or payload["o"].get("role")
+    next_payload = payload
+    if not payload.get("org_id") and org_from_o:
+        next_payload = {**next_payload, "org_id": org_from_o}
+    if not payload.get("org_role") and org_role_from_o:
+        next_payload = {**next_payload, "org_role": org_role_from_o}
+    return next_payload
+
+
+async def resolve_clerk_identity(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+    settings: Settings | None = None,
+) -> ClerkClaims:
+    """Validate Clerk (or dev) identity without requiring a provisioned tenant.
+
+    Used for self-serve onboarding. clerk_org_id always comes from verified
+    claims — never from the request body.
+    """
+    if settings is None:
+        settings = get_settings()
+    bearer_token = (
+        authorization[7:] if authorization and authorization.startswith("Bearer ") else None
+    )
+    if settings.auth_disabled:
+        user_id = request.headers.get("x-dev-user-id", "dev-user")
+        org_role = request.headers.get("x-dev-org-role", "org:admin")
+        # Prefer the active dev tenant's org so provisioned workspaces do not
+        # look unprovisioned when NEXT_PUBLIC_DEV_AUTH is enabled.
+        tenant_value = request.headers.get("x-dev-tenant-id")
+        if tenant_value:
+            try:
+                tenant_id = uuid.UUID(tenant_value)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid tenant ID") from exc
+            async with SessionFactory() as session:
+                tenant = await session.get(Tenant, tenant_id)
+            if tenant is not None and tenant.is_active:
+                return ClerkClaims(
+                    sub=user_id,
+                    org_id=tenant.clerk_org_id,
+                    org_role=org_role,
+                )
+        org_id = request.headers.get("x-dev-org-id", "org_unprovisioned_dev")
+        return ClerkClaims(sub=user_id, org_id=org_id, org_role=org_role)
+    if not bearer_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
+        )
+    if bearer_token.startswith(PAT_PREFIX):
+        raise HTTPException(
+            status_code=403,
+            detail="Service accounts cannot create workspaces",
+        )
+    try:
+        payload = await asyncio.to_thread(_decode, bearer_token, settings)
+        claims = ClerkClaims.model_validate(_flatten_clerk_payload(payload))
+    except (jwt.PyJWTError, ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    if not claims.org_id:
+        raise HTTPException(status_code=403, detail="Organization claim is required")
+    return claims
+
+
 async def require_tenant(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -115,17 +184,7 @@ async def require_tenant(
             )
         try:
             payload = await asyncio.to_thread(_decode, bearer_token, settings)
-            # Flatten common Clerk claim shapes.
-            org_from_o: str | None = None
-            org_role_from_o: str | None = None
-            if "o" in payload and isinstance(payload["o"], dict):
-                org_from_o = payload["o"].get("id") or payload["o"].get("org_id")
-                org_role_from_o = payload["o"].get("rol") or payload["o"].get("role")
-            if not payload.get("org_id") and org_from_o:
-                payload = {**payload, "org_id": org_from_o}
-            if not payload.get("org_role") and org_role_from_o:
-                payload = {**payload, "org_role": org_role_from_o}
-            claims = ClerkClaims.model_validate(payload)
+            claims = ClerkClaims.model_validate(_flatten_clerk_payload(payload))
         except (jwt.PyJWTError, ValidationError, ValueError) as exc:
             raise HTTPException(status_code=401, detail="Invalid token") from exc
         if not claims.org_id:

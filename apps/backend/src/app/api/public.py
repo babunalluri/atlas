@@ -126,10 +126,27 @@ async def get_workflow_surface(tenant_slug: str, workflow_slug: str) -> dict[str
     """Return non-sensitive branding and published workflow metadata."""
     session, tenant, context = await _public_tenant_context(tenant_slug)
     try:
-        config = await WorkflowRepository(session, context).get_config_by_slug(workflow_slug)
+        repo = WorkflowRepository(session, context)
+        config = await repo.get_config_by_slug(workflow_slug)
         if config is None or config.published_version_id is None:
             raise HTTPException(status_code=404, detail="Published workflow not found")
         branding = tenant.branding or {}
+        team_repo = TeamRepository(session, context)
+        teams: list[dict[str, object]] = []
+        for step in await repo.steps(config.published_version_id):
+            if step.target_type != "team" or step.team_config_id is None:
+                continue
+            team = await team_repo.get_config(step.team_config_id)
+            if team is None:
+                continue
+            teams.append(
+                {
+                    "id": str(team.id),
+                    "name": team.name,
+                    "slug": team.slug,
+                    "stepName": step.name,
+                }
+            )
         return {
             "tenant": {
                 "name": tenant.name,
@@ -148,6 +165,7 @@ async def get_workflow_surface(tenant_slug: str, workflow_slug: str) -> dict[str
                     "workflowWelcomeMessage",
                     f"Hi, I'm the {config.name} workflow. What should we work on?",
                 ),
+                "teams": teams,
             },
         }
     finally:

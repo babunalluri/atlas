@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.agent_runtime.factory import AgentFactoryService, TeamFactoryService, TeamRuntimeRequest
 from app.api.schemas import TeamCreateIn
+from app.db.models import AgentStatus
 from app.db.repositories import AgentRepository, TeamRepository
 
 
@@ -117,3 +118,104 @@ async def test_team_factory_builds_persisted_ordered_team(session, tenant_a, mon
 def test_team_schema_rejects_unknown_mode():
     with pytest.raises(ValidationError):
         TeamCreateIn(slug="bad", name="Bad", mode="broadcast")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_list_versions_and_restore_published_pointer(session, tenant_a):
+    first, _ = await _published_agent(session, tenant_a, "alpha")
+    second, _ = await _published_agent(session, tenant_a, "beta")
+    teams = TeamRepository(session, tenant_a)
+    config = await teams.create_config(slug="history", name="History")
+
+    v1 = await teams.create_draft(
+        config_id=config.id,
+        instructions="Version one",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.1,
+        member_config_ids=[first.id, second.id],
+    )
+    await teams.publish(v1.id)
+
+    v2 = await teams.create_draft(
+        config_id=config.id,
+        instructions="Version two",
+        mode="route",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[second.id, first.id],
+    )
+    await teams.publish(v2.id)
+
+    versions = list(await teams.list_versions(config.id))
+    assert [row.version for row in versions] == [2, 1]
+    assert (await teams.get_config(config.id)).published_version_id == v2.id
+
+    restored = await teams.restore_version(config.id, v1.id)
+    assert restored.id == v1.id
+    assert restored.instructions == "Version one"
+    refreshed = await teams.get_config(config.id)
+    assert refreshed is not None
+    assert refreshed.published_version_id == v1.id
+
+    # Historical published snapshot is unchanged.
+    still_v2 = await teams.get_version(v2.id, allow_draft=False)
+    assert still_v2 is not None
+    assert still_v2.instructions == "Version two"
+
+
+@pytest.mark.asyncio
+async def test_restore_as_draft_clones_new_version(session, tenant_a):
+    first, _ = await _published_agent(session, tenant_a, "gamma")
+    second, _ = await _published_agent(session, tenant_a, "delta")
+    teams = TeamRepository(session, tenant_a)
+    config = await teams.create_config(slug="clone-me", name="Clone me")
+    v1 = await teams.create_draft(
+        config_id=config.id,
+        instructions="Keep this text",
+        mode="route",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.4,
+        member_config_ids=[first.id, second.id],
+    )
+    await teams.publish(v1.id)
+    v2 = await teams.create_draft(
+        config_id=config.id,
+        instructions="Later changes",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.1,
+        member_config_ids=[first.id, second.id],
+    )
+    await teams.publish(v2.id)
+
+    draft = await teams.restore_version(config.id, v1.id, as_draft=True)
+    assert draft.status == AgentStatus.draft
+    assert draft.version == 3
+    assert draft.instructions == "Keep this text"
+    assert draft.mode == "route"
+    # Live pointer stays on v2 until the new draft is published.
+    assert (await teams.get_config(config.id)).published_version_id == v2.id
+
+
+@pytest.mark.asyncio
+async def test_restore_version_tenant_isolation(session, tenant_a, tenant_b):
+    first, _ = await _published_agent(session, tenant_a, "own-a")
+    second, _ = await _published_agent(session, tenant_a, "own-b")
+    teams_a = TeamRepository(session, tenant_a)
+    config = await teams_a.create_config(slug="private", name="Private")
+    version = await teams_a.create_draft(
+        config_id=config.id,
+        instructions="Secret",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[first.id, second.id],
+    )
+    await teams_a.publish(version.id)
+
+    session.info["tenant_id"] = tenant_b.tenant_id
+    teams_b = TeamRepository(session, tenant_b)
+    assert list(await teams_b.list_versions(config.id)) == []
+    with pytest.raises(LookupError, match="Team not found"):
+        await teams_b.restore_version(config.id, version.id)

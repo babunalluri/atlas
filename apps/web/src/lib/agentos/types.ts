@@ -54,6 +54,17 @@ export interface StreamRunOptions {
   onRawFrame?: (frame: ParsedSseFrame) => void;
 }
 
+/** Guest / anonymous public chat stream (no Clerk token). */
+export interface StreamPublicRunOptions {
+  url: string;
+  guestId: string;
+  body: FormData;
+  signal?: AbortSignal;
+  lastEventId?: string;
+  onEvent: (event: RunEventBase, frame: ParsedSseFrame) => void;
+  onRawFrame?: (frame: ParsedSseFrame) => void;
+}
+
 export class SseError extends Error {
   readonly status?: number;
   readonly bodyText?: string;

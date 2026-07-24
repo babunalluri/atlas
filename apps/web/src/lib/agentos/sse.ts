@@ -1,12 +1,18 @@
 import {
   type ParsedSseFrame,
   type RunEventBase,
+  type StreamPublicRunOptions,
   type StreamRunOptions,
   SseError,
 } from "./types";
 import { unpackAccessContext } from "@/lib/auth/access-context";
 
-export type { ParsedSseFrame, RunEventBase, StreamRunOptions } from "./types";
+export type {
+  ParsedSseFrame,
+  RunEventBase,
+  StreamPublicRunOptions,
+  StreamRunOptions,
+} from "./types";
 export { SseError } from "./types";
 
 function isAbortError(err: unknown): boolean {
@@ -192,6 +198,112 @@ export async function streamAgentRun(
 
   if (!response.body) {
     throw new SseError("AgentOS response missing body stream", response.status);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let remainder = "";
+  let seenEventId: string | undefined = lastEventId;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      const chunk = decoder.decode(value, { stream: true });
+      const parsed = parseSseChunk(chunk, remainder);
+      remainder = parsed.remainder;
+
+      for (const frame of parsed.frames) {
+        onRawFrame?.(frame);
+        if (frame.id) {
+          seenEventId = frame.id;
+        }
+        const event = decodeRunEvent(frame);
+        if (event) {
+          onEvent(event, frame);
+        }
+      }
+    }
+
+    if (remainder.trim()) {
+      const frame = parseSseFrame(remainder.trim());
+      if (frame) {
+        onRawFrame?.(frame);
+        if (frame.id) {
+          seenEventId = frame.id;
+        }
+        const event = decodeRunEvent(frame);
+        if (event) {
+          onEvent(event, frame);
+        }
+      }
+    }
+  } catch (err) {
+    if (signal?.aborted || isAbortError(err)) {
+      return { lastEventId: seenEventId };
+    }
+    throw err;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // already released
+    }
+  }
+
+  return { lastEventId: seenEventId };
+}
+
+/**
+ * Guest public chat stream — no Clerk bearer token. Tenant is resolved from
+ * the URL path on the server; only X-Guest-Id identifies the conversation owner.
+ */
+export async function streamPublicRun(
+  options: StreamPublicRunOptions,
+): Promise<{ lastEventId?: string }> {
+  const { guestId, url, body, signal, lastEventId, onEvent, onRawFrame } =
+    options;
+
+  if (!guestId) {
+    throw new SseError("Missing guest id for public chat stream");
+  }
+
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+    "X-Guest-Id": guestId,
+  };
+  if (lastEventId) {
+    headers["Last-Event-ID"] = lastEventId;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal,
+    });
+  } catch (err) {
+    if (signal?.aborted || isAbortError(err)) {
+      return { lastEventId };
+    }
+    throw err;
+  }
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => undefined);
+    throw new SseError(
+      `Public chat stream failed (${response.status})`,
+      response.status,
+      bodyText,
+    );
+  }
+
+  if (!response.body) {
+    throw new SseError("Public chat response missing body stream", response.status);
   }
 
   const reader = response.body.getReader();

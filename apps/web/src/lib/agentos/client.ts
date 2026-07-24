@@ -1,4 +1,4 @@
-import { streamAgentRun, type StreamRunOptions } from "./sse";
+import { streamAgentRun, streamPublicRun, type StreamRunOptions } from "./sse";
 import type {
   ChatMessage,
   ConversationSession,
@@ -22,6 +22,26 @@ export function agentOsUrl(path: string): string {
   return `${agentOsBaseUrl()}${normalized}`;
 }
 
+const GUEST_ID_KEY = "atlas_guest_id";
+
+/** Stable browser guest id for anonymous public chat (not a credential). */
+export function getOrCreateGuestId(): string {
+  if (typeof window === "undefined") {
+    return `ssr_${Math.random().toString(36).slice(2, 12)}`;
+  }
+  try {
+    const existing = window.localStorage.getItem(GUEST_ID_KEY);
+    if (existing && /^[a-zA-Z0-9_-]{8,64}$/.test(existing)) {
+      return existing;
+    }
+    const created = crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+    window.localStorage.setItem(GUEST_ID_KEY, created);
+    return created;
+  } catch {
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -30,6 +50,70 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+const API_ERROR_MESSAGE_MAX = 400;
+
+function truncateMessage(text: string, max = API_ERROR_MESSAGE_MAX): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/**
+ * FastAPI/Pydantic 422 bodies include a full `input` snapshot (e.g. entire
+ * tool source_code). Surface only loc + msg so UI banners stay readable.
+ */
+export function summarizeApiErrorBody(
+  text: string,
+  fallback = "Request failed",
+): string {
+  if (!text.trim()) return fallback;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === "string") return truncateMessage(parsed);
+
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as {
+        detail?: unknown;
+        message?: unknown;
+        error?: unknown;
+      };
+
+      if (typeof record.detail === "string") {
+        return truncateMessage(record.detail);
+      }
+
+      if (Array.isArray(record.detail)) {
+        const parts = record.detail
+          .map((item) => {
+            if (typeof item === "string") return item;
+            if (!item || typeof item !== "object") return null;
+            const row = item as { msg?: unknown; loc?: unknown };
+            const msg = typeof row.msg === "string" ? row.msg : null;
+            if (!msg) return null;
+            const loc = Array.isArray(row.loc)
+              ? row.loc
+                  .filter((part) => part !== "body" && typeof part === "string")
+                  .join(".")
+              : "";
+            return loc ? `${msg} (${loc})` : msg;
+          })
+          .filter((part): part is string => Boolean(part));
+        if (parts.length > 0) return truncateMessage(parts.join("; "));
+      }
+
+      if (typeof record.message === "string") {
+        return truncateMessage(record.message);
+      }
+      if (typeof record.error === "string") {
+        return truncateMessage(record.error);
+      }
+    }
+  } catch {
+    // Non-JSON bodies fall through to a truncated raw string.
+  }
+  return truncateMessage(text);
 }
 
 export async function apiFetch<T>(
@@ -73,8 +157,9 @@ export async function apiFetch<T>(
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
+    const detail = summarizeApiErrorBody(text, response.statusText);
     throw new ApiError(
-      `API ${method} ${path} failed (${response.status}): ${text || response.statusText}`,
+      `API ${method} ${path} failed (${response.status}): ${detail}`,
       response.status,
     );
   }
@@ -117,6 +202,88 @@ export function streamConfiguredAgent(
   return streamAgentRun({
     ...rest,
     url: agentOsUrl(path),
+    body,
+  });
+}
+
+export type StreamPublicTargetOptions = Omit<
+  StreamRunOptions,
+  "url" | "body" | "accessToken"
+> & {
+  tenantSlug: string;
+  message: string;
+  sessionId?: string;
+  guestId?: string;
+};
+
+/** Anonymous published-agent run via /public/t/... (no Clerk token). */
+export function streamPublicAgent(
+  options: StreamPublicTargetOptions & { agentSlug: string },
+): Promise<{ lastEventId?: string }> {
+  const {
+    tenantSlug,
+    agentSlug,
+    message,
+    sessionId,
+    guestId = getOrCreateGuestId(),
+    ...rest
+  } = options;
+  const body = new FormData();
+  body.set("message", message);
+  body.set("stream", "true");
+  body.set("session_id", sessionId ?? crypto.randomUUID());
+  return streamPublicRun({
+    ...rest,
+    guestId,
+    url: agentOsUrl(`/public/t/${tenantSlug}/agents/${agentSlug}/runs`),
+    body,
+  });
+}
+
+/** Anonymous published-team run via /public/t/... */
+export function streamPublicTeam(
+  options: StreamPublicTargetOptions & { teamSlug: string },
+): Promise<{ lastEventId?: string }> {
+  const {
+    tenantSlug,
+    teamSlug,
+    message,
+    sessionId,
+    guestId = getOrCreateGuestId(),
+    ...rest
+  } = options;
+  const body = new FormData();
+  body.set("message", message);
+  body.set("stream", "true");
+  body.set("session_id", sessionId ?? crypto.randomUUID());
+  return streamPublicRun({
+    ...rest,
+    guestId,
+    url: agentOsUrl(`/public/t/${tenantSlug}/teams/${teamSlug}/runs`),
+    body,
+  });
+}
+
+/** Anonymous published-workflow run via /public/t/... */
+export function streamPublicWorkflow(
+  options: StreamPublicTargetOptions & { workflowSlug: string },
+): Promise<{ lastEventId?: string }> {
+  const {
+    tenantSlug,
+    workflowSlug,
+    message,
+    sessionId,
+    guestId = getOrCreateGuestId(),
+    ...rest
+  } = options;
+  const body = new FormData();
+  body.set("message", message);
+  body.set("stream", "true");
+  body.set("session_id", sessionId ?? crypto.randomUUID());
+  return streamPublicRun({
+    ...rest,
+    guestId,
+    url: agentOsUrl(`/public/t/${tenantSlug}/workflows/${workflowSlug}/runs`),
     body,
   });
 }

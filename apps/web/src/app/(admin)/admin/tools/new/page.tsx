@@ -1,23 +1,26 @@
 import { ToolEditor } from "@/components/tool-builder/ToolEditor";
-import {
-  listCredentials,
-  listCustomPythonCatalog,
-  listToolkitCatalog,
-} from "@/lib/api/admin";
+import { listCredentials } from "@/lib/api/admin";
+import type { ToolDefinition } from "@/lib/api/types";
 import { getServerAgentOsToken } from "@/lib/auth/server-token";
 
-export default async function NewToolPage() {
-  const token = await getServerAgentOsToken();
-  const [credentials, toolkitCatalog, customPythonCatalog] = await Promise.all([
-    listCredentials(token),
-    listToolkitCatalog(token),
-    listCustomPythonCatalog(token),
-  ]);
-  return (
-    <ToolEditor
-      credentials={credentials}
-      toolkitCatalog={toolkitCatalog}
-      customPythonCatalog={customPythonCatalog}
-    />
-  );
+const CREATE_KINDS = new Set<ToolDefinition["kind"]>([
+  "http",
+  "openapi",
+  "tenant_python",
+  "mcp",
+]);
+
+export default async function NewToolPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ kind?: string }>;
+}) {
+  const params = await searchParams;
+  const kindParam = params.kind;
+  const defaultKind =
+    kindParam && CREATE_KINDS.has(kindParam as ToolDefinition["kind"])
+      ? (kindParam as ToolDefinition["kind"])
+      : "http";
+  const credentials = await listCredentials(await getServerAgentOsToken());
+  return <ToolEditor credentials={credentials} defaultKind={defaultKind} />;
 }

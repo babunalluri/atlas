@@ -14,6 +14,10 @@ def _service_account_scope(method: str, path: str) -> str | None:
         return "agents:run"
     if path.startswith("/v1/teams/") and path.endswith("/runs"):
         return "teams:run"
+    if path.startswith("/v1/workflows/") and path.endswith("/runs"):
+        return "workflows:run"
+    if path == "/api/v1/public/runs" or path.startswith("/api/v1/public/"):
+        return "teams:run"
     if path.startswith("/api/sessions"):
         return "sessions:delete" if method == "DELETE" else "sessions:read"
     if path.startswith("/admin/service-accounts"):
@@ -56,6 +60,7 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/docs")
             or path.startswith("/public/tenants/")
             or path.startswith("/public/t/")
+            or path.startswith("/admin/onboarding")
             or path.startswith("/internal/sandbox/")
         ):
             return await call_next(request)

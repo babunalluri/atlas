@@ -11,7 +11,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime.factory import AgentFactoryService
-from app.api.schemas import KnowledgeBaseIn, KnowledgeBaseOut, KnowledgeSourceOut
+from app.api.schemas import (
+    KnowledgeBaseIn,
+    KnowledgeBaseOut,
+    KnowledgeBaseUpdateIn,
+    KnowledgeSourceOut,
+)
 from app.auth.dependencies import require_roles
 from app.core.settings import get_settings
 from app.db.models import KnowledgeChunk, KnowledgeSource, Role
@@ -173,6 +178,23 @@ async def create_base(
     base = await KnowledgeRepository(session, context).create_base(
         name=body.name, config=body.config
     )
+    return KnowledgeBaseOut(id=base.id, name=base.name, config=base.config)
+
+
+@router.patch("/bases/{knowledge_base_id}", response_model=KnowledgeBaseOut)
+async def update_base(
+    knowledge_base_id: uuid.UUID,
+    body: KnowledgeBaseUpdateIn,
+    context: AdminContext,
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> KnowledgeBaseOut:
+    base = await KnowledgeRepository(session, context).update_base(
+        knowledge_base_id,
+        name=body.name,
+        config=body.config,
+    )
+    if base is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
     return KnowledgeBaseOut(id=base.id, name=base.name, config=base.config)
 
 

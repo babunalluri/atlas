@@ -21,6 +21,7 @@ from app.db.models import (
     KnowledgeChunk,
     KnowledgeSource,
     Membership,
+    PlatformPythonPackage,
     Role,
     ServiceAccount,
     TeamConfig,
@@ -30,7 +31,6 @@ from app.db.models import (
     TenantCredential,
     ToolDefinition,
     ToolDefinitionVersion,
-    PlatformPythonPackage,
     WorkflowAssignment,
     WorkflowConfig,
     WorkflowStep,
@@ -325,6 +325,106 @@ class AgentRepository(TenantRepository):
         )
         return version
 
+    async def restore_version(
+        self, config_id: uuid.UUID, version_id: uuid.UUID, *, as_draft: bool = False
+    ) -> AgentVersion:
+        """Restore a historical agent version (Atlas-owned snapshots)."""
+        config = await self.get_config(config_id)
+        if config is None:
+            raise LookupError("Agent not found")
+        version = await self.get_version(version_id, allow_draft=True)
+        if version is None or version.agent_config_id != config_id:
+            raise LookupError("Agent version not found")
+
+        if as_draft:
+            kb_raw = (version.team_config or {}).get("knowledge_base_id")
+            knowledge_base_id = uuid.UUID(str(kb_raw)) if kb_raw else None
+            tools = [
+                {
+                    "tool_key": binding.tool_key,
+                    "tool_definition_id": binding.tool_definition_id,
+                    "config": binding.config or {},
+                    "credential_id": binding.credential_id,
+                }
+                for binding in await self.bindings(version.id)
+            ]
+            draft = await self.create_draft(
+                config_id=config_id,
+                instructions=version.instructions,
+                model_id=version.model_id,
+                temperature=version.temperature,
+                memory_mode=version.memory_mode,
+                tools=tools,
+                knowledge_base_id=knowledge_base_id,
+            )
+            await self.audit(
+                action="agent.restore_draft",
+                resource_type="agent_version",
+                resource_id=str(draft.id),
+                details={
+                    "source_version_id": str(version.id),
+                    "source_version": version.version,
+                    "draft_version": draft.version,
+                },
+            )
+            return draft
+
+        if version.status == AgentStatus.draft:
+            return await self.publish(version.id)
+
+        await self.session.execute(
+            update(AgentConfig)
+            .where(
+                AgentConfig.id == config_id,
+                AgentConfig.tenant_id == self.context.tenant_id,
+            )
+            .values(published_version_id=version.id)
+        )
+        await self.session.flush()
+        await self.audit(
+            action="agent.restore",
+            resource_type="agent_version",
+            resource_id=str(version.id),
+            details={"version": version.version},
+        )
+        return version
+
+    async def delete_config(self, config_id: uuid.UUID) -> None:
+        config = await self.get_config(config_id)
+        if config is None:
+            raise LookupError("Agent not found")
+        team_refs = await self.session.scalar(
+            select(func.count())
+            .select_from(TeamMember)
+            .where(
+                TeamMember.tenant_id == self.context.tenant_id,
+                TeamMember.agent_config_id == config_id,
+            )
+        )
+        if int(team_refs or 0) > 0:
+            raise ValueError("Agent is used by a team — remove it from teams first")
+        workflow_refs = await self.session.scalar(
+            select(func.count())
+            .select_from(WorkflowStep)
+            .where(
+                WorkflowStep.tenant_id == self.context.tenant_id,
+                WorkflowStep.agent_config_id == config_id,
+            )
+        )
+        if int(workflow_refs or 0) > 0:
+            raise ValueError(
+                "Agent is used by a workflow — remove it from workflows first"
+            )
+        config.published_version_id = None
+        await self.session.flush()
+        await self.session.delete(config)
+        await self.session.flush()
+        await self.audit(
+            action="agent.delete",
+            resource_type="agent_config",
+            resource_id=str(config_id),
+        )
+
 
 class TeamRepository(TenantRepository):
     async def list_configs(self) -> Sequence[TeamConfig]:
@@ -429,6 +529,17 @@ class TeamRepository(TenantRepository):
             )
         )
 
+    async def list_versions(self, config_id: uuid.UUID) -> Sequence[TeamVersion]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(TeamVersion)
+                .where(TeamVersion.team_config_id == config_id)
+                .order_by(TeamVersion.version.desc()),
+                TeamVersion,
+            )
+        )
+        return rows.all()
+
     async def members(self, version_id: uuid.UUID) -> Sequence[TeamMember]:
         rows = await self.session.scalars(
             self.scoped(
@@ -439,6 +550,65 @@ class TeamRepository(TenantRepository):
             )
         )
         return rows.all()
+
+    async def restore_version(
+        self, config_id: uuid.UUID, version_id: uuid.UUID, *, as_draft: bool = False
+    ) -> TeamVersion:
+        """Restore a historical team version.
+
+        When ``as_draft`` is False (default), sets ``published_version_id`` to the
+        selected immutable snapshot so live traffic uses that version again.
+        When ``as_draft`` is True, clones the snapshot into a new editable draft.
+        """
+        config = await self.get_config(config_id)
+        if config is None:
+            raise LookupError("Team not found")
+        version = await self.get_version(version_id, allow_draft=True)
+        if version is None or version.team_config_id != config_id:
+            raise LookupError("Team version not found")
+
+        if as_draft:
+            member_ids = [member.agent_config_id for member in await self.members(version.id)]
+            draft = await self.create_draft(
+                config_id=config_id,
+                instructions=version.instructions,
+                mode=version.mode,
+                model_id=version.model_id,
+                temperature=version.temperature,
+                member_config_ids=member_ids,
+            )
+            await self.audit(
+                action="team.restore_draft",
+                resource_type="team_version",
+                resource_id=str(draft.id),
+                details={
+                    "source_version_id": str(version.id),
+                    "source_version": version.version,
+                    "draft_version": draft.version,
+                },
+            )
+            return draft
+
+        if version.status == AgentStatus.draft:
+            # Promote the draft via normal publish (pins members, sets pointer).
+            return await self.publish(version.id)
+
+        await self.session.execute(
+            update(TeamConfig)
+            .where(
+                TeamConfig.id == config_id,
+                TeamConfig.tenant_id == self.context.tenant_id,
+            )
+            .values(published_version_id=version.id)
+        )
+        await self.session.flush()
+        await self.audit(
+            action="team.restore",
+            resource_type="team_version",
+            resource_id=str(version.id),
+            details={"version": version.version},
+        )
+        return version
 
     async def create_draft(
         self,
@@ -552,6 +722,32 @@ class TeamRepository(TenantRepository):
             resource_id=str(version.id),
         )
         return version
+
+    async def delete_config(self, config_id: uuid.UUID) -> None:
+        config = await self.get_config(config_id)
+        if config is None:
+            raise LookupError("Team not found")
+        workflow_refs = await self.session.scalar(
+            select(func.count())
+            .select_from(WorkflowStep)
+            .where(
+                WorkflowStep.tenant_id == self.context.tenant_id,
+                WorkflowStep.team_config_id == config_id,
+            )
+        )
+        if int(workflow_refs or 0) > 0:
+            raise ValueError(
+                "Team is used by a workflow — remove it from workflows first"
+            )
+        config.published_version_id = None
+        await self.session.flush()
+        await self.session.delete(config)
+        await self.session.flush()
+        await self.audit(
+            action="team.delete",
+            resource_type="team_config",
+            resource_id=str(config_id),
+        )
 
 
 class MembershipRepository(TenantRepository):
@@ -900,6 +1096,17 @@ class WorkflowRepository(TenantRepository):
             )
         )
 
+    async def list_versions(self, config_id: uuid.UUID) -> Sequence[WorkflowVersion]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(WorkflowVersion)
+                .where(WorkflowVersion.workflow_config_id == config_id)
+                .order_by(WorkflowVersion.version.desc()),
+                WorkflowVersion,
+            )
+        )
+        return rows.all()
+
     async def steps(self, version_id: uuid.UUID) -> Sequence[WorkflowStep]:
         rows = await self.session.scalars(
             self.scoped(
@@ -910,6 +1117,84 @@ class WorkflowRepository(TenantRepository):
             )
         )
         return rows.all()
+
+    async def restore_version(
+        self, config_id: uuid.UUID, version_id: uuid.UUID, *, as_draft: bool = False
+    ) -> WorkflowVersion:
+        """Restore a historical workflow version (Atlas-owned snapshots)."""
+        config = await self.get_config(config_id)
+        if config is None:
+            raise LookupError("Workflow not found")
+        version = await self.get_version(version_id, allow_draft=True)
+        if version is None or version.workflow_config_id != config_id:
+            raise LookupError("Workflow version not found")
+
+        if as_draft:
+            steps = [
+                {
+                    "name": step.name,
+                    "target_type": step.target_type,
+                    "target_config_id": (
+                        step.agent_config_id
+                        if step.target_type == "agent"
+                        else step.team_config_id
+                    ),
+                    "condition_expression": step.condition_expression,
+                }
+                for step in await self.steps(version.id)
+            ]
+            draft = await self.create_draft(
+                config_id=config_id,
+                mode=version.mode,
+                steps=steps,
+            )
+            await self.audit(
+                action="workflow.restore_draft",
+                resource_type="workflow_version",
+                resource_id=str(draft.id),
+                details={
+                    "source_version_id": str(version.id),
+                    "source_version": version.version,
+                    "draft_version": draft.version,
+                },
+            )
+            return draft
+
+        if version.status == AgentStatus.draft:
+            return await self.publish(version.id)
+
+        await self.session.execute(
+            update(WorkflowConfig)
+            .where(
+                WorkflowConfig.id == config_id,
+                WorkflowConfig.tenant_id == self.context.tenant_id,
+            )
+            .values(published_version_id=version.id)
+        )
+        await self.session.flush()
+        await self.audit(
+            action="workflow.restore",
+            resource_type="workflow_version",
+            resource_id=str(version.id),
+            details={"version": version.version},
+        )
+        return version
+
+    async def resolve_published_team_step(
+        self,
+        workflow_id: uuid.UUID,
+        team_id: uuid.UUID,
+    ) -> uuid.UUID:
+        """Return pinned team_version_id if team is a step on the published workflow."""
+        config = await self.get_config(workflow_id)
+        if config is None or config.published_version_id is None:
+            raise LookupError("Published workflow not found")
+        for step in await self.steps(config.published_version_id):
+            if step.target_type == "team" and step.team_config_id == team_id:
+                if step.team_version_id is None:
+                    raise LookupError("Workflow team step has no pinned version")
+                return step.team_version_id
+        raise LookupError("Team is not a step in this published workflow")
 
     async def create_draft(
         self,
@@ -1054,6 +1339,26 @@ class WorkflowRepository(TenantRepository):
         )
         return version
 
+    async def delete_config(self, config_id: uuid.UUID) -> None:
+        config = await self.get_config(config_id)
+        if config is None:
+            raise LookupError("Workflow not found")
+        config.published_version_id = None
+        await self.session.flush()
+        await self.session.execute(
+            delete(WorkflowAssignment).where(
+                WorkflowAssignment.tenant_id == self.context.tenant_id,
+                WorkflowAssignment.workflow_config_id == config_id,
+            )
+        )
+        await self.session.delete(config)
+        await self.session.flush()
+        await self.audit(
+            action="workflow.delete",
+            resource_type="workflow_config",
+            resource_id=str(config_id),
+        )
+
 
 class CredentialRepository(TenantRepository):
     async def list(self) -> Sequence[TenantCredential]:
@@ -1114,6 +1419,14 @@ class ServiceAccountRepository(TenantRepository):
             )
         )
         return rows.all()
+
+    async def get(self, account_id: uuid.UUID) -> ServiceAccount | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(ServiceAccount).where(ServiceAccount.id == account_id),
+                ServiceAccount,
+            )
+        )
 
     async def create(
         self,
@@ -1256,106 +1569,6 @@ class ToolDefinitionRepository(TenantRepository):
         return True
 
 
-class ApprovalRepository(TenantRepository):
-    async def create_from_requirement(
-        self,
-        *,
-        conversation: ConversationSession,
-        run_id: str,
-        requirement: dict[str, Any],
-    ) -> ApprovalBinding:
-        tool = requirement.get("tool_execution") or {}
-        requirement_id = str(requirement.get("id") or tool.get("tool_call_id") or new_id())
-        existing = await self.session.scalar(
-            self.scoped(
-                select(ApprovalBinding).where(
-                    ApprovalBinding.run_id == run_id,
-                    ApprovalBinding.requirement_id == requirement_id,
-                ),
-                ApprovalBinding,
-            )
-        )
-        if existing:
-            return existing
-        arguments = tool.get("tool_args") if isinstance(tool, dict) else {}
-        arguments = arguments if isinstance(arguments, dict) else {}
-        request_hash = hashlib.sha256(
-            json.dumps(arguments, sort_keys=True, default=str).encode()
-        ).hexdigest()
-        row = ApprovalBinding(
-            id=new_id(),
-            tenant_id=self.context.tenant_id,
-            session_id=conversation.id,
-            tool_name=str(tool.get("tool_name") or "unknown"),
-            request_hash=request_hash,
-            redacted_arguments=arguments,
-            status=ApprovalStatus.pending,
-            run_id=run_id,
-            requirement_id=requirement_id,
-            requirement=requirement,
-            expires_at=datetime.now(UTC) + timedelta(hours=24),
-        )
-        self.session.add(row)
-        await self.session.flush()
-        await self.audit(
-            action="approval.request",
-            resource_type="approval",
-            resource_id=str(row.id),
-            details={"run_id": run_id, "tool_name": row.tool_name},
-        )
-        return row
-
-    async def list_pending(self) -> Sequence[ApprovalBinding]:
-        rows = await self.session.scalars(
-            self.scoped(
-                select(ApprovalBinding)
-                .where(ApprovalBinding.status == ApprovalStatus.pending)
-                .order_by(ApprovalBinding.created_at.asc()),
-                ApprovalBinding,
-            )
-        )
-        return rows.all()
-
-    async def get(self, approval_id: uuid.UUID, *, lock: bool = False) -> ApprovalBinding | None:
-        statement = select(ApprovalBinding).where(ApprovalBinding.id == approval_id)
-        if lock:
-            statement = statement.with_for_update()
-        return await self.session.scalar(self.scoped(statement, ApprovalBinding))
-
-    async def resolve(
-        self, approval_id: uuid.UUID, approved: bool, reason: str | None = None
-    ) -> ApprovalBinding | None:
-        if not self.context.can_approve():
-            raise PermissionError("Only tenant/platform admins can resolve approvals")
-        approval = await self.get(approval_id, lock=True)
-        if approval is None or approval.status != ApprovalStatus.pending:
-            return None
-        if approval.expires_at and approval.expires_at <= datetime.now(UTC):
-            return None
-        approval.status = ApprovalStatus.approved if approved else ApprovalStatus.rejected
-        approval.resolved_by = self.context.user_id
-        approval.decision_reason = reason
-        await self.session.flush()
-        await self.audit(
-            action="approval.resolve",
-            resource_type="approval",
-            resource_id=str(approval.id),
-            details={"approved": approved, "reason": reason},
-        )
-        return approval
-
-    async def mark_continued(
-        self, approval_id: uuid.UUID, *, error: str | None = None
-    ) -> ApprovalBinding | None:
-        approval = await self.get(approval_id, lock=True)
-        if approval is None:
-            return None
-        approval.continued_at = datetime.now(UTC)
-        approval.continuation_error = error
-        await self.session.flush()
-        return approval
-
-
 class ToolDefinitionVersionRepository(TenantRepository):
     async def list_for_tool(
         self, tool_definition_id: uuid.UUID
@@ -1421,7 +1634,6 @@ class ToolDefinitionVersionRepository(TenantRepository):
             draft.dependencies = dependencies
             draft.capabilities = capabilities
             draft.settings = settings
-            draft.updated_at = datetime.now(UTC)
             await self.session.flush()
             return draft
         row = ToolDefinitionVersion(
@@ -1654,6 +1866,23 @@ class KnowledgeRepository(TenantRepository):
                 KnowledgeBase,
             )
         )
+
+    async def update_base(
+        self,
+        knowledge_base_id: uuid.UUID,
+        *,
+        name: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> KnowledgeBase | None:
+        base = await self.get_base(knowledge_base_id)
+        if base is None:
+            return None
+        if name is not None:
+            base.name = name
+        if config is not None:
+            base.config = config
+        await self.session.flush()
+        return base
 
     async def create_source(
         self,

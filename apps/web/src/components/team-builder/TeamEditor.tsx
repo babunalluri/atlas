@@ -1,11 +1,26 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
+import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select, Textarea } from "@/components/ui/Field";
-import { publishTeam, saveTeamDraft } from "@/lib/api/admin";
+import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
+import {
+  VersionHistoryPanel,
+  type VersionHistoryItem,
+} from "@/components/ui/VersionHistoryPanel";
+import {
+  deleteTeam,
+  getTeamVersion,
+  listTeamVersions,
+  publishTeam,
+  restoreTeamVersion,
+  saveTeamDraft,
+} from "@/lib/api/admin";
 import {
   ALLOWED_MODELS,
   type AgentSummary,
@@ -13,9 +28,23 @@ import {
   type TeamConfig,
   type TeamDraftInput,
   type TeamMode,
+  type TeamVersionDetail,
+  type TeamVersionSummary,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { formatRelative } from "@/lib/utils";
+
+function applyTeamToForm(team: TeamConfig): TeamDraftInput {
+  return {
+    name: team.name,
+    description: team.description,
+    instructions: team.instructions,
+    mode: team.mode,
+    model: team.model,
+    temperature: team.temperature,
+    memberConfigIds: team.members.map((member) => member.agentConfigId),
+  };
+}
 
 export function TeamEditor({
   initial,
@@ -25,25 +54,50 @@ export function TeamEditor({
   agents: AgentSummary[];
 }) {
   const { getAccessToken } = useAgentOsToken();
-  const [form, setForm] = useState<TeamDraftInput>({
-    name: initial.name,
-    description: initial.description,
-    instructions: initial.instructions,
-    mode: initial.mode,
-    model: initial.model,
-    temperature: initial.temperature,
-    memberConfigIds: initial.members.map((member) => member.agentConfigId),
-  });
+  const router = useRouter();
+  const [form, setForm] = useState<TeamDraftInput>(() => applyTeamToForm(initial));
   const [status, setStatus] = useState(initial.status);
   const [draftVersion, setDraftVersion] = useState(initial.draftVersion);
   const [publishedVersion, setPublishedVersion] = useState(initial.publishedVersion);
-  const [busy, setBusy] = useState<"save" | "publish" | null>(null);
+  const [busy, setBusy] = useState<
+    "save" | "publish" | "delete" | "versions" | "restore" | null
+  >(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [versions, setVersions] = useState<TeamVersionSummary[]>([]);
+  const [viewing, setViewing] = useState<TeamVersionDetail | null>(null);
 
   const agentMap = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
     [agents],
   );
+  const available = agents.filter(
+    (agent) => !form.memberConfigIds.includes(agent.id),
+  );
+
+  function applyTeam(team: TeamConfig) {
+    setForm(applyTeamToForm(team));
+    setStatus(team.status);
+    setDraftVersion(team.draftVersion);
+    setPublishedVersion(team.publishedVersion);
+  }
+
+  async function refreshVersions() {
+    setBusy("versions");
+    try {
+      const rows = await listTeamVersions(await getAccessToken(), initial.id);
+      setVersions(rows);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Failed to load versions");
+    } finally {
+      setBusy((current) => (current === "versions" ? null : current));
+    }
+  }
+
+  useEffect(() => {
+    void refreshVersions();
+    // Load once on mount for this team.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only
+  }, [initial.id]);
 
   function update<K extends keyof TeamDraftInput>(
     key: K,
@@ -84,9 +138,9 @@ export function TeamEditor({
         initial.id,
         form,
       );
-      setStatus(saved.status);
-      setDraftVersion(saved.draftVersion);
+      applyTeam(saved);
       setBanner("Draft saved");
+      void refreshVersions();
       return saved;
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Save failed");
@@ -106,10 +160,9 @@ export function TeamEditor({
     try {
       await saveTeamDraft(await getAccessToken(), initial.id, form);
       const published = await publishTeam(await getAccessToken(), initial.id);
-      setStatus(published.status);
-      setDraftVersion(published.draftVersion);
-      setPublishedVersion(published.publishedVersion);
+      applyTeam(published);
       setBanner(`Published v${published.publishedVersion}`);
+      void refreshVersions();
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Publish failed");
     } finally {
@@ -117,179 +170,378 @@ export function TeamEditor({
     }
   }
 
+  async function remove() {
+    if (
+      !window.confirm(
+        `Delete “${form.name || "this team"}”? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("delete");
+    setBanner(null);
+    try {
+      await deleteTeam(await getAccessToken(), initial.id);
+      router.push("/admin/teams");
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Delete failed");
+      setBusy(null);
+    }
+  }
+
+  async function viewVersion(version: VersionHistoryItem) {
+    setBusy("versions");
+    setBanner(null);
+    try {
+      const detail = await getTeamVersion(
+        await getAccessToken(),
+        initial.id,
+        version.id,
+      );
+      setViewing(detail);
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Failed to load version");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function restoreLive(version: VersionHistoryItem) {
+    if (version.isLive) {
+      setBanner(`v${version.version} is already live`);
+      return;
+    }
+    if (
+      !window.confirm(
+        `Make v${version.version} the live published version? Current live stays available in history.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("restore");
+    setBanner(null);
+    try {
+      const restored = await restoreTeamVersion(
+        await getAccessToken(),
+        initial.id,
+        version.id,
+      );
+      applyTeam(restored);
+      setViewing(null);
+      setBanner(`Restored live to v${restored.publishedVersion}`);
+      void refreshVersions();
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function restoreDraft(version: VersionHistoryItem) {
+    if (
+      !window.confirm(
+        `Clone v${version.version} into a new draft for editing? Live published version will not change until you publish.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("restore");
+    setBanner(null);
+    try {
+      const restored = await restoreTeamVersion(
+        await getAccessToken(),
+        initial.id,
+        version.id,
+        { asDraft: true },
+      );
+      applyTeam(restored);
+      setViewing(null);
+      setBanner(`Loaded v${version.version} into draft v${restored.draftVersion}`);
+      void refreshVersions();
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const historyItems: VersionHistoryItem[] = versions.map((version) => ({
+    id: version.id,
+    version: version.version,
+    status: version.status,
+    isLive: version.isLive,
+    createdAt: version.createdAt,
+    details: [version.mode, `${version.memberCount} members`],
+  }));
+
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-teal">
-            Team editor
-          </p>
-          <h1 className="font-display text-3xl font-semibold tracking-tight">
-            {form.name || "Untitled team"}
-          </h1>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-muted">
-            <Badge tone={status === "published" ? "success" : "warning"}>{status}</Badge>
+    <div className="space-y-3">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <BackLink href="/admin/teams" label="Back to teams" />
+            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+              {form.name || "Untitled team"}
+            </h1>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-muted">
+            <Badge tone={status === "published" ? "success" : "warning"}>
+              {status}
+            </Badge>
             <span>draft v{draftVersion}</span>
             {publishedVersion ? <span>live v{publishedVersion}</span> : null}
-            <span>updated {formatRelative(initial.updatedAt)}</span>
+            <span>/{initial.slug}</span>
+            <span>{formatRelative(initial.updatedAt)}</span>
           </div>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={save} disabled={busy !== null}>
-            {busy === "save" ? "Saving…" : "Save draft"}
+        <EditorActions>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={() => void remove()}
+            disabled={busy !== null}
+          >
+            <TrashIcon />
+            {busy === "delete" ? "Deleting…" : "Delete"}
           </Button>
-          <Button variant="accent" onClick={publish} disabled={busy !== null}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={save}
+            disabled={busy !== null}
+          >
+            <SaveIcon />
+            {busy === "save" ? "Saving…" : "Save"}
+          </Button>
+          <Button
+            variant="accent"
+            size="sm"
+            onClick={publish}
+            disabled={busy !== null}
+          >
+            <PublishIcon />
             {busy === "publish" ? "Publishing…" : "Publish"}
           </Button>
-        </div>
-      </div>
+        </EditorActions>
+      </header>
 
       {banner ? (
-        <div className="rounded-lg border border-teal/30 bg-teal/10 px-3 py-2 text-sm text-ink-soft">
+        <p className="rounded-md border border-teal/30 bg-teal/10 px-3 py-1.5 text-sm">
           {banner}
-        </div>
+        </p>
       ) : null}
 
-      <div className="space-y-5">
-          <section className="surface-panel rounded-2xl p-5">
-            <h2 className="font-display text-lg font-semibold">Identity</h2>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <div>
-                <Label htmlFor="team-name">Name</Label>
-                <Input
-                  id="team-name"
-                  value={form.name}
-                  onChange={(event) => update("name", event.target.value)}
-                />
-              </div>
-              <div>
-                <Label htmlFor="team-slug" hint="immutable">
-                  Slug
-                </Label>
-                <Input id="team-slug" value={initial.slug} disabled />
-              </div>
-              <div className="md:col-span-2">
-                <Label htmlFor="team-description">Description</Label>
-                <Input
-                  id="team-description"
-                  value={form.description}
-                  onChange={(event) => update("description", event.target.value)}
-                />
-              </div>
-            </div>
-          </section>
+      <section className="rounded-xl border border-line bg-raised/40 p-4">
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="md:col-span-2">
+            <Label htmlFor="team-name">Name</Label>
+            <Input
+              id="team-name"
+              value={form.name}
+              onChange={(event) => update("name", event.target.value)}
+            />
+          </div>
+          <div>
+            <Label htmlFor="team-mode">Mode</Label>
+            <Select
+              id="team-mode"
+              value={form.mode}
+              onChange={(event) => update("mode", event.target.value as TeamMode)}
+            >
+              <option value="route">Route</option>
+              <option value="coordinate">Coordinate</option>
+            </Select>
+          </div>
+          <div className="md:col-span-3">
+            <Label htmlFor="team-description">Description</Label>
+            <Input
+              id="team-description"
+              value={form.description}
+              onChange={(event) => update("description", event.target.value)}
+              placeholder="Optional"
+            />
+          </div>
+          <div>
+            <Label htmlFor="team-model">Leader model</Label>
+            <Select
+              id="team-model"
+              value={form.model}
+              onChange={(event) => update("model", event.target.value as ModelId)}
+            >
+              {ALLOWED_MODELS.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor="team-temperature" hint={form.temperature.toFixed(2)}>
+              Temperature
+            </Label>
+            <input
+              id="team-temperature"
+              type="range"
+              min={0}
+              max={1.5}
+              step={0.05}
+              value={form.temperature}
+              onChange={(event) =>
+                update("temperature", Number.parseFloat(event.target.value))
+              }
+              className="mt-2 w-full accent-teal"
+            />
+          </div>
+          <div className="md:col-span-3">
+            <Label htmlFor="team-instructions">Instructions</Label>
+            <Textarea
+              id="team-instructions"
+              value={form.instructions}
+              onChange={(event) => update("instructions", event.target.value)}
+              rows={4}
+              className="min-h-0 font-mono text-[13px]"
+            />
+          </div>
+        </div>
+      </section>
 
-          <section className="surface-panel rounded-2xl p-5">
-            <h2 className="font-display text-lg font-semibold">Coordination</h2>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <div>
-                <Label htmlFor="team-mode">Mode</Label>
-                <Select
-                  id="team-mode"
-                  value={form.mode}
-                  onChange={(event) => update("mode", event.target.value as TeamMode)}
-                >
-                  <option value="route">Route</option>
-                  <option value="coordinate">Coordinate</option>
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor="team-model">Leader model</Label>
-                <Select
-                  id="team-model"
-                  value={form.model}
-                  onChange={(event) => update("model", event.target.value as ModelId)}
-                >
-                  {ALLOWED_MODELS.map((model) => (
-                    <option key={model.id} value={model.id}>{model.label}</option>
-                  ))}
-                </Select>
-              </div>
-              <div className="md:col-span-2">
-                <Label htmlFor="team-temperature" hint={form.temperature.toFixed(2)}>
-                  Leader temperature
-                </Label>
-                <input
-                  id="team-temperature"
-                  type="range"
-                  min={0}
-                  max={1.5}
-                  step={0.05}
-                  value={form.temperature}
-                  onChange={(event) =>
-                    update("temperature", Number.parseFloat(event.target.value))
-                  }
-                  className="w-full accent-teal"
-                />
-              </div>
-              <div className="md:col-span-2">
-                <Label htmlFor="team-instructions">Team instructions</Label>
-                <Textarea
-                  id="team-instructions"
-                  value={form.instructions}
-                  onChange={(event) => update("instructions", event.target.value)}
-                  className="min-h-40 font-mono text-[13px]"
-                />
-              </div>
-            </div>
-          </section>
+      <section className="rounded-xl border border-line bg-raised/40 p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">Members</h2>
+          <Badge
+            tone={form.memberConfigIds.length >= 2 ? "success" : "warning"}
+          >
+            {form.memberConfigIds.length} selected
+          </Badge>
+        </div>
+        <p className="mb-3 text-xs text-slate-muted">
+          Need at least two published agents. Order is routing priority.
+        </p>
 
-          <section className="surface-panel rounded-2xl p-5">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="font-display text-lg font-semibold">Members</h2>
-              <Badge tone={form.memberConfigIds.length >= 2 ? "success" : "warning"}>
-                {form.memberConfigIds.length} selected
-              </Badge>
-            </div>
-            <p className="mt-2 text-sm text-slate-muted">
-              Order controls routing priority. Publishing pins each selected agent&apos;s
-              current published version.
+        {form.memberConfigIds.length === 0 ? (
+          <p className="mb-3 rounded-md border border-dashed border-line px-3 py-4 text-center text-sm text-slate-muted">
+            No members yet — add agents below.
+          </p>
+        ) : (
+          <ul className="mb-3 space-y-1.5">
+            {form.memberConfigIds.map((id, index) => {
+              const agent = agentMap.get(id);
+              if (!agent) return null;
+              return (
+                <li
+                  key={id}
+                  className="flex items-center gap-2 rounded-md border border-line bg-canvas/40 px-2.5 py-2"
+                >
+                  <span className="w-5 text-center text-xs text-slate-muted">
+                    {index + 1}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{agent.name}</p>
+                  </div>
+                  <Badge
+                    tone={agent.status === "published" ? "success" : "warning"}
+                  >
+                    {agent.status}
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => moveMember(index, -1)}
+                    disabled={index === 0}
+                  >
+                    ↑
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => moveMember(index, 1)}
+                    disabled={index === form.memberConfigIds.length - 1}
+                  >
+                    ↓
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => toggleMember(id)}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        <div className="border-t border-line pt-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-muted">
+            Add agents
+          </p>
+          {available.length === 0 ? (
+            <p className="text-sm text-slate-muted">
+              All agents are already on this team.
             </p>
-            <ul className="mt-4 space-y-2">
-              {form.memberConfigIds.map((id, index) => {
-                const agent = agentMap.get(id);
-                if (!agent) return null;
-                return (
-                  <li key={id} className="flex items-center gap-3 rounded-xl border border-line bg-raised/70 p-3">
-                    <span className="w-6 text-center text-xs font-semibold text-slate-muted">
-                      {index + 1}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="font-medium">{agent.name}</p>
-                      <p className="text-xs text-slate-muted">/{agent.slug}</p>
-                    </div>
-                    <Badge tone={agent.status === "published" ? "success" : "warning"}>
-                      {agent.status}
-                    </Badge>
-                    <Button variant="secondary" onClick={() => moveMember(index, -1)} disabled={index === 0}>↑</Button>
-                    <Button variant="secondary" onClick={() => moveMember(index, 1)} disabled={index === form.memberConfigIds.length - 1}>↓</Button>
-                    <Button variant="secondary" onClick={() => toggleMember(id)}>Remove</Button>
-                  </li>
-                );
-              })}
-            </ul>
-            <div className="mt-5 border-t border-line pt-4">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-slate-muted">
-                Available agents
-              </p>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {agents
-                  .filter((agent) => !form.memberConfigIds.includes(agent.id))
-                  .map((agent) => (
-                    <button
-                      key={agent.id}
-                      type="button"
-                      onClick={() => toggleMember(agent.id)}
-                      className="rounded-lg border border-line bg-raised/60 p-3 text-left transition hover:border-teal/50"
-                    >
-                      <span className="font-medium">{agent.name}</span>
-                      <span className="ml-2 text-xs text-slate-muted">Add</span>
-                    </button>
-                  ))}
-              </div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {available.map((agent) => (
+                <button
+                  key={agent.id}
+                  type="button"
+                  onClick={() => toggleMember(agent.id)}
+                  className="rounded-md border border-line bg-raised px-2.5 py-1.5 text-left text-sm hover:border-teal/50"
+                >
+                  <span className="font-medium">{agent.name}</span>
+                  <span className="ml-1.5 text-xs text-slate-muted">+ Add</span>
+                </button>
+              ))}
             </div>
-          </section>
-      </div>
+          )}
+        </div>
+      </section>
+
+      <VersionHistoryPanel
+        versions={historyItems}
+        busy={busy !== null}
+        onRefresh={() => void refreshVersions()}
+        onView={(version) => void viewVersion(version)}
+        onRestoreLive={(version) => void restoreLive(version)}
+        onRestoreDraft={(version) => void restoreDraft(version)}
+        onCloseView={() => setViewing(null)}
+        viewing={
+          viewing ? (
+            <dl className="grid gap-2 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-xs text-slate-muted">Mode</dt>
+                <dd>{viewing.mode}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-slate-muted">Model</dt>
+                <dd>{viewing.model}</dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs text-slate-muted">Instructions</dt>
+                <dd className="mt-0.5 whitespace-pre-wrap font-mono text-[13px]">
+                  {viewing.instructions}
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="mb-1 text-xs text-slate-muted">Members</dt>
+                <dd>
+                  <ul className="space-y-1">
+                    {viewing.members.map((member) => (
+                      <li key={member.agentConfigId} className="text-sm">
+                        {member.position + 1}. {member.name}{" "}
+                        <span className="text-xs text-slate-muted">
+                          (agent v{member.version})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+            </dl>
+          ) : null
+        }
+      />
     </div>
   );
 }

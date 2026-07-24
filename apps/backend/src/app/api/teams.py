@@ -10,8 +10,10 @@ from app.api.schemas import (
     TeamConfigOut,
     TeamCreateIn,
     TeamMemberOut,
+    TeamRestoreIn,
     TeamUpdateIn,
     TeamVersionOut,
+    TeamVersionSummaryOut,
 )
 from app.auth.dependencies import require_roles, require_tenant
 from app.db.models import Role, TeamConfig, TeamVersion
@@ -238,3 +240,87 @@ async def publish_team(
     config = await repo.get_config(team_id)
     assert config is not None
     return await team_config_out(repo, config)
+
+
+@router.get("/{team_id}/versions", response_model=list[TeamVersionSummaryOut])
+async def list_team_versions(
+    team_id: uuid.UUID,
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> list[TeamVersionSummaryOut]:
+    repo = TeamRepository(session, context)
+    config = await repo.get_config(team_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    summaries: list[TeamVersionSummaryOut] = []
+    for version in await repo.list_versions(team_id):
+        members = await repo.members(version.id)
+        summaries.append(
+            TeamVersionSummaryOut(
+                id=version.id,
+                version=version.version,
+                status=version.status.value,
+                mode=version.mode,
+                member_count=len(members),
+                is_live=config.published_version_id == version.id,
+                created_at=version.created_at,
+            )
+        )
+    return summaries
+
+
+@router.get("/{team_id}/versions/{version_id}", response_model=TeamVersionOut)
+async def get_team_version(
+    team_id: uuid.UUID,
+    version_id: uuid.UUID,
+    context: Annotated[TenantContext, Depends(require_tenant)],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> TeamVersionOut:
+    repo = TeamRepository(session, context)
+    config = await repo.get_config(team_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    version = await repo.get_version(version_id, allow_draft=True)
+    if version is None or version.team_config_id != team_id:
+        raise HTTPException(status_code=404, detail="Team version not found")
+    agent_repo = AgentRepository(session, context)
+    return await _version_out(repo, agent_repo, version)
+
+
+@router.post("/{team_id}/versions/{version_id}/restore", response_model=TeamConfigOut)
+async def restore_team_version(
+    team_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: TeamRestoreIn,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> TeamConfigOut:
+    repo = TeamRepository(session, context)
+    try:
+        await repo.restore_version(team_id, version_id, as_draft=body.as_draft)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    config = await repo.get_config(team_id)
+    assert config is not None
+    return await team_config_out(repo, config)
+
+
+@router.delete("/{team_id}", status_code=204)
+async def delete_team(
+    team_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> None:
+    repo = TeamRepository(session, context)
+    try:
+        await repo.delete_config(team_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

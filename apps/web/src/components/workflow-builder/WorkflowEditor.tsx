@@ -1,12 +1,26 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
-import { WorkflowAccessPanel } from "@/components/workflow-builder/WorkflowAccessPanel";
+import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select } from "@/components/ui/Field";
-import { publishWorkflow, saveWorkflowDraft } from "@/lib/api/admin";
+import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
+import {
+  VersionHistoryPanel,
+  type VersionHistoryItem,
+} from "@/components/ui/VersionHistoryPanel";
+import {
+  deleteWorkflow,
+  getWorkflowVersion,
+  listWorkflowVersions,
+  publishWorkflow,
+  restoreWorkflowVersion,
+  saveWorkflowDraft,
+} from "@/lib/api/admin";
 import type {
   AgentSummary,
   TeamSummary,
@@ -18,6 +32,15 @@ import type {
 import { useAgentOsToken } from "@/lib/auth/token";
 import { formatRelative } from "@/lib/utils";
 
+function applyWorkflowToForm(workflow: WorkflowConfig): WorkflowDraftInput {
+  return {
+    name: workflow.name,
+    description: workflow.description,
+    mode: workflow.mode,
+    steps: workflow.steps,
+  };
+}
+
 export function WorkflowEditor({
   initial,
   agents,
@@ -28,17 +51,23 @@ export function WorkflowEditor({
   teams: TeamSummary[];
 }) {
   const { getAccessToken } = useAgentOsToken();
-  const [form, setForm] = useState<WorkflowDraftInput>({
-    name: initial.name,
-    description: initial.description,
-    mode: initial.mode,
-    steps: initial.steps,
-  });
+  const router = useRouter();
+  const [form, setForm] = useState<WorkflowDraftInput>(() =>
+    applyWorkflowToForm(initial),
+  );
   const [status, setStatus] = useState(initial.status);
   const [draftVersion, setDraftVersion] = useState(initial.draftVersion);
   const [publishedVersion, setPublishedVersion] = useState(initial.publishedVersion);
-  const [busy, setBusy] = useState<"save" | "publish" | null>(null);
+  const [busy, setBusy] = useState<
+    "save" | "publish" | "delete" | "versions" | "restore" | null
+  >(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [versions, setVersions] = useState<VersionHistoryItem[]>([]);
+  const [viewing, setViewing] = useState<{
+    version: number;
+    mode: WorkflowMode;
+    steps: WorkflowStep[];
+  } | null>(null);
 
   const targets = useMemo(
     () => [
@@ -60,6 +89,39 @@ export function WorkflowEditor({
     [agents, teams],
   );
 
+  function applyWorkflow(workflow: WorkflowConfig) {
+    setForm(applyWorkflowToForm(workflow));
+    setStatus(workflow.status);
+    setDraftVersion(workflow.draftVersion);
+    setPublishedVersion(workflow.publishedVersion);
+  }
+
+  async function refreshVersions() {
+    setBusy("versions");
+    try {
+      const rows = await listWorkflowVersions(await getAccessToken(), initial.id);
+      setVersions(
+        rows.map((row) => ({
+          id: row.id,
+          version: row.version,
+          status: row.status,
+          isLive: row.isLive,
+          createdAt: row.createdAt,
+          details: [row.mode, `${row.stepCount} steps`],
+        })),
+      );
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Failed to load versions");
+    } finally {
+      setBusy((current) => (current === "versions" ? null : current));
+    }
+  }
+
+  useEffect(() => {
+    void refreshVersions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only
+  }, [initial.id]);
+
   function addStep(target: (typeof targets)[number]) {
     setForm((previous) => ({
       ...previous,
@@ -71,18 +133,16 @@ export function WorkflowEditor({
           targetConfigId: target.id,
           targetName: target.name,
           targetSlug: target.slug,
-          targetStatus: target.status,
-          conditionExpression: null,
         },
       ],
     }));
   }
 
-  function updateStep(index: number, values: Partial<WorkflowStep>) {
+  function updateStep(index: number, patch: Partial<WorkflowStep>) {
     setForm((previous) => ({
       ...previous,
       steps: previous.steps.map((step, position) =>
-        position === index ? { ...step, ...values } : step,
+        position === index ? { ...step, ...patch } : step,
       ),
     }));
   }
@@ -99,8 +159,8 @@ export function WorkflowEditor({
 
   async function save() {
     if (!form.name.trim() || form.steps.length === 0) {
-      setBanner("A name and at least one step are required");
-      return null;
+      setBanner("Name and at least one step are required");
+      return;
     }
     setBusy("save");
     setBanner(null);
@@ -110,194 +170,371 @@ export function WorkflowEditor({
         initial.id,
         form,
       );
-      setStatus(saved.status);
-      setDraftVersion(saved.draftVersion);
+      applyWorkflow(saved);
       setBanner("Draft saved");
-      return saved;
-    } catch (reason) {
-      setBanner(reason instanceof Error ? reason.message : "Save failed");
-      return null;
+      void refreshVersions();
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Save failed");
     } finally {
       setBusy(null);
     }
   }
 
   async function publish() {
+    if (form.steps.length === 0) {
+      setBanner("Add at least one step before publishing");
+      return;
+    }
     setBusy("publish");
     setBanner(null);
     try {
-      const saved = await saveWorkflowDraft(
+      await saveWorkflowDraft(await getAccessToken(), initial.id, form);
+      const published = await publishWorkflow(await getAccessToken(), initial.id);
+      applyWorkflow(published);
+      setBanner(`Published v${published.publishedVersion}`);
+      void refreshVersions();
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Publish failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove() {
+    if (
+      !window.confirm(
+        `Delete “${form.name || "this workflow"}”? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("delete");
+    setBanner(null);
+    try {
+      await deleteWorkflow(await getAccessToken(), initial.id);
+      router.push("/admin/workflows");
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Delete failed");
+      setBusy(null);
+    }
+  }
+
+  async function viewVersion(version: VersionHistoryItem) {
+    setBusy("versions");
+    setBanner(null);
+    try {
+      const detail = await getWorkflowVersion(
         await getAccessToken(),
         initial.id,
-        form,
+        version.id,
       );
-      if (saved.steps.length === 0) throw new Error("Add at least one step");
-      const published = await publishWorkflow(await getAccessToken(), initial.id);
-      setStatus(published.status);
-      setDraftVersion(published.draftVersion);
-      setPublishedVersion(published.publishedVersion);
-      setBanner(`Published v${published.publishedVersion}`);
-    } catch (reason) {
-      setBanner(reason instanceof Error ? reason.message : "Publish failed");
+      setViewing({
+        version: detail.version,
+        mode: detail.mode,
+        steps: detail.steps,
+      });
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Failed to load version");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function restoreLive(version: VersionHistoryItem) {
+    if (version.isLive) {
+      setBanner(`v${version.version} is already live`);
+      return;
+    }
+    if (
+      !window.confirm(
+        `Make v${version.version} the live published version? Current live stays available in history.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("restore");
+    setBanner(null);
+    try {
+      const restored = await restoreWorkflowVersion(
+        await getAccessToken(),
+        initial.id,
+        version.id,
+      );
+      applyWorkflow(restored);
+      setViewing(null);
+      setBanner(`Restored live to v${restored.publishedVersion}`);
+      void refreshVersions();
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function restoreDraft(version: VersionHistoryItem) {
+    if (
+      !window.confirm(
+        `Clone v${version.version} into a new draft for editing? Live published version will not change until you publish.`,
+      )
+    ) {
+      return;
+    }
+    setBusy("restore");
+    setBanner(null);
+    try {
+      const restored = await restoreWorkflowVersion(
+        await getAccessToken(),
+        initial.id,
+        version.id,
+        { asDraft: true },
+      );
+      applyWorkflow(restored);
+      setViewing(null);
+      setBanner(`Loaded v${version.version} into draft v${restored.draftVersion}`);
+      void refreshVersions();
+    } catch (err) {
+      setBanner(err instanceof Error ? err.message : "Restore failed");
     } finally {
       setBusy(null);
     }
   }
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-teal">
-            Atlas workflow editor
-          </p>
-          <h1 className="font-display text-3xl font-semibold tracking-tight">
-            {form.name || "Untitled workflow"}
-          </h1>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-muted">
-            <Badge tone={status === "published" ? "success" : "warning"}>{status}</Badge>
+    <div className="space-y-3">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <BackLink href="/admin/workflows" label="Back to workflows" />
+            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+              {form.name || "Untitled workflow"}
+            </h1>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-muted">
+            <Badge tone={status === "published" ? "success" : "warning"}>
+              {status}
+            </Badge>
             <span>draft v{draftVersion}</span>
             {publishedVersion ? <span>live v{publishedVersion}</span> : null}
-            <span>updated {formatRelative(initial.updatedAt)}</span>
+            <span>/{initial.slug}</span>
+            <span>{formatRelative(initial.updatedAt)}</span>
           </div>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={save} disabled={busy !== null}>
-            {busy === "save" ? "Saving…" : "Save draft"}
+        <EditorActions>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={() => void remove()}
+            disabled={busy !== null}
+          >
+            <TrashIcon />
+            {busy === "delete" ? "Deleting…" : "Delete"}
           </Button>
-          <Button variant="accent" onClick={publish} disabled={busy !== null}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={save}
+            disabled={busy !== null}
+          >
+            <SaveIcon />
+            {busy === "save" ? "Saving…" : "Save"}
+          </Button>
+          <Button
+            variant="accent"
+            size="sm"
+            onClick={publish}
+            disabled={busy !== null}
+          >
+            <PublishIcon />
             {busy === "publish" ? "Publishing…" : "Publish"}
           </Button>
-        </div>
-      </div>
+        </EditorActions>
+      </header>
 
       {banner ? (
-        <div className="rounded-lg border border-teal/30 bg-teal/10 px-3 py-2 text-sm">
+        <p className="rounded-md border border-teal/30 bg-teal/10 px-3 py-1.5 text-sm">
           {banner}
-        </div>
+        </p>
       ) : null}
 
-      <div className="space-y-5">
-          <section className="surface-panel rounded-2xl p-5">
-            <h2 className="font-display text-lg font-semibold">Definition</h2>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <div>
-                <Label htmlFor="workflow-name">Name</Label>
-                <Input
-                  id="workflow-name"
-                  value={form.name}
-                  onChange={(event) =>
-                    setForm((previous) => ({ ...previous, name: event.target.value }))
-                  }
-                />
-              </div>
-              <div>
-                <Label htmlFor="workflow-slug" hint="immutable">Slug</Label>
-                <Input id="workflow-slug" value={initial.slug} disabled />
-              </div>
-              <div className="md:col-span-2">
-                <Label htmlFor="workflow-description">Description</Label>
-                <Input
-                  id="workflow-description"
-                  value={form.description}
-                  onChange={(event) =>
-                    setForm((previous) => ({
-                      ...previous,
-                      description: event.target.value,
-                    }))
-                  }
-                />
-              </div>
-              <div>
-                <Label htmlFor="workflow-mode">Execution mode</Label>
-                <Select
-                  id="workflow-mode"
-                  value={form.mode}
-                  onChange={(event) =>
-                    setForm((previous) => ({
-                      ...previous,
-                      mode: event.target.value as WorkflowMode,
-                    }))
-                  }
-                >
-                  <option value="sequential">Sequential</option>
-                  <option value="parallel">Parallel</option>
-                </Select>
-              </div>
-            </div>
-          </section>
+      <section className="rounded-xl border border-line bg-raised/40 p-4">
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="md:col-span-2">
+            <Label htmlFor="workflow-name">Name</Label>
+            <Input
+              id="workflow-name"
+              value={form.name}
+              onChange={(event) =>
+                setForm((previous) => ({ ...previous, name: event.target.value }))
+              }
+            />
+          </div>
+          <div>
+            <Label htmlFor="workflow-mode">Mode</Label>
+            <Select
+              id="workflow-mode"
+              value={form.mode}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  mode: event.target.value as WorkflowMode,
+                }))
+              }
+            >
+              <option value="sequential">Sequential</option>
+              <option value="parallel">Parallel</option>
+            </Select>
+          </div>
+          <div className="md:col-span-3">
+            <Label htmlFor="workflow-description">Description</Label>
+            <Input
+              id="workflow-description"
+              value={form.description}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  description: event.target.value,
+                }))
+              }
+              placeholder="Optional"
+            />
+          </div>
+        </div>
+      </section>
 
-          <section className="surface-panel rounded-2xl p-5">
-            <div className="flex items-center justify-between">
-              <h2 className="font-display text-lg font-semibold">Ordered steps</h2>
-              <Badge tone={form.steps.length ? "success" : "warning"}>
-                {form.steps.length} steps
-              </Badge>
-            </div>
-            <p className="mt-2 text-sm text-slate-muted">
-              Publishing pins each target&apos;s current published version. CEL
-              conditions are reserved in the schema and currently disabled.
-            </p>
-            <ol className="mt-4 space-y-2">
-              {form.steps.map((step, index) => (
-                <li
-                  key={`${step.targetType}:${step.targetConfigId}:${index}`}
-                  className="rounded-xl border border-line bg-raised/70 p-3"
+      <section className="rounded-xl border border-line bg-raised/40 p-4">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">Steps</h2>
+          <Badge tone={form.steps.length > 0 ? "success" : "warning"}>
+            {form.steps.length} steps
+          </Badge>
+        </div>
+
+        {form.steps.length === 0 ? (
+          <p className="mb-3 rounded-md border border-dashed border-line px-3 py-4 text-center text-sm text-slate-muted">
+            No steps yet — add a published agent or team below.
+          </p>
+        ) : (
+          <ol className="mb-3 space-y-1.5">
+            {form.steps.map((step, index) => (
+              <li
+                key={`${step.targetConfigId}-${index}`}
+                className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/40 px-2.5 py-2"
+              >
+                <span className="w-5 shrink-0 text-center text-xs text-slate-muted">
+                  {index + 1}
+                </span>
+                <Input
+                  aria-label={`Step ${index + 1} name`}
+                  value={step.name}
+                  onChange={(event) =>
+                    updateStep(index, { name: event.target.value })
+                  }
+                  className="min-w-0 max-w-xs flex-1 py-1.5"
+                />
+                <span className="hidden min-w-0 truncate text-xs text-slate-muted sm:inline">
+                  {step.targetName || step.targetSlug}
+                </span>
+                <Badge>{step.targetType}</Badge>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => move(index, -1)}
+                  disabled={index === 0}
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="w-6 text-center text-xs font-semibold text-slate-muted">
-                      {index + 1}
-                    </span>
-                    <Input
-                      aria-label={`Step ${index + 1} name`}
-                      value={step.name}
-                      onChange={(event) => updateStep(index, { name: event.target.value })}
-                      className="min-w-0 flex-1"
-                    />
-                    <Badge>{step.targetType}</Badge>
-                    <span className="hidden text-xs text-slate-muted sm:inline">
-                      {step.targetName ?? step.targetSlug}
-                    </span>
-                    <Button variant="secondary" onClick={() => move(index, -1)} disabled={index === 0}>↑</Button>
-                    <Button variant="secondary" onClick={() => move(index, 1)} disabled={index === form.steps.length - 1}>↓</Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() =>
-                        setForm((previous) => ({
-                          ...previous,
-                          steps: previous.steps.filter((_, position) => position !== index),
-                        }))
-                      }
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ol>
-            <div className="mt-5 border-t border-line pt-4">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-slate-muted">
-                Add a tenant component
+                  ↑
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => move(index, 1)}
+                  disabled={index === form.steps.length - 1}
+                >
+                  ↓
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    setForm((previous) => ({
+                      ...previous,
+                      steps: previous.steps.filter(
+                        (_, position) => position !== index,
+                      ),
+                    }))
+                  }
+                >
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ol>
+        )}
+
+        <div className="border-t border-line pt-2">
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-muted">
+            Add step
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {targets.map((target) => (
+              <button
+                key={`${target.type}:${target.id}`}
+                type="button"
+                onClick={() => addStep(target)}
+                className="rounded-md border border-line bg-raised px-2 py-1 text-left text-xs hover:border-teal/50"
+              >
+                <span className="font-medium">{target.name}</span>
+                <span className="ml-1 capitalize text-slate-muted">
+                  {target.type}
+                </span>
+              </button>
+            ))}
+            {targets.length === 0 ? (
+              <p className="text-sm text-slate-muted">
+                Publish an agent or team first.
               </p>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {targets.map((target) => (
-                  <button
-                    key={`${target.type}:${target.id}`}
-                    type="button"
-                    onClick={() => addStep(target)}
-                    className="rounded-lg border border-line bg-raised/60 p-3 text-left transition hover:border-teal/50"
-                  >
-                    <span className="font-medium">{target.name}</span>
-                    <span className="ml-2 text-xs capitalize text-slate-muted">
-                      {target.type} · {target.status}
-                    </span>
-                  </button>
-                ))}
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      <VersionHistoryPanel
+        versions={versions}
+        busy={busy !== null}
+        onRefresh={() => void refreshVersions()}
+        onView={(version) => void viewVersion(version)}
+        onRestoreLive={(version) => void restoreLive(version)}
+        onRestoreDraft={(version) => void restoreDraft(version)}
+        onCloseView={() => setViewing(null)}
+        viewing={
+          viewing ? (
+            <dl className="grid gap-2 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-xs text-slate-muted">Mode</dt>
+                <dd>{viewing.mode}</dd>
               </div>
-            </div>
-          </section>
-      </div>
-      <WorkflowAccessPanel workflowId={initial.id} />
+              <div className="sm:col-span-2">
+                <dt className="mb-1 text-xs text-slate-muted">Steps</dt>
+                <dd>
+                  <ul className="space-y-1">
+                    {viewing.steps.map((step, index) => (
+                      <li
+                        key={`${step.targetConfigId}-${index}`}
+                        className="text-sm"
+                      >
+                        {index + 1}. {step.name}{" "}
+                        <span className="text-xs text-slate-muted">
+                          ({step.targetType}
+                          {step.targetName ? ` · ${step.targetName}` : ""})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+            </dl>
+          ) : null
+        }
+      />
     </div>
   );
 }

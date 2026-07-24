@@ -80,7 +80,13 @@ export interface ToolDefinition {
   name: string;
   slug: string;
   description: string;
-  kind: "http" | "openapi" | "python_toolkit" | "custom_python" | "tenant_python" | "mcp";
+  kind:
+    | "http"
+    | "openapi"
+    | "python_toolkit"
+    | "custom_python"
+    | "tenant_python"
+    | "mcp";
   httpMethod: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | null;
   baseUrl: string | null;
   path: string | null;
@@ -236,6 +242,28 @@ export interface TeamConfig {
   updatedAt: string;
 }
 
+export interface TeamVersionSummary {
+  id: string;
+  version: number;
+  status: AgentStatus;
+  mode: TeamMode;
+  memberCount: number;
+  isLive: boolean;
+  createdAt: string;
+}
+
+export interface TeamVersionDetail {
+  id: string;
+  version: number;
+  status: AgentStatus;
+  instructions: string;
+  mode: TeamMode;
+  model: ModelId;
+  temperature: number;
+  members: TeamMember[];
+  createdAt: string;
+}
+
 export interface TeamSummary {
   id: string;
   name: string;
@@ -376,6 +404,13 @@ export interface PublicTeamSurface {
   };
 }
 
+export interface PublicWorkflowTeamStep {
+  id: string;
+  name: string;
+  slug: string;
+  stepName: string;
+}
+
 export interface PublicWorkflowSurface {
   tenant: TenantBranding;
   workflow: {
@@ -384,6 +419,7 @@ export interface PublicWorkflowSurface {
     slug: string;
     description: string;
     welcomeMessage: string;
+    teams?: PublicWorkflowTeamStep[];
   };
 }
 

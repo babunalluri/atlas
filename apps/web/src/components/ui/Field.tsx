@@ -37,7 +37,7 @@ export function Textarea({
 }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
     <textarea
-      className={cn(fieldClass, "min-h-28 resize-y leading-relaxed", className)}
+      className={cn(fieldClass, "min-h-20 resize-y leading-relaxed", className)}
       {...props}
     />
   );

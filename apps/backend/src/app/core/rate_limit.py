@@ -49,6 +49,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         settings = get_settings()
         # Local/dev traffic (SSR, HMR, retries) easily exceeds the default 60/min
         # when many requests share the Docker gateway IP before tenant auth runs.
+        # Public chat enforces its own limiter inside the run handlers.
         if settings.is_development:
             return await call_next(request)
 

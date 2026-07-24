@@ -69,6 +69,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AUTH_DISABLED", "BACKEND_AUTH_DISABLED"),
     )
     rate_limit_per_minute: int = Field(default=60, validation_alias="RATE_LIMIT_PER_MINUTE")
+    public_chat_rate_limit_per_minute: int = Field(
+        default=20,
+        validation_alias="PUBLIC_CHAT_RATE_LIMIT_PER_MINUTE",
+    )
     tenant_concurrency_limit: int = Field(default=10, validation_alias="TENANT_CONCURRENCY_LIMIT")
     max_upload_bytes: int = Field(default=10_485_760, validation_alias="MAX_UPLOAD_BYTES")
     max_knowledge_chunks: int = Field(default=1000, validation_alias="MAX_KNOWLEDGE_CHUNKS")

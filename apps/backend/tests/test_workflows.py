@@ -183,3 +183,80 @@ async def test_workflow_assignments_are_user_and_tenant_scoped(
     other_repo = WorkflowRepository(session, tenant_b)
     assert await other_repo.list_available_for_user("customer-one") == []
     assert not await other_repo.is_assigned(config.id, "customer-one")
+
+
+@pytest.mark.asyncio
+async def test_workflow_list_versions_and_restore_published_pointer(session, tenant_a):
+    agent, _ = await _published_agent(session, tenant_a, "step-a")
+    workflows = WorkflowRepository(session, tenant_a)
+    config = await workflows.create_config(slug="wf-history", name="WF History")
+    v1 = await workflows.create_draft(
+        config_id=config.id,
+        mode="sequential",
+        steps=[
+            {
+                "name": "One",
+                "target_type": "agent",
+                "target_config_id": agent.id,
+            }
+        ],
+    )
+    await workflows.publish(v1.id)
+    v2 = await workflows.create_draft(
+        config_id=config.id,
+        mode="parallel",
+        steps=[
+            {
+                "name": "Two",
+                "target_type": "agent",
+                "target_config_id": agent.id,
+            }
+        ],
+    )
+    await workflows.publish(v2.id)
+
+    versions = list(await workflows.list_versions(config.id))
+    assert [row.version for row in versions] == [2, 1]
+    assert (await workflows.get_config(config.id)).published_version_id == v2.id
+
+    restored = await workflows.restore_version(config.id, v1.id)
+    assert restored.id == v1.id
+    assert restored.mode == "sequential"
+    assert (await workflows.get_config(config.id)).published_version_id == v1.id
+
+
+@pytest.mark.asyncio
+async def test_workflow_restore_as_draft_keeps_live(session, tenant_a):
+    agent, _ = await _published_agent(session, tenant_a, "step-b")
+    workflows = WorkflowRepository(session, tenant_a)
+    config = await workflows.create_config(slug="wf-clone", name="WF Clone")
+    v1 = await workflows.create_draft(
+        config_id=config.id,
+        mode="sequential",
+        steps=[
+            {
+                "name": "Original",
+                "target_type": "agent",
+                "target_config_id": agent.id,
+            }
+        ],
+    )
+    await workflows.publish(v1.id)
+    v2 = await workflows.create_draft(
+        config_id=config.id,
+        mode="parallel",
+        steps=[
+            {
+                "name": "Later",
+                "target_type": "agent",
+                "target_config_id": agent.id,
+            }
+        ],
+    )
+    await workflows.publish(v2.id)
+
+    draft = await workflows.restore_version(config.id, v1.id, as_draft=True)
+    assert draft.version == 3
+    assert draft.mode == "sequential"
+    assert (await workflows.steps(draft.id))[0].name == "Original"
+    assert (await workflows.get_config(config.id)).published_version_id == v2.id
