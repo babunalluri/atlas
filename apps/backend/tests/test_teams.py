@@ -165,6 +165,54 @@ async def test_list_versions_and_restore_published_pointer(session, tenant_a):
 
 
 @pytest.mark.asyncio
+async def test_team_tool_bindings_persist_and_factory_attaches(session, tenant_a, monkeypatch):
+    first, _ = await _published_agent(session, tenant_a, "ops")
+    second, _ = await _published_agent(session, tenant_a, "finance")
+    repo = TeamRepository(session, tenant_a)
+    config = await repo.create_config(slug="tooling", name="Tooling")
+    version = await repo.create_draft(
+        config_id=config.id,
+        instructions="Use tools when needed",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[first.id, second.id],
+        tools=[{"tool_key": "web_search", "config": {"max_results": 3}}],
+    )
+    bindings = await repo.bindings(version.id)
+    assert len(bindings) == 1
+    assert bindings[0].tool_key == "web_search"
+    await repo.publish(version.id)
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTeam:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.id = kwargs["id"]
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    async def fake_build_tool(self, binding):
+        return {"name": binding.tool_key, "config": binding.config}
+
+    monkeypatch.setattr("app.agent_runtime.factory.Agent", FakeAgent)
+    monkeypatch.setattr("app.agent_runtime.factory.Team", FakeTeam)
+    monkeypatch.setattr("app.agent_runtime.factory.OpenAIChat", FakeModel)
+    monkeypatch.setattr(AgentFactoryService, "_build_tool", fake_build_tool)
+
+    factory = TeamFactoryService(AgentFactoryService(session, tenant_a, allowed_hosts=set()))
+    team = await factory.create(
+        TeamRuntimeRequest(version_id=version.id, session_id="team-tools-session")
+    )
+    assert team.kwargs["tools"] == [{"name": "web_search", "config": {"max_results": 3}}]
+
+
+@pytest.mark.asyncio
 async def test_restore_as_draft_clones_new_version(session, tenant_a):
     first, _ = await _published_agent(session, tenant_a, "gamma")
     second, _ = await _published_agent(session, tenant_a, "delta")

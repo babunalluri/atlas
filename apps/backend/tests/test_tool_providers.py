@@ -127,8 +127,8 @@ async def test_custom_python_uses_safe_client_and_marks_mutations(monkeypatch):
         ),
     )
     assert [tool.__name__ for tool in tools] == [
-        "crm_get_resource",
-        "crm_create_resource",
+        "get_resource",
+        "create_resource",
     ]
     assert getattr(tools[1], "requires_confirmation", True)
 
@@ -188,7 +188,7 @@ async def test_openapi_enumeration_and_selected_operation_filter(monkeypatch):
             approval_required=False,
         ),
     )
-    assert [tool.__name__ for tool in tools] == ["inventory_getWidget"]
+    assert [tool.__name__ for tool in tools] == ["getWidget"]
 
 
 @pytest.mark.asyncio
@@ -212,7 +212,7 @@ async def test_openapi_mutation_forces_confirmation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_python_toolkit_functions_are_collision_safe():
+async def test_python_toolkit_functions_keep_capability_names():
     tools = await PythonToolkitProvider().build_tools(
         {"toolkit": "calculator", "options": {}, "include_tools": ["add"]},
         ProviderBuildContext(
@@ -222,7 +222,7 @@ async def test_python_toolkit_functions_are_collision_safe():
             approval_required=False,
         ),
     )
-    assert list(tools[0].functions) == ["finance_add"]
+    assert list(tools[0].functions) == ["add"]
 
 
 def test_toolkit_catalog_never_exposes_blocked_modules():
@@ -235,6 +235,40 @@ def test_toolkit_catalog_never_exposes_blocked_modules():
         if item["tier"] != "blocked"
     )
     assert len(TOOLKIT_BY_KEY) == len(catalog)
+
+
+def test_smtp_email_toolkit_is_available_with_sender_options():
+    spec = TOOLKIT_BY_KEY["email"]
+    assert spec.disabled_reason is None
+    assert set(spec.options) == {"sender_email", "sender_name", "receiver_email"}
+    email = next(item for item in toolkit_catalog() if item["key"] == "email")
+    assert email["available"] is True
+    assert email["status"] == "needs_credential"
+    assert email["credentials"][0]["kwarg"] == "sender_passkey"
+
+
+def test_multi_value_toolkits_expose_options_instead_of_false_package_errors():
+    whatsapp = TOOLKIT_BY_KEY["whatsapp"]
+    assert whatsapp.disabled_reason is None
+    assert "phone_number_id" in whatsapp.options
+
+    zoom = TOOLKIT_BY_KEY["zoom"]
+    assert zoom.credentials[0].kwarg == "client_secret"
+    assert set(zoom.options) >= {"account_id", "client_id"}
+
+    reddit = TOOLKIT_BY_KEY["reddit"]
+    assert reddit.disabled_reason is None
+    assert "client_id" in reddit.options
+
+    catalog = {item["key"]: item for item in toolkit_catalog()}
+    assert catalog["aws_ses"]["available"] is False
+    assert "host AWS credential chain" in (catalog["aws_ses"]["unavailable_reason"] or "")
+    assert catalog["aws_ses"]["status"] == "blocked"
+    assert catalog["crawl4ai"]["status"] == "blocked"
+    assert catalog["gmail"]["status"] == "blocked"
+    assert catalog["youcom"]["class_name"] == "YouTools"
+    assert catalog["google_maps"]["class_name"] == "GoogleMapTools"
+    assert catalog["apify"]["credentials"][0]["kwarg"] == "apify_api_token"
 
 
 @pytest.mark.asyncio

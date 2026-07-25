@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     sandbox_wall_seconds: int = Field(
         default=30, ge=5, le=120, validation_alias="SANDBOX_WALL_SECONDS"
     )
+    agent_run_wall_seconds: int = Field(
+        default=180,
+        ge=30,
+        le=900,
+        validation_alias="AGENT_RUN_WALL_SECONDS",
+        description="Wall-clock limit for a single agent/team/workflow SSE run.",
+    )
 
     @field_validator("database_url")
     @classmethod

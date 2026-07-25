@@ -198,6 +198,25 @@ async def update_base(
     return KnowledgeBaseOut(id=base.id, name=base.name, config=base.config)
 
 
+@router.delete("/bases/{knowledge_base_id}", status_code=204)
+async def delete_base(
+    knowledge_base_id: uuid.UUID,
+    context: AdminContext,
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> Response:
+    repo = KnowledgeRepository(session, context)
+    uris = await repo.delete_base(knowledge_base_id)
+    if uris is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    for uri in uris:
+        path = Path(uri)
+        try:
+            await to_thread.run_sync(lambda p=path: p.unlink(missing_ok=True))
+        except OSError:
+            pass
+    return Response(status_code=204)
+
+
 @router.get("/bases/{knowledge_base_id}/sources", response_model=list[KnowledgeSourceOut])
 async def list_sources(
     knowledge_base_id: uuid.UUID,

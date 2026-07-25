@@ -86,6 +86,14 @@ const icons = {
   sessions: icon(
     <path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5Z" />,
   ),
+  activities: icon(
+    <>
+      <path d="M4 6h16" />
+      <path d="M4 12h10" />
+      <path d="M4 18h14" />
+      <circle cx="18" cy="12" r="2" />
+    </>,
+  ),
   approvals: icon(
     <>
       <circle cx="12" cy="12" r="9" />
@@ -216,15 +224,9 @@ const navGroups: Array<{
         icon: icons.approvals,
       },
       {
-        href: "/admin/sessions",
-        label: "Sessions",
-        hint: "Conversation history",
-        icon: icons.sessions,
-      },
-      {
         href: "/admin/traces",
         label: "Traces",
-        hint: "Debug runs and tool calls",
+        hint: "Chat logs, runs, and errors",
         icon: icons.traces,
       },
       {

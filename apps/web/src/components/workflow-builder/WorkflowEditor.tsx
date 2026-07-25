@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { BackLink } from "@/components/ui/BackLink";
@@ -10,15 +10,8 @@ import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select } from "@/components/ui/Field";
 import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
-  VersionHistoryPanel,
-  type VersionHistoryItem,
-} from "@/components/ui/VersionHistoryPanel";
-import {
   deleteWorkflow,
-  getWorkflowVersion,
-  listWorkflowVersions,
   publishWorkflow,
-  restoreWorkflowVersion,
   saveWorkflowDraft,
 } from "@/lib/api/admin";
 import type {
@@ -58,16 +51,8 @@ export function WorkflowEditor({
   const [status, setStatus] = useState(initial.status);
   const [draftVersion, setDraftVersion] = useState(initial.draftVersion);
   const [publishedVersion, setPublishedVersion] = useState(initial.publishedVersion);
-  const [busy, setBusy] = useState<
-    "save" | "publish" | "delete" | "versions" | "restore" | null
-  >(null);
+  const [busy, setBusy] = useState<"save" | "publish" | "delete" | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
-  const [versions, setVersions] = useState<VersionHistoryItem[]>([]);
-  const [viewing, setViewing] = useState<{
-    version: number;
-    mode: WorkflowMode;
-    steps: WorkflowStep[];
-  } | null>(null);
 
   const targets = useMemo(
     () => [
@@ -95,32 +80,6 @@ export function WorkflowEditor({
     setDraftVersion(workflow.draftVersion);
     setPublishedVersion(workflow.publishedVersion);
   }
-
-  async function refreshVersions() {
-    setBusy("versions");
-    try {
-      const rows = await listWorkflowVersions(await getAccessToken(), initial.id);
-      setVersions(
-        rows.map((row) => ({
-          id: row.id,
-          version: row.version,
-          status: row.status,
-          isLive: row.isLive,
-          createdAt: row.createdAt,
-          details: [row.mode, `${row.stepCount} steps`],
-        })),
-      );
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Failed to load versions");
-    } finally {
-      setBusy((current) => (current === "versions" ? null : current));
-    }
-  }
-
-  useEffect(() => {
-    void refreshVersions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only
-  }, [initial.id]);
 
   function addStep(target: (typeof targets)[number]) {
     setForm((previous) => ({
@@ -172,7 +131,6 @@ export function WorkflowEditor({
       );
       applyWorkflow(saved);
       setBanner("Draft saved");
-      void refreshVersions();
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -192,7 +150,6 @@ export function WorkflowEditor({
       const published = await publishWorkflow(await getAccessToken(), initial.id);
       applyWorkflow(published);
       setBanner(`Published v${published.publishedVersion}`);
-      void refreshVersions();
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Publish failed");
     } finally {
@@ -215,86 +172,6 @@ export function WorkflowEditor({
       router.push("/admin/workflows");
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Delete failed");
-      setBusy(null);
-    }
-  }
-
-  async function viewVersion(version: VersionHistoryItem) {
-    setBusy("versions");
-    setBanner(null);
-    try {
-      const detail = await getWorkflowVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-      );
-      setViewing({
-        version: detail.version,
-        mode: detail.mode,
-        steps: detail.steps,
-      });
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Failed to load version");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function restoreLive(version: VersionHistoryItem) {
-    if (version.isLive) {
-      setBanner(`v${version.version} is already live`);
-      return;
-    }
-    if (
-      !window.confirm(
-        `Make v${version.version} the live published version? Current live stays available in history.`,
-      )
-    ) {
-      return;
-    }
-    setBusy("restore");
-    setBanner(null);
-    try {
-      const restored = await restoreWorkflowVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-      );
-      applyWorkflow(restored);
-      setViewing(null);
-      setBanner(`Restored live to v${restored.publishedVersion}`);
-      void refreshVersions();
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Restore failed");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function restoreDraft(version: VersionHistoryItem) {
-    if (
-      !window.confirm(
-        `Clone v${version.version} into a new draft for editing? Live published version will not change until you publish.`,
-      )
-    ) {
-      return;
-    }
-    setBusy("restore");
-    setBanner(null);
-    try {
-      const restored = await restoreWorkflowVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-        { asDraft: true },
-      );
-      applyWorkflow(restored);
-      setViewing(null);
-      setBanner(`Loaded v${version.version} into draft v${restored.draftVersion}`);
-      void refreshVersions();
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Restore failed");
-    } finally {
       setBusy(null);
     }
   }
@@ -496,45 +373,6 @@ export function WorkflowEditor({
           </div>
         </div>
       </section>
-
-      <VersionHistoryPanel
-        versions={versions}
-        busy={busy !== null}
-        onRefresh={() => void refreshVersions()}
-        onView={(version) => void viewVersion(version)}
-        onRestoreLive={(version) => void restoreLive(version)}
-        onRestoreDraft={(version) => void restoreDraft(version)}
-        onCloseView={() => setViewing(null)}
-        viewing={
-          viewing ? (
-            <dl className="grid gap-2 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-xs text-slate-muted">Mode</dt>
-                <dd>{viewing.mode}</dd>
-              </div>
-              <div className="sm:col-span-2">
-                <dt className="mb-1 text-xs text-slate-muted">Steps</dt>
-                <dd>
-                  <ul className="space-y-1">
-                    {viewing.steps.map((step, index) => (
-                      <li
-                        key={`${step.targetConfigId}-${index}`}
-                        className="text-sm"
-                      >
-                        {index + 1}. {step.name}{" "}
-                        <span className="text-xs text-slate-muted">
-                          ({step.targetType}
-                          {step.targetName ? ` · ${step.targetName}` : ""})
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </dd>
-              </div>
-            </dl>
-          ) : null
-        }
-      />
     </div>
   );
 }

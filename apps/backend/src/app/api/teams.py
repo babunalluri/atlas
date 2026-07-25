@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.copy_helpers import copy_name, unique_copy_slug
 from app.api.schemas import (
     TeamCatalogItemOut,
     TeamCatalogPageOut,
@@ -14,6 +15,7 @@ from app.api.schemas import (
     TeamUpdateIn,
     TeamVersionOut,
     TeamVersionSummaryOut,
+    ToolBindingIn,
 )
 from app.auth.dependencies import require_roles, require_tenant
 from app.db.models import Role, TeamConfig, TeamVersion
@@ -63,6 +65,8 @@ async def team_config_out(repo: TeamRepository, config: TeamConfig) -> TeamConfi
     published = (
         await repo.get_version(config.published_version_id) if config.published_version_id else None
     )
+    editable = draft or published
+    bindings = await repo.bindings(editable.id) if editable else []
     return TeamConfigOut(
         id=config.id,
         slug=config.slug,
@@ -70,6 +74,15 @@ async def team_config_out(repo: TeamRepository, config: TeamConfig) -> TeamConfi
         description=config.description,
         published_version_id=config.published_version_id,
         updated_at=config.updated_at,
+        tools=[
+            ToolBindingIn(
+                tool_key=binding.tool_key,
+                tool_definition_id=binding.tool_definition_id,
+                config=binding.config,
+                credential_id=binding.credential_id,
+            )
+            for binding in bindings
+        ],
         draft=await _version_out(repo, agent_repo, draft) if draft else None,
         published=await _version_out(repo, agent_repo, published) if published else None,
     )
@@ -148,6 +161,7 @@ async def create_team(
             model_id=body.model_id,
             temperature=body.temperature,
             member_config_ids=body.member_config_ids,
+            tools=[tool.model_dump() for tool in body.tools],
         )
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -164,6 +178,66 @@ async def get_team(
     config = await repo.get_config(team_id)
     if config is None:
         raise HTTPException(status_code=404, detail="Team not found")
+    return await team_config_out(repo, config)
+
+
+@router.post("/{team_id}/clone", response_model=TeamConfigOut, status_code=201)
+async def clone_team(
+    team_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> TeamConfigOut:
+    repo = TeamRepository(session, context)
+    source = await repo.get_config(team_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    draft = await repo.get_latest_draft(team_id)
+    published = (
+        await repo.get_version(source.published_version_id)
+        if source.published_version_id
+        else None
+    )
+    editable = draft or published
+    if editable is None:
+        raise HTTPException(status_code=400, detail="Team has no version to clone")
+
+    async def slug_taken(slug: str) -> bool:
+        return await repo.get_config_by_slug(slug) is not None
+
+    try:
+        new_slug = await unique_copy_slug(source.slug, slug_taken)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    members = await repo.members(editable.id)
+    tools = [
+        {
+            "tool_key": binding.tool_key,
+            "tool_definition_id": binding.tool_definition_id,
+            "config": binding.config or {},
+            "credential_id": binding.credential_id,
+        }
+        for binding in await repo.bindings(editable.id)
+    ]
+    config = await repo.create_config(
+        slug=new_slug,
+        name=copy_name(source.name),
+        description=source.description,
+    )
+    try:
+        await repo.create_draft(
+            config_id=config.id,
+            instructions=editable.instructions,
+            mode=editable.mode,
+            model_id=editable.model_id,
+            temperature=editable.temperature,
+            member_config_ids=[member.agent_config_id for member in members],
+            tools=tools,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await team_config_out(repo, config)
 
 
@@ -187,6 +261,7 @@ async def update_team(
         body.model_id,
         body.temperature,
         body.member_config_ids,
+        body.tools,
     )
     if any(value is not None for value in version_fields):
         editable = await repo.get_latest_draft(team_id)
@@ -194,6 +269,19 @@ async def update_team(
             editable = await repo.get_version(config.published_version_id)
         existing_members = (
             [member.agent_config_id for member in await repo.members(editable.id)]
+            if editable
+            else []
+        )
+        existing_tools = (
+            [
+                {
+                    "tool_key": binding.tool_key,
+                    "tool_definition_id": binding.tool_definition_id,
+                    "config": binding.config or {},
+                    "credential_id": binding.credential_id,
+                }
+                for binding in await repo.bindings(editable.id)
+            ]
             if editable
             else []
         )
@@ -215,6 +303,9 @@ async def update_team(
                 member_config_ids=body.member_config_ids
                 if body.member_config_ids is not None
                 else existing_members,
+                tools=[tool.model_dump() for tool in body.tools]
+                if body.tools is not None
+                else existing_tools,
             )
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

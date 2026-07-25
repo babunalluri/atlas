@@ -7,15 +7,25 @@ This is separate from source-controlled [`custom_python`](./custom-python-tools.
 ## Lifecycle
 
 1. Create a tool with kind **Editable Python** in Tool builder.
-2. Edit source (or load the **Contact Center PBX starter**). Declare capabilities
-   and optional allowlisted dependencies.
+2. Edit source in the Monaco editor (or load the **Contact Center PBX starter**).
+   Capability names are discovered from top-level `async def`s or public methods
+   on a `BaseToolkit`/`Toolkit` subclass — no manual capability list. Optional
+   allowlisted dependencies can still be selected.
 3. **Save** writes a draft `tool_definition_versions` row and keeps
    `config.version_status=draft`.
 4. **Validate** runs AST checks and dependency allowlist checks; marks the draft
    `validated`.
 5. **Publish** pins `tool_definitions.published_version_id` and sets
    `version_status=published`. Only published tools can be attached/run by agents.
-6. Mutating capabilities always require HITL approval.
+6. After publish, source is **edit-locked** in the UI until you click **Edit
+   source** (creates a new draft). Use **Versions** on the Tools list (before
+   Delete) to view / restore draft / restore live published version.
+7. Mutating capabilities always require HITL approval.
+
+For local Freshdesk-style tools, add your exact HTTPS host (e.g.
+`api.freshdesk.com` or `{domain}.freshdesk.com`) to
+`REST_TOOL_ALLOWED_HOSTS` / `BACKEND_ALLOWED_OUTBOUND_HOSTS` — matching is
+exact hostname, not a wildcard suffix.
 
 ## CC PBX example (Contact Center PBX starter)
 
@@ -81,19 +91,37 @@ Agent tool call
 - Credentials are injected on proxied requests on the host, not into guest env
   when possible. CC PBX-style tools merge credential JSON into sandbox settings
   (body tokens) instead of Bearer headers.
+- Import AST policy is **deny-list only**: dangerous modules (`os`, `sys`,
+  `subprocess`, `socket`, …) and dangerous builtins (`eval`, `exec`, `open`,
+  …) are rejected. **Any other import root is allowed at save time**; packages
+  missing from the guest image fail at **runtime** with `ImportError`.
+- Guest shims on `PYTHONPATH`: `requests` (HttpProxy IPC), `agno.utils.log`,
+  `agno.tools.BaseToolkit`, and `supertools.common.base_tool.BaseToolkit`.
+  Do not declare real PyPI `requests` as a tool dependency. These are not full
+  Agno/supertools frameworks.
+- Capabilities may be top-level `async def` functions **or** public methods on
+  a `BaseToolkit`/`Toolkit` subclass. The runner instantiates the class (no
+  required args), injects settings into `.pv` and `.settings`, and calls the
+  method (sync or async).
 - Limits: ~30s wall clock, 0.5 vCPU, 512MB, capped result size, per-tenant
   concurrency.
 
 ## Local compose
 
 ```bash
-# Build the guest image once (or after allowlist changes)
+# Build the guest image once (or after allowlist / shim / SDK changes)
 docker compose --profile build-sandbox build sandbox-python
 # or: docker build -t atlas-sandbox-python:local ./services/sandbox-python
 
-docker compose up -d sandbox-manager backend
+docker compose up -d --build sandbox-manager backend
 ```
 
+`sandbox-manager` must ship the Docker CLI (see its Dockerfile) and mount the
+host `docker.sock`. Confirm with `GET /v1/diagnose`. Guest `/sandbox/work` is a
+tmpfs owned by uid `10001`.
+
+After changing the validator, `atlas_sdk`, or guest shims (`requests`, `agno`,
+`supertools`), rebuild `atlas-sandbox-python:local` with the command above.
 Backend env:
 
 - `SANDBOX_MANAGER_URL=http://sandbox-manager:8090`

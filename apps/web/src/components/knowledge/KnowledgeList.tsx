@@ -6,7 +6,10 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
+import { TrashIcon } from "@/components/ui/icons";
+import { deleteKnowledgeBase } from "@/lib/api/admin";
 import type { KnowledgeSource } from "@/lib/api/types";
+import { useAgentOsToken } from "@/lib/auth/token";
 import { cn, formatRelative } from "@/lib/utils";
 
 type StatusFilter = "all" | "ready" | "processing" | "failed";
@@ -22,15 +25,20 @@ type KnowledgeBaseRow = {
 const PAGE_SIZE = 25;
 
 export function KnowledgeList({
-  bases,
-  sources,
+  bases: initialBases,
+  sources: initialSources,
 }: {
   bases: Array<{ id: string; name: string }>;
   sources: KnowledgeSource[];
 }) {
+  const { getAccessToken } = useAgentOsToken();
+  const [bases, setBases] = useState(initialBases);
+  const [sources, setSources] = useState(initialSources);
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const rows = useMemo<KnowledgeBaseRow[]>(() => {
     return bases.map((base) => {
@@ -86,6 +94,33 @@ export function KnowledgeList({
   const pageItems = filtered.slice(start, start + PAGE_SIZE);
   const end = Math.min(filtered.length, start + PAGE_SIZE);
 
+  async function onDelete(row: KnowledgeBaseRow) {
+    if (
+      !window.confirm(
+        `Delete “${row.name}”? This removes the knowledge base and its sources. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(row.id);
+    setError(null);
+    try {
+      await deleteKnowledgeBase(await getAccessToken(), row.id);
+      setBases((prev) => prev.filter((item) => item.id !== row.id));
+      setSources((prev) =>
+        prev.filter((source) => source.knowledgeBaseId !== row.id),
+      );
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Failed to delete knowledge base",
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -104,6 +139,7 @@ export function KnowledgeList({
           Create
         </Link>
       </header>
+      {error ? <p className="text-sm text-rose">{error}</p> : null}
 
       <section className="table-shell rounded-xl">
         <div className="space-y-3 border-b border-line px-4 py-3">
@@ -175,43 +211,59 @@ export function KnowledgeList({
           </div>
         </div>
 
-        <div className="hidden grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] gap-3 border-b border-line px-4 py-2 md:grid">
-          <span className="th-label">Name</span>
-          <span className="th-label">Sources</span>
-          <span className="th-label">Ready</span>
-          <span className="th-label text-right">Updated</span>
+        <div className="flex items-center gap-3 border-b border-line px-4 py-2">
+          <div className="hidden min-w-0 flex-1 grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] gap-3 md:grid">
+            <span className="th-label">Name</span>
+            <span className="th-label">Sources</span>
+            <span className="th-label">Ready</span>
+            <span className="th-label text-right">Updated</span>
+          </div>
+          <span className="th-label w-9 shrink-0 text-right"> </span>
         </div>
         <ul>
           {pageItems.map((row) => (
             <li key={row.id} className="border-b border-line/60 last:border-0">
-              <Link
-                href={`/admin/knowledge/${row.id}`}
-                className="grid items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70 md:grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr]"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{row.name}</p>
-                  <p className="mono-cell truncate text-slate-muted">{row.id}</p>
-                </div>
-                <p className="text-sm text-slate-muted">{row.sourceCount}</p>
-                <div>
-                  <Badge
-                    tone={
-                      row.readyCount > 0
-                        ? "success"
-                        : row.sourceCount > 0
-                          ? "warning"
-                          : "neutral"
-                    }
+              <div className="flex items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70">
+                <Link
+                  href={`/admin/knowledge/${row.id}`}
+                  className="grid min-w-0 flex-1 items-center gap-3 md:grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr]"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{row.name}</p>
+                    <p className="mono-cell truncate text-slate-muted">{row.id}</p>
+                  </div>
+                  <p className="text-sm text-slate-muted">{row.sourceCount}</p>
+                  <div>
+                    <Badge
+                      tone={
+                        row.readyCount > 0
+                          ? "success"
+                          : row.sourceCount > 0
+                            ? "warning"
+                            : "neutral"
+                      }
+                    >
+                      {row.readyCount}/{row.sourceCount}
+                    </Badge>
+                  </div>
+                  <p className="mono-cell text-right text-slate-muted">
+                    {row.latestUpdatedAt
+                      ? formatRelative(row.latestUpdatedAt)
+                      : "—"}
+                  </p>
+                </Link>
+                <div className="flex w-9 shrink-0 items-center justify-end">
+                  <Button
+                    size="icon"
+                    variant="danger"
+                    aria-label={`Delete ${row.name}`}
+                    disabled={deletingId === row.id}
+                    onClick={() => void onDelete(row)}
                   >
-                    {row.readyCount}/{row.sourceCount}
-                  </Badge>
+                    {deletingId === row.id ? "…" : <TrashIcon />}
+                  </Button>
                 </div>
-                <p className="mono-cell text-right text-slate-muted">
-                  {row.latestUpdatedAt
-                    ? formatRelative(row.latestUpdatedAt)
-                    : "—"}
-                </p>
-              </Link>
+              </div>
             </li>
           ))}
           {filtered.length === 0 ? (

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 from typing import Any
 from urllib.parse import urlencode
 
@@ -23,6 +24,13 @@ DOCKER_BIN = os.environ.get("DOCKER_BIN", "docker")
 DEFAULT_IMAGE = os.environ.get("SANDBOX_PYTHON_IMAGE", "atlas-sandbox-python:local")
 MAX_CONCURRENT = int(os.environ.get("SANDBOX_MAX_CONCURRENT", "8"))
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+
+def _docker_missing_message() -> str:
+    return (
+        f"Sandbox manager cannot find docker CLI at {DOCKER_BIN!r}. "
+        "Rebuild the sandbox-manager image (it must include the Docker CLI)."
+    )
 
 
 class RunRequest(BaseModel):
@@ -45,17 +53,27 @@ class RunResponse(BaseModel):
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    if shutil.which(DOCKER_BIN) is None:
+        raise HTTPException(status_code=503, detail=_docker_missing_message())
     return {"status": "ok"}
 
 
 @app.post("/v1/runs", response_model=RunResponse)
 async def create_run(body: RunRequest) -> RunResponse:
+    if shutil.which(DOCKER_BIN) is None:
+        return RunResponse(
+            ok=False, error=_docker_missing_message(), run_id=body.run_id
+        )
     async with _semaphore:
         try:
             return await _run_container(body)
         except asyncio.TimeoutError:
             return RunResponse(
                 ok=False, error="Sandbox wall-clock timeout", run_id=body.run_id
+            )
+        except FileNotFoundError:
+            return RunResponse(
+                ok=False, error=_docker_missing_message(), run_id=body.run_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("sandbox run failed run_id=%s", body.run_id)
@@ -78,9 +96,9 @@ async def _run_container(body: RunRequest) -> RunResponse:
         "64",
         "--read-only",
         "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=64m",
+        "/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001",
         "--tmpfs",
-        "/sandbox/work:rw,noexec,nosuid,size=32m",
+        "/sandbox/work:rw,noexec,nosuid,size=32m,uid=10001,gid=10001",
         "--security-opt",
         "no-new-privileges",
         "--user",
@@ -216,4 +234,4 @@ async def diagnose() -> dict[str, Any]:
             "hint": f"Ensure image exists: docker build -t {shlex.quote(DEFAULT_IMAGE)} ...",
         }
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail="docker binary not found") from exc
+        raise HTTPException(status_code=503, detail=_docker_missing_message()) from exc

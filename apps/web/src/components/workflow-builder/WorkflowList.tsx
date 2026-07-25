@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
@@ -10,24 +11,72 @@ import {
   DEFAULT_CATALOG_QUERY,
   type CatalogQuery,
 } from "@/components/ui/CatalogControls";
-import { TrashIcon } from "@/components/ui/icons";
-import { deleteWorkflow, listWorkflowCatalog } from "@/lib/api/admin";
-import type { CatalogPage, WorkflowSummary } from "@/lib/api/types";
+import {
+  CloneIcon,
+  HistoryIcon,
+  PencilIcon,
+  TrashIcon,
+} from "@/components/ui/icons";
+import {
+  VersionHistoryPanel,
+  type VersionHistoryItem,
+} from "@/components/ui/VersionHistoryPanel";
+import {
+  cloneWorkflow,
+  deleteWorkflow,
+  getWorkflowVersion,
+  listWorkflowCatalog,
+  listWorkflowVersions,
+  restoreWorkflowVersion,
+} from "@/lib/api/admin";
+import type {
+  CatalogPage,
+  WorkflowConfig,
+  WorkflowMode,
+  WorkflowStep,
+  WorkflowSummary,
+} from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { formatRelative } from "@/lib/utils";
+
+function toSummary(workflow: WorkflowConfig): WorkflowSummary {
+  return {
+    id: workflow.id,
+    name: workflow.name,
+    slug: workflow.slug,
+    mode: workflow.mode,
+    status: workflow.status,
+    stepCount: workflow.steps.length,
+    publishedVersion: workflow.publishedVersion,
+    updatedAt: workflow.updatedAt,
+  };
+}
 
 export function WorkflowList({
   initial,
 }: {
   initial: CatalogPage<WorkflowSummary>;
 }) {
+  const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [cloningId, setCloningId] = useState<string | null>(null);
   const skipInitialFetch = useRef(true);
+
+  const [versionsWorkflow, setVersionsWorkflow] =
+    useState<WorkflowSummary | null>(null);
+  const [versions, setVersions] = useState<VersionHistoryItem[]>([]);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [versionError, setVersionError] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<{
+    version: number;
+    mode: WorkflowMode;
+    steps: WorkflowStep[];
+  } | null>(null);
 
   useEffect(() => {
     if (skipInitialFetch.current) {
@@ -67,6 +116,157 @@ export function WorkflowList({
     };
   }, [getAccessToken, query]);
 
+  function closeVersions() {
+    setVersionsWorkflow(null);
+    setVersions([]);
+    setVersionError(null);
+    setViewing(null);
+    setVersionBusy(false);
+  }
+
+  async function refreshVersions(workflow: WorkflowSummary) {
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const rows = await listWorkflowVersions(
+        await getAccessToken(),
+        workflow.id,
+      );
+      setVersions(
+        rows.map((row) => ({
+          id: row.id,
+          version: row.version,
+          status: row.status,
+          isLive: row.isLive,
+          createdAt: row.createdAt,
+          details: [row.mode, `${row.stepCount} steps`],
+        })),
+      );
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Failed to load versions",
+      );
+    } finally {
+      setVersionBusy(false);
+    }
+  }
+
+  async function openVersions(workflow: WorkflowSummary) {
+    setVersionsWorkflow(workflow);
+    setVersions([]);
+    setViewing(null);
+    setVersionError(null);
+    await refreshVersions(workflow);
+  }
+
+  async function viewVersion(version: VersionHistoryItem) {
+    if (!versionsWorkflow) return;
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const detail = await getWorkflowVersion(
+        await getAccessToken(),
+        versionsWorkflow.id,
+        version.id,
+      );
+      setViewing({
+        version: detail.version,
+        mode: detail.mode,
+        steps: detail.steps,
+      });
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Failed to load version",
+      );
+    } finally {
+      setVersionBusy(false);
+    }
+  }
+
+  async function restoreLive(version: VersionHistoryItem) {
+    if (!versionsWorkflow || version.isLive) return;
+    if (
+      !window.confirm(
+        `Make v${version.version} the live published version? Current live stays available in history.`,
+      )
+    ) {
+      return;
+    }
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const restored = await restoreWorkflowVersion(
+        await getAccessToken(),
+        versionsWorkflow.id,
+        version.id,
+      );
+      const summary = toSummary(restored);
+      setPageData((prev) => ({
+        ...prev,
+        items: prev.items.map((item) =>
+          item.id === summary.id ? summary : item,
+        ),
+      }));
+      setVersionsWorkflow(summary);
+      setViewing(null);
+      await refreshVersions(summary);
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Restore failed",
+      );
+      setVersionBusy(false);
+    }
+  }
+
+  async function restoreDraft(version: VersionHistoryItem) {
+    if (!versionsWorkflow) return;
+    if (
+      !window.confirm(
+        `Clone v${version.version} into a draft for editing? Live published version will not change until you publish.`,
+      )
+    ) {
+      return;
+    }
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const restored = await restoreWorkflowVersion(
+        await getAccessToken(),
+        versionsWorkflow.id,
+        version.id,
+        { asDraft: true },
+      );
+      const summary = toSummary(restored);
+      setPageData((prev) => ({
+        ...prev,
+        items: prev.items.map((item) =>
+          item.id === summary.id ? summary : item,
+        ),
+      }));
+      closeVersions();
+      router.push(`/admin/workflows/${restored.id}`);
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Restore failed",
+      );
+      setVersionBusy(false);
+    }
+  }
+
+  async function onClone(workflow: WorkflowSummary) {
+    setCloningId(workflow.id);
+    setError(null);
+    try {
+      const cloned = await cloneWorkflow(await getAccessToken(), workflow.id);
+      router.push(`/admin/workflows/${cloned.id}`);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Failed to clone workflow",
+      );
+      setCloningId(null);
+    }
+  }
+
   async function onDelete(workflow: WorkflowSummary) {
     if (
       !window.confirm(
@@ -84,6 +284,9 @@ export function WorkflowList({
         items: prev.items.filter((item) => item.id !== workflow.id),
         total: Math.max(0, prev.total - 1),
       }));
+      if (versionsWorkflow?.id === workflow.id) {
+        closeVersions();
+      }
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : "Failed to delete workflow",
@@ -128,7 +331,7 @@ export function WorkflowList({
             <span className="th-label">Status</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label w-9 shrink-0 text-right"> </span>
+          <span className="th-label w-auto shrink-0 text-right">Actions</span>
         </div>
         <ul>
           {pageData.items.map((workflow) => (
@@ -167,11 +370,42 @@ export function WorkflowList({
                     {formatRelative(workflow.updatedAt)}
                   </p>
                 </Link>
-                <div className="flex w-9 shrink-0 items-center justify-end">
+                <div className="flex shrink-0 items-center justify-end gap-0.5">
+                  <Link
+                    href={`/admin/workflows/${workflow.id}`}
+                    className={buttonClassName({
+                      variant: "ghost",
+                      size: "icon",
+                    })}
+                    aria-label={`Edit ${workflow.name}`}
+                    title="Edit"
+                  >
+                    <PencilIcon />
+                  </Link>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Versions for ${workflow.name}`}
+                    title="Versions"
+                    onClick={() => void openVersions(workflow)}
+                  >
+                    <HistoryIcon />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Clone ${workflow.name}`}
+                    title="Clone"
+                    disabled={cloningId === workflow.id}
+                    onClick={() => void onClone(workflow)}
+                  >
+                    {cloningId === workflow.id ? "…" : <CloneIcon />}
+                  </Button>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${workflow.name}`}
+                    title="Delete"
                     disabled={deletingId === workflow.id}
                     onClick={() => void onDelete(workflow)}
                   >
@@ -188,6 +422,88 @@ export function WorkflowList({
           ) : null}
         </ul>
       </section>
+
+      {versionsWorkflow ? (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="workflow-versions-title"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-ink/40"
+            aria-label="Close version history"
+            onClick={closeVersions}
+          />
+          <div className="relative z-10 flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-line bg-canvas shadow-lg">
+            <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+              <div className="min-w-0">
+                <h2
+                  id="workflow-versions-title"
+                  className="truncate text-sm font-semibold"
+                >
+                  Versions · {versionsWorkflow.name}
+                </h2>
+                <p className="mt-0.5 truncate text-xs text-slate-muted">
+                  /{versionsWorkflow.slug}
+                </p>
+              </div>
+              <Button size="sm" variant="ghost" onClick={closeVersions}>
+                Close
+              </Button>
+            </div>
+            <div className="space-y-3 overflow-y-auto p-4">
+              {versionError ? (
+                <p className="text-sm text-rose">{versionError}</p>
+              ) : null}
+              <VersionHistoryPanel
+                versions={versions}
+                busy={versionBusy}
+                onRefresh={() => {
+                  if (versionsWorkflow) void refreshVersions(versionsWorkflow);
+                }}
+                onView={(version) => void viewVersion(version)}
+                onRestoreLive={(version) => void restoreLive(version)}
+                onRestoreDraft={(version) => void restoreDraft(version)}
+                onCloseView={() => setViewing(null)}
+                viewing={
+                  viewing ? (
+                    <dl className="grid gap-2 text-sm sm:grid-cols-2">
+                      <div>
+                        <dt className="text-xs text-slate-muted">Mode</dt>
+                        <dd>{viewing.mode}</dd>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <dt className="mb-1 text-xs text-slate-muted">Steps</dt>
+                        <dd>
+                          <ul className="space-y-1">
+                            {viewing.steps.map((step, index) => (
+                              <li
+                                key={`${step.targetConfigId}-${index}`}
+                                className="text-sm"
+                              >
+                                {index + 1}. {step.name}{" "}
+                                <span className="text-xs text-slate-muted">
+                                  ({step.targetType}
+                                  {step.targetName
+                                    ? ` · ${step.targetName}`
+                                    : ""}
+                                  )
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </dd>
+                      </div>
+                    </dl>
+                  ) : null
+                }
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

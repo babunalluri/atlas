@@ -15,6 +15,11 @@ RUN pip install --no-cache-dir -r /tmp/requirements-allowlist.txt \
     && chown -R sandbox:sandbox /sandbox
 
 COPY atlas_sdk /sandbox/atlas_sdk
+# Compatibility shim: `import requests` → HttpProxy IPC (no real PyPI requests).
+COPY requests /sandbox/requests
+# Minimal Agno / supertools import shims (not full frameworks).
+COPY agno /sandbox/agno
+COPY supertools /sandbox/supertools
 COPY runner.py /sandbox/runner.py
 
 USER sandbox

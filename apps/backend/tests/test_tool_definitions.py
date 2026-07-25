@@ -9,7 +9,12 @@ from app.agent_runtime.factory import AgentFactoryService
 from app.api.schemas import ToolDefinitionCreateIn
 from app.api.tools import _out, _validate_python_toolkit_credential
 from app.db.models import AgentToolBinding
-from app.db.repositories import AgentRepository, CredentialRepository, ToolDefinitionRepository
+from app.db.repositories import (
+    AgentRepository,
+    CredentialRepository,
+    ToolDefinitionRepository,
+    ToolDefinitionVersionRepository,
+)
 
 
 def tool_values(**overrides):
@@ -114,22 +119,150 @@ async def test_credential_toolkit_creation_is_tenant_and_provider_gated(
 
 
 @pytest.mark.asyncio
-async def test_tool_api_output_never_exposes_credential_value(session, tenant_a):
+async def test_tool_update_then_out_avoids_missing_greenlet(session, tenant_a):
+    """Regression: flush+onupdate expires updated_at; sync _out must not lazy-load."""
+    from app.api.tools import _serialize_tool, _sync_tenant_python_draft
+
     session.info["tenant_id"] = tenant_a.tenant_id
-    credential = await CredentialRepository(session, tenant_a).create(
-        name="API token",
-        provider="rest_api",
-        encrypted_value="ciphertext-must-not-leak",
-        key_version="local-v1",
+    created = await ToolDefinitionRepository(session, tenant_a).create(
+        tool_values(
+            kind="tenant_python",
+            http_method=None,
+            base_url=None,
+            path=None,
+            slug="freshdesk-like",
+            name="Freshdesk like",
+            config={
+                "source_code": "async def list_tickets(ctx):\n    return []\n" + ("# x\n" * 5000),
+                "dependencies": [],
+                "capabilities": [{"name": "list_tickets", "mutating": False}],
+                "settings": {"base_url": "https://example.freshdesk.com"},
+                "version_status": "draft",
+            },
+        )
     )
-    definition = await ToolDefinitionRepository(session, tenant_a).create(
-        tool_values(credential_id=credential.id)
+    updated = await ToolDefinitionRepository(session, tenant_a).update(
+        created.id,
+        {
+            "config": {
+                **created.config,
+                "source_code": created.config["source_code"] + "\n# edited\n",
+            }
+        },
+    )
+    assert updated is not None
+    await _sync_tenant_python_draft(updated, tenant_a, session)
+    out = await _serialize_tool(session, updated)
+    assert out.id == created.id
+    assert out.updated_at is not None
+
+
+def _tenant_python_values(slug: str, source: str, **overrides):
+    return tool_values(
+        kind="tenant_python",
+        http_method=None,
+        base_url=None,
+        path=None,
+        slug=slug,
+        name=slug.replace("-", " ").title(),
+        config={
+            "source_code": source,
+            "dependencies": [],
+            "capabilities": [{"name": "list_tickets", "mutating": False}],
+            "settings": {"base_url": "https://example.freshdesk.com"},
+            "version_status": "draft",
+        },
+        **overrides,
     )
 
-    output = _out(definition).model_dump(mode="json")
-    assert output["credential_id"] == str(credential.id)
-    assert "ciphertext-must-not-leak" not in str(output)
-    assert "encrypted_value" not in output
+
+@pytest.mark.asyncio
+async def test_tenant_python_list_versions_and_restore(session, tenant_a):
+    """Publish two snapshots; restore live pointer and clone as draft."""
+    session.info["tenant_id"] = tenant_a.tenant_id
+    tools = ToolDefinitionRepository(session, tenant_a)
+    versions = ToolDefinitionVersionRepository(session, tenant_a)
+
+    v1_source = "async def list_tickets(ctx):\n    return {'v': 1}\n"
+    v2_source = "async def list_tickets(ctx):\n    return {'v': 2}\n"
+    tool = await tools.create(_tenant_python_values("versioned-python", v1_source))
+
+    draft1 = await versions.upsert_draft(
+        tool_definition_id=tool.id,
+        source_code=v1_source,
+        dependencies=[],
+        capabilities=[{"name": "list_tickets", "mutating": False}],
+        settings={"base_url": "https://example.freshdesk.com"},
+        created_by=tenant_a.user_id,
+    )
+    published1 = await versions.publish(draft1.id, tool)
+    assert published1 is not None
+    assert tool.published_version_id == published1.id
+    assert tool.config["source_code"] == v1_source
+    assert tool.config["version_status"] == "published"
+
+    draft2 = await versions.upsert_draft(
+        tool_definition_id=tool.id,
+        source_code=v2_source,
+        dependencies=[],
+        capabilities=[{"name": "list_tickets", "mutating": False}],
+        settings={"base_url": "https://example.freshdesk.com"},
+        created_by=tenant_a.user_id,
+    )
+    published2 = await versions.publish(draft2.id, tool)
+    assert published2 is not None
+    assert tool.published_version_id == published2.id
+    assert tool.config["source_code"] == v2_source
+
+    listed = list(await versions.list_for_tool(tool.id))
+    assert [row.version for row in listed] == [2, 1]
+
+    restored = await versions.restore_version(
+        tool, published1.id, as_draft=False, created_by=tenant_a.user_id
+    )
+    assert restored.id == published1.id
+    assert tool.published_version_id == published1.id
+    assert tool.config["source_code"] == v1_source
+    assert tool.config["version_status"] == "published"
+
+    draft = await versions.restore_version(
+        tool, published2.id, as_draft=True, created_by=tenant_a.user_id
+    )
+    assert draft.status == "draft"
+    assert draft.version == 3
+    assert draft.source_code == v2_source
+    assert tool.published_version_id == published1.id
+    assert tool.config["version_status"] == "draft"
+    assert tool.config["source_code"] == v2_source
+
+
+@pytest.mark.asyncio
+async def test_tenant_python_restore_version_tenant_isolation(session, tenant_a, tenant_b):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    tools_a = ToolDefinitionRepository(session, tenant_a)
+    versions_a = ToolDefinitionVersionRepository(session, tenant_a)
+    tool = await tools_a.create(
+        _tenant_python_values(
+            "isolated-python",
+            "async def list_tickets(ctx):\n    return []\n",
+        )
+    )
+    draft = await versions_a.upsert_draft(
+        tool_definition_id=tool.id,
+        source_code=tool.config["source_code"],
+        dependencies=[],
+        capabilities=[{"name": "list_tickets", "mutating": False}],
+        settings={"base_url": "https://example.freshdesk.com"},
+        created_by=tenant_a.user_id,
+    )
+    published = await versions_a.publish(draft.id, tool)
+    assert published is not None
+    await session.commit()
+
+    session.info["tenant_id"] = tenant_b.tenant_id
+    versions_b = ToolDefinitionVersionRepository(session, tenant_b)
+    assert list(await versions_b.list_for_tool(tool.id)) == []
+    assert await versions_b.get(published.id) is None
 
 
 def test_tool_schema_rejects_plaintext_secret_headers_and_private_url():

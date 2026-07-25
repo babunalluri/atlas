@@ -11,6 +11,7 @@ back to a custom FastAPI run endpoint that still uses the same factory service.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -287,28 +288,41 @@ async def _sse_from_agent(
     user_id: str,
     session_id: str,
     event_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    wall_seconds: int | None = None,
 ) -> AsyncIterator[bytes]:
     run_kwargs = {
         "stream": True,
         "user_id": user_id,
         "session_id": session_id,
     }
+    limit = wall_seconds if wall_seconds is not None else get_settings().agent_run_wall_seconds
     # Prefer async streaming APIs when present.
     if hasattr(agent, "arun"):
         result = agent.arun(message, **run_kwargs)
         if hasattr(result, "__aiter__"):
             terminal = False
-            async for event in result:
-                payload = _event_payload(event)
-                terminal = terminal or payload.get("event") in {
-                    "RunCompleted",
-                    "RunError",
-                    "RunCancelled",
-                    "RunPaused",
+            try:
+                async with asyncio.timeout(limit):
+                    async for event in result:
+                        payload = _event_payload(event)
+                        terminal = terminal or payload.get("event") in {
+                            "RunCompleted",
+                            "RunError",
+                            "RunCancelled",
+                            "RunPaused",
+                        }
+                        if event_handler:
+                            payload = await event_handler(payload)
+                        yield f"data: {json.dumps(payload)}\n\n".encode()
+            except TimeoutError:
+                payload = {
+                    "event": "RunError",
+                    "error": f"Agent run exceeded {limit}s wall clock",
                 }
                 if event_handler:
                     payload = await event_handler(payload)
                 yield f"data: {json.dumps(payload)}\n\n".encode()
+                return
             if not terminal:
                 payload = {"event": "RunCompleted"}
                 if event_handler:
@@ -344,20 +358,17 @@ async def _sse_from_agent(
 def _event_payload(event: Any) -> dict[str, Any]:
     if isinstance(event, dict):
         if "event" in event:
-            return event
-        return {"event": event.get("type", "RunContent"), **event}
+            return _normalize_event_name(event)
+        return _normalize_event_name(
+            {"event": event.get("type", "RunContent"), **event}
+        )
     if hasattr(event, "to_dict"):
         data = event.to_dict()
         if isinstance(data, dict):
             name = data.get("event") or data.get("type") or "RunContent"
-            normalized = {
-                "WorkflowCompleted": "RunCompleted",
-                "WorkflowError": "RunError",
-                "WorkflowCancelled": "RunCancelled",
-                "WorkflowPaused": "RunPaused",
-                "StepOutput": "RunContent",
-            }.get(str(name), name)
-            return {**data, "event": normalized, "original_event": name}
+            return _normalize_event_name(
+                {**data, "event": name, "original_event": name}
+            )
     for attr in ("content", "delta", "message", "response"):
         value = getattr(event, attr, None)
         if isinstance(value, str) and value:
@@ -365,16 +376,33 @@ def _event_payload(event: Any) -> dict[str, Any]:
     if hasattr(event, "model_dump"):
         data = event.model_dump()
         name = data.get("event") or data.get("type") or "RunContent"
-        normalized = {
-            "WorkflowCompleted": "RunCompleted",
-            "WorkflowError": "RunError",
-            "WorkflowCancelled": "RunCancelled",
-            "WorkflowPaused": "RunPaused",
-            "StepOutput": "RunContent",
-        }.get(str(name), name)
-        return {**data, "event": normalized, "original_event": name}
+        return _normalize_event_name({**data, "event": name, "original_event": name})
     text = str(event)
     return {"event": "RunContent", "content": text}
+
+
+def _normalize_event_name(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map Agno team/workflow event names onto the chat UI's expected set."""
+    name = str(payload.get("event") or payload.get("type") or "RunContent")
+    normalized = {
+        "WorkflowCompleted": "RunCompleted",
+        "WorkflowError": "RunError",
+        "WorkflowCancelled": "RunCancelled",
+        "WorkflowPaused": "RunPaused",
+        "StepOutput": "RunContent",
+        # Team streaming uses TeamRunContent; chat only renders RunContent.
+        "TeamRunContent": "RunContent",
+        "TeamRunContentCompleted": "RunContentCompleted",
+        "TeamRunCompleted": "RunCompleted",
+        "TeamRunError": "RunError",
+        "TeamRunCancelled": "RunCancelled",
+        "TeamRunPaused": "RunPaused",
+        "TeamRunStarted": "RunStarted",
+    }.get(name, name)
+    out = {**payload, "event": normalized}
+    if normalized != name:
+        out.setdefault("original_event", name)
+    return out
 
 
 async def _persist_runtime_event(

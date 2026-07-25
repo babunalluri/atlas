@@ -149,6 +149,34 @@ class TraceRepository:
             )
             or 0
         ) + 1
+        # Streaming token/content events spam the span tree (0 ms each). Keep
+        # accumulated text on the root span, but only persist meaningful spans.
+        original_name = str(
+            payload.get("original_event") or event_name or "RunEvent"
+        )
+        skip_span = event_name in {
+            "RunContent",
+            "RunContentCompleted",
+            "RunIntermediateContent",
+            "RunStarted",
+            "TeamRunContent",
+            "TeamRunContentCompleted",
+            "TeamRunStarted",
+        } or original_name in {
+            "TeamRunContent",
+            "TeamRunContentCompleted",
+            "TeamRunStarted",
+        }
+        if event_name == "RunContent" and isinstance(safe_payload, dict):
+            chunk = safe_payload.get("content")
+            if chunk is not None and root is not None:
+                previous = ""
+                if isinstance(root.output, dict):
+                    previous = str(root.output.get("content") or "")
+                root.output = {
+                    **(root.output or {}),
+                    "content": f"{previous}{chunk}",
+                }
         kind = "event"
         lowered = event_name.lower()
         if "tool" in lowered:
@@ -159,43 +187,62 @@ class TraceRepository:
             kind = "team"
         error = None
         if event_name == "RunError":
-            error = str(payload.get("error") or payload.get("content") or "Run failed")[:2000]
-        self.session.add(
-            TraceSpan(
-                id=uuid.uuid4(),
-                tenant_id=self.context.tenant_id,
-                trace_id=trace.id,
-                parent_span_id=root.id if root else None,
-                name=event_name[:255],
-                kind=kind,
-                status=TERMINAL_EVENTS.get(event_name, "completed"),
-                sequence=sequence,
-                attributes=safe_payload if isinstance(safe_payload, dict) else {},
-                output={"content": safe_payload.get("content")}
-                if isinstance(safe_payload, dict) and safe_payload.get("content") is not None
-                else {},
-                error=error,
-                started_at=now,
-                ended_at=now,
-                duration_ms=0,
+            error = str(payload.get("error") or payload.get("content") or "Run failed")[
+                :2000
+            ]
+        if not skip_span:
+            self.session.add(
+                TraceSpan(
+                    id=uuid.uuid4(),
+                    tenant_id=self.context.tenant_id,
+                    trace_id=trace.id,
+                    parent_span_id=root.id if root else None,
+                    name=event_name[:255],
+                    kind=kind,
+                    status=TERMINAL_EVENTS.get(event_name, "completed"),
+                    sequence=sequence,
+                    attributes=safe_payload if isinstance(safe_payload, dict) else {},
+                    output={"content": safe_payload.get("content")}
+                    if isinstance(safe_payload, dict)
+                    and safe_payload.get("content") is not None
+                    else {},
+                    error=error,
+                    started_at=now,
+                    ended_at=now,
+                    duration_ms=0,
+                )
             )
-        )
         if event_name in TERMINAL_EVENTS:
             trace.ended_at = now
             trace.duration_ms = _elapsed_ms(trace.started_at, now)
             if event_name == "RunCompleted":
-                trace.output = {
+                completed_output = {
                     key: safe_payload[key]
                     for key in ("content", "run_id", "metrics")
                     if isinstance(safe_payload, dict) and key in safe_payload
                 }
+                # Streamed RunContent accumulates on the root span. Terminal
+                # RunCompleted events often omit content — do not wipe it.
+                if (
+                    "content" not in completed_output
+                    and root is not None
+                    and isinstance(root.output, dict)
+                    and root.output.get("content") not in (None, "")
+                ):
+                    completed_output["content"] = root.output["content"]
+                trace.output = completed_output
             elif error:
                 trace.output = {"error": error}
             if root:
                 root.status = trace.status
                 root.ended_at = now
                 root.duration_ms = trace.duration_ms
-                root.output = trace.output
+                if event_name == "RunCompleted" and trace.output:
+                    # Merge so we keep any prior streamed fields not in terminal payload.
+                    prior = root.output if isinstance(root.output, dict) else {}
+                    root.output = {**prior, **trace.output}
+                else:
+                    root.output = trace.output
                 root.error = error
         await self.session.flush()
         return trace

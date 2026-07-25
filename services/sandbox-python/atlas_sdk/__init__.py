@@ -2,31 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import sys
 from typing import Any
 
+from atlas_sdk.ipc import http_proxy, rpc
 
-def _rpc(method: str, params: dict[str, Any]) -> Any:
-    request = {"jsonrpc": "2.0", "id": _next_id(), "method": method, "params": params}
-    sys.stdout.write(json.dumps(request, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-    line = sys.stdin.readline()
-    if not line:
-        raise RuntimeError("Sandbox host closed IPC channel")
-    message = json.loads(line)
-    if "error" in message:
-        raise RuntimeError(str(message["error"]))
-    return message.get("result")
-
-
-_counter = 0
-
-
-def _next_id() -> int:
-    global _counter
-    _counter += 1
-    return _counter
+__all__ = ["Context", "HttpClient", "emit_result", "http_proxy", "rpc"]
 
 
 class HttpClient:
@@ -58,15 +38,12 @@ class HttpClient:
         headers: dict[str, str] | None = None,
     ) -> Any:
         # Async surface for author ergonomics; IPC itself is synchronous.
-        result = _rpc(
-            "HttpProxy",
-            {
-                "method": method,
-                "url": url,
-                "params": params or {},
-                "json": json,
-                "headers": headers or {},
-            },
+        result = http_proxy(
+            method,
+            url,
+            params=params,
+            json_body=json,
+            headers=headers,
         )
         if not result.get("ok", True):
             raise RuntimeError(result.get("error") or "HTTP proxy failed")
@@ -80,4 +57,4 @@ class Context:
 
 
 def emit_result(*, ok: bool, value: Any = None, error: str | None = None) -> None:
-    _rpc("RunResult", {"ok": ok, "value": value, "error": error})
+    rpc("RunResult", {"ok": ok, "value": value, "error": error})

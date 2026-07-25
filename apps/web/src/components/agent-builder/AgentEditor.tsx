@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { BackLink } from "@/components/ui/BackLink";
@@ -14,28 +14,19 @@ import {
   Select,
   Textarea,
 } from "@/components/ui/Field";
+import { ModelSelect } from "@/components/ui/ModelSelect";
 import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
-import {
-  VersionHistoryPanel,
-  type VersionHistoryItem,
-} from "@/components/ui/VersionHistoryPanel";
+import { ToolAttachmentSection } from "@/components/tools/ToolAttachmentSection";
 import {
   deleteAgent,
-  getAgentVersion,
-  listAgentVersions,
   publishAgent,
-  restoreAgentVersion,
   saveAgentDraft,
   type CredentialSummary,
 } from "@/lib/api/admin";
 import {
-  ALLOWED_MODELS,
-  TOOL_CATALOG,
   type AgentConfig,
   type AgentDraftInput,
   type MemoryMode,
-  type ModelId,
-  type ToolBinding,
   type ToolDefinition,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -90,206 +81,22 @@ export function AgentEditor({
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [versionBusy, setVersionBusy] = useState(false);
-  const [versions, setVersions] = useState<VersionHistoryItem[]>([]);
-  const [viewing, setViewing] = useState<{
-    version: number;
-    instructions: string;
-    modelId: string;
-    temperature: number;
-    memoryMode: string;
-  } | null>(null);
-  const [toolQuery, setToolQuery] = useState("");
-  const [toolScope, setToolScope] = useState<"all" | "enabled" | "builtin" | "tenant">(
-    "all",
-  );
-  const [toolPage, setToolPage] = useState(1);
 
   const sources = initial.knowledgeBase?.sources ?? [];
-  const toolPageSize = 25;
 
-  const toolMap = useMemo(() => {
-    const map = new Map(
-      form.tools.filter((tool) => !tool.definitionId).map((t) => [t.kind, t]),
-    );
-    return map;
-  }, [form.tools]);
-  const reusableMap = useMemo(
+  const credentialNames = useMemo(
     () =>
-      new Map(
-        form.tools
-          .filter((tool) => tool.definitionId)
-          .map((tool) => [tool.definitionId as string, tool]),
+      Object.fromEntries(
+        credentials.map((credential) => [credential.id, credential.name]),
       ),
-    [form.tools],
-  );
-  const credentialMap = useMemo(
-    () => new Map(credentials.map((credential) => [credential.id, credential.name])),
     [credentials],
   );
-
-  const enabledToolCount = useMemo(
-    () => form.tools.filter((tool) => tool.enabled).length,
-    [form.tools],
-  );
-
-  const filteredBuiltinTools = useMemo(() => {
-    const q = toolQuery.trim().toLowerCase();
-    return TOOL_CATALOG.filter((tool) => {
-      const enabled = Boolean(toolMap.get(tool.kind)?.enabled);
-      if (toolScope === "tenant") return false;
-      if (toolScope === "enabled" && !enabled) return false;
-      if (!q) return true;
-      return (
-        tool.label.toLowerCase().includes(q) ||
-        tool.description.toLowerCase().includes(q) ||
-        tool.kind.toLowerCase().includes(q)
-      );
-    });
-  }, [toolMap, toolQuery, toolScope]);
-
-  const filteredTenantTools = useMemo(() => {
-    const q = toolQuery.trim().toLowerCase();
-    return toolDefinitions.filter((definition) => {
-      const enabled = Boolean(reusableMap.get(definition.id)?.enabled);
-      if (toolScope === "builtin") return false;
-      if (toolScope === "enabled" && !enabled) return false;
-      if (!q) return true;
-      const haystack = [
-        definition.name,
-        definition.slug,
-        definition.kind,
-        definition.httpMethod ?? "",
-        definition.baseUrl ?? "",
-        definition.path ?? "",
-      ]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(q);
-    });
-  }, [reusableMap, toolDefinitions, toolQuery, toolScope]);
-
-  const toolTotal = filteredBuiltinTools.length + filteredTenantTools.length;
-  const toolTotalPages = Math.max(1, Math.ceil(toolTotal / toolPageSize));
-  const safeToolPage = Math.min(toolPage, toolTotalPages);
-  const toolSliceStart = (safeToolPage - 1) * toolPageSize;
-
-  const pagedBuiltin = useMemo(() => {
-    // Builtin tools occupy the start of the combined list.
-    const end = toolSliceStart + toolPageSize;
-    if (toolSliceStart >= filteredBuiltinTools.length) return [];
-    return filteredBuiltinTools.slice(toolSliceStart, end);
-  }, [filteredBuiltinTools, toolSliceStart, toolPageSize]);
-
-  const pagedTenant = useMemo(() => {
-    const builtinLen = filteredBuiltinTools.length;
-    const start = Math.max(0, toolSliceStart - builtinLen);
-    const end = Math.max(0, toolSliceStart + toolPageSize - builtinLen);
-    if (end <= 0) return [];
-    return filteredTenantTools.slice(start, end);
-  }, [
-    filteredBuiltinTools.length,
-    filteredTenantTools,
-    toolSliceStart,
-    toolPageSize,
-  ]);
 
   function update<K extends keyof AgentDraftInput>(
     key: K,
     value: AgentDraftInput[K],
   ) {
     setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  function toggleTool(kind: ToolBinding["kind"], enabled: boolean) {
-    const catalog = TOOL_CATALOG.find((t) => t.kind === kind);
-    if (!catalog) return;
-    setForm((prev) => {
-      const existing = prev.tools.find((t) => t.kind === kind);
-      if (existing) {
-        return {
-          ...prev,
-          tools: prev.tools.map((t) =>
-            t.kind === kind ? { ...t, enabled } : t,
-          ),
-        };
-      }
-      if (!enabled) return prev;
-      const next: ToolBinding = {
-        id: `tool_${kind}`,
-        kind,
-        label: catalog.label,
-        enabled: true,
-        config: {},
-        requiresApproval: catalog.requiresApproval,
-      };
-      return { ...prev, tools: [...prev.tools, next] };
-    });
-  }
-
-  function updateToolConfig(
-    kind: ToolBinding["kind"],
-    key: string,
-    value: string,
-  ) {
-    setForm((prev) => ({
-      ...prev,
-      tools: prev.tools.map((tool) =>
-        tool.kind === kind
-          ? { ...tool, config: { ...tool.config, [key]: value } }
-          : tool,
-      ),
-    }));
-  }
-
-  function toggleReusable(definition: ToolDefinition, enabled: boolean) {
-    setForm((previous) => {
-      const existing = previous.tools.find(
-        (tool) => tool.definitionId === definition.id,
-      );
-      if (existing) {
-        return {
-          ...previous,
-          tools: previous.tools.map((tool) =>
-            tool.definitionId === definition.id ? { ...tool, enabled } : tool,
-          ),
-        };
-      }
-      if (!enabled) return previous;
-      return {
-        ...previous,
-        tools: [
-          ...previous.tools,
-          {
-            id: `definition_${definition.id}`,
-            kind:
-              definition.kind === "http" && definition.httpMethod === "GET"
-                ? "rest_read"
-                : "rest_mutate",
-            definitionId: definition.id,
-            label: definition.name,
-            enabled: true,
-            config: {},
-            requiresApproval:
-              definition.approvalRequired ||
-              (definition.kind === "http" && definition.httpMethod !== "GET"),
-          },
-        ],
-      };
-    });
-  }
-
-  function reusableSummary(definition: ToolDefinition): string {
-    if (definition.kind === "http") {
-      return `${definition.httpMethod ?? "HTTP"} ${definition.baseUrl ?? ""}${
-        definition.path ?? ""
-      }`;
-    }
-    const selected =
-      (definition.config.allowed_operations as string[] | undefined) ??
-      (definition.config.include_tools as string[] | undefined) ??
-      [];
-    return `${definition.kind.replace("_", " ")} · ${selected.length} selected capabilities`;
   }
 
   async function onSave() {
@@ -312,7 +119,6 @@ export function AgentEditor({
       setStatus(saved.status);
       setDraftVersion(saved.draftVersion);
       setBanner("Draft saved");
-      void refreshVersions();
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -331,7 +137,6 @@ export function AgentEditor({
       setPublishedVersion(published.publishedVersion);
       setDraftVersion(published.draftVersion);
       setBanner(`Published v${published.publishedVersion}`);
-      void refreshVersions();
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Publish failed");
     } finally {
@@ -355,117 +160,6 @@ export function AgentEditor({
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Delete failed");
       setDeleting(false);
-    }
-  }
-
-  function applyAgent(agent: AgentConfig) {
-    setForm(applyAgentToForm(agent));
-    setStatus(agent.status);
-    setDraftVersion(agent.draftVersion);
-    setPublishedVersion(agent.publishedVersion);
-  }
-
-  async function refreshVersions() {
-    setVersionBusy(true);
-    try {
-      const rows = await listAgentVersions(await getAccessToken(), initial.id);
-      setVersions(
-        rows.map((row) => ({
-          id: row.id,
-          version: row.version,
-          status: row.status,
-          isLive: row.isLive,
-          createdAt: row.createdAt,
-          details: [row.modelId],
-        })),
-      );
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Failed to load versions");
-    } finally {
-      setVersionBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    void refreshVersions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only
-  }, [initial.id]);
-
-  async function viewVersion(version: VersionHistoryItem) {
-    setVersionBusy(true);
-    try {
-      const detail = await getAgentVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-      );
-      setViewing({
-        version: detail.version,
-        instructions: detail.instructions,
-        modelId: detail.modelId,
-        temperature: detail.temperature,
-        memoryMode: detail.memoryMode,
-      });
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Failed to load version");
-    } finally {
-      setVersionBusy(false);
-    }
-  }
-
-  async function restoreLive(version: VersionHistoryItem) {
-    if (version.isLive) return;
-    if (
-      !window.confirm(
-        `Make v${version.version} the live published version? Current live stays available in history.`,
-      )
-    ) {
-      return;
-    }
-    setVersionBusy(true);
-    setBanner(null);
-    try {
-      const restored = await restoreAgentVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-      );
-      applyAgent(restored);
-      setViewing(null);
-      setBanner(`Restored live to v${restored.publishedVersion}`);
-      void refreshVersions();
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Restore failed");
-    } finally {
-      setVersionBusy(false);
-    }
-  }
-
-  async function restoreDraft(version: VersionHistoryItem) {
-    if (
-      !window.confirm(
-        `Clone v${version.version} into a new draft for editing? Live published version will not change until you publish.`,
-      )
-    ) {
-      return;
-    }
-    setVersionBusy(true);
-    setBanner(null);
-    try {
-      const restored = await restoreAgentVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-        { asDraft: true },
-      );
-      applyAgent(restored);
-      setViewing(null);
-      setBanner(`Loaded v${version.version} into draft v${restored.draftVersion}`);
-      void refreshVersions();
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Restore failed");
-    } finally {
-      setVersionBusy(false);
     }
   }
 
@@ -562,20 +256,12 @@ export function AgentEditor({
                   placeholder="Optional"
                 />
               </div>
-              <div>
-                <Label htmlFor="model">Model</Label>
-                <Select
-                  id="model"
-                  value={form.model}
-                  onChange={(e) => update("model", e.target.value as ModelId)}
-                >
-                  {ALLOWED_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
-                </Select>
-              </div>
+              <ModelSelect
+                id="model"
+                value={form.model}
+                onChange={(model) => update("model", model)}
+                credentials={credentials}
+              />
               <div>
                 <Label htmlFor="temperature" hint={`${form.temperature.toFixed(2)}`}>
                   Temperature
@@ -620,202 +306,12 @@ export function AgentEditor({
             </div>
           </section>
 
-          <section className="rounded-xl border border-line bg-raised/40 p-4">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">Tools</h2>
-              <Badge tone={enabledToolCount > 0 ? "success" : "neutral"}>
-                {enabledToolCount} enabled
-              </Badge>
-            </div>
-
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <Input
-                value={toolQuery}
-                placeholder="Search tools…"
-                className="min-w-[180px] flex-1"
-                onChange={(event) => {
-                  setToolQuery(event.target.value);
-                  setToolPage(1);
-                }}
-              />
-              {(
-                [
-                  ["all", "All"],
-                  ["enabled", "Enabled"],
-                  ["builtin", "Built-in"],
-                  ["tenant", "Tenant"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => {
-                    setToolScope(value);
-                    setToolPage(1);
-                  }}
-                  className={
-                    toolScope === value
-                      ? "rounded-md bg-ink px-2.5 py-1.5 text-xs font-medium text-canvas"
-                      : "rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:bg-mist"
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <ul className="max-h-80 divide-y divide-line overflow-y-auto rounded-md border border-line">
-              {pagedBuiltin.map((tool) => {
-                const binding = toolMap.get(tool.kind);
-                const enabled = Boolean(binding?.enabled);
-                return (
-                  <li key={tool.kind} className="bg-canvas/30 px-3 py-2">
-                    <div className="flex items-center gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="truncate text-sm font-medium text-ink">
-                            {tool.label}
-                          </p>
-                          <span className="text-[10px] uppercase tracking-wide text-slate-muted">
-                            built-in
-                          </span>
-                          {tool.requiresApproval ? (
-                            <Badge tone="warning">approval</Badge>
-                          ) : null}
-                        </div>
-                        <p className="truncate text-xs text-slate-muted" title={tool.description}>
-                          {tool.description}
-                        </p>
-                      </div>
-                      <label className="flex shrink-0 items-center gap-1.5 text-xs">
-                        <input
-                          type="checkbox"
-                          checked={enabled}
-                          onChange={(e) => toggleTool(tool.kind, e.target.checked)}
-                          className="size-4 accent-teal"
-                        />
-                        On
-                      </label>
-                    </div>
-                    {enabled && tool.kind.startsWith("rest_") ? (
-                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                        <Input
-                          aria-label={`${tool.label} base URL`}
-                          value={String(binding?.config.base_url ?? "")}
-                          placeholder="https://api.example.com/v1"
-                          onChange={(event) =>
-                            updateToolConfig(
-                              tool.kind,
-                              "base_url",
-                              event.target.value,
-                            )
-                          }
-                        />
-                        <Input
-                          aria-label={`${tool.label} credential ID`}
-                          value={String(binding?.config.credential_id ?? "")}
-                          placeholder="Optional credential UUID"
-                          onChange={(event) =>
-                            updateToolConfig(
-                              tool.kind,
-                              "credential_id",
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </div>
-                    ) : null}
-                  </li>
-                );
-              })}
-
-              {pagedTenant.map((definition) => {
-                const enabled = Boolean(reusableMap.get(definition.id)?.enabled);
-                const summary = reusableSummary(definition);
-                const needsApproval =
-                  definition.approvalRequired ||
-                  (definition.kind === "http" &&
-                    definition.httpMethod !== "GET");
-                return (
-                  <li
-                    key={definition.id}
-                    className="flex items-center gap-3 bg-canvas/30 px-3 py-2"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="truncate text-sm font-medium">
-                          {definition.name}
-                        </p>
-                        {needsApproval ? (
-                          <Badge tone="warning">approval</Badge>
-                        ) : null}
-                        {!definition.active ? (
-                          <Badge tone="neutral">inactive</Badge>
-                        ) : null}
-                      </div>
-                      <p className="truncate text-xs text-slate-muted" title={summary}>
-                        {summary}
-                        {definition.credentialId
-                          ? ` · ${credentialMap.get(definition.credentialId) ?? "credential"}`
-                          : ""}
-                      </p>
-                    </div>
-                    <label className="flex shrink-0 items-center gap-1.5 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={enabled}
-                        disabled={!definition.active}
-                        onChange={(event) =>
-                          toggleReusable(definition, event.target.checked)
-                        }
-                        className="size-4 accent-teal"
-                      />
-                      On
-                    </label>
-                  </li>
-                );
-              })}
-
-              {toolTotal === 0 ? (
-                <li className="px-3 py-6 text-center text-sm text-slate-muted">
-                  {toolDefinitions.length === 0 && toolScope !== "builtin"
-                    ? "No tenant tools yet — create them under Admin → Tools."
-                    : "No tools match this search."}
-                </li>
-              ) : null}
-            </ul>
-
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-muted">
-              <p>
-                {toolTotal === 0
-                  ? "0 tools"
-                  : `Showing ${toolSliceStart + 1}–${Math.min(toolTotal, toolSliceStart + toolPageSize)} of ${toolTotal}`}
-              </p>
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={safeToolPage <= 1}
-                  onClick={() => setToolPage((page) => Math.max(1, page - 1))}
-                >
-                  Previous
-                </Button>
-                <span className="mono-cell">
-                  {safeToolPage} / {toolTotalPages}
-                </span>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={safeToolPage >= toolTotalPages}
-                  onClick={() =>
-                    setToolPage((page) => Math.min(toolTotalPages, page + 1))
-                  }
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
-          </section>
+          <ToolAttachmentSection
+            tools={form.tools}
+            onChange={(tools) => update("tools", tools)}
+            toolDefinitions={toolDefinitions}
+            credentialNames={credentialNames}
+          />
 
           <section className="rounded-xl border border-line bg-raised/40 p-4">
             <div className="mb-3 flex items-center justify-between gap-2">
@@ -859,40 +355,6 @@ export function AgentEditor({
             </div>
           </section>
       </div>
-
-      <VersionHistoryPanel
-        versions={versions}
-        busy={versionBusy || saving || publishing || deleting}
-        onRefresh={() => void refreshVersions()}
-        onView={(version) => void viewVersion(version)}
-        onRestoreLive={(version) => void restoreLive(version)}
-        onRestoreDraft={(version) => void restoreDraft(version)}
-        onCloseView={() => setViewing(null)}
-        viewing={
-          viewing ? (
-            <dl className="grid gap-2 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-xs text-slate-muted">Model</dt>
-                <dd>{viewing.modelId}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-slate-muted">Temperature</dt>
-                <dd>{viewing.temperature}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-slate-muted">Memory</dt>
-                <dd>{viewing.memoryMode}</dd>
-              </div>
-              <div className="sm:col-span-2">
-                <dt className="text-xs text-slate-muted">Instructions</dt>
-                <dd className="mt-0.5 whitespace-pre-wrap font-mono text-[13px]">
-                  {viewing.instructions}
-                </dd>
-              </div>
-            </dl>
-          ) : null
-        }
-      />
     </div>
   );
 }

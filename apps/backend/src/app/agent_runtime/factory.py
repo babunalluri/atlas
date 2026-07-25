@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent_runtime.persistence import get_agno_db, runtime_session_id, runtime_user_id
 from app.core.settings import get_settings
 from app.credentials.provider import AwsKmsCipher, EncryptedEnvelope, LocalFernetCipher
-from app.db.models import AgentToolBinding, AgentVersion
+from app.db.models import AgentToolBinding, AgentVersion, TeamToolBinding
 from app.db.repositories import (
     AgentRepository,
     CredentialRepository,
@@ -295,7 +295,7 @@ class AgentFactoryService:
             )
         )
 
-    async def _build_tool(self, binding: AgentToolBinding) -> Any:
+    async def _build_tool(self, binding: AgentToolBinding | TeamToolBinding) -> Any:
         if binding.tool_definition_id is not None:
             definition = await self.tool_definitions.get(binding.tool_definition_id)
             if definition is None or not definition.active:
@@ -447,6 +447,11 @@ class TeamFactoryService:
                 runtime_user_id=runtime_user_id(self.agent_factory.context),
             )
         model = await self.agent_factory._build_model(version)  # type: ignore[arg-type]
+        bindings = await self.repo.bindings(version.id)
+        tools: list[Any] = []
+        for binding in bindings:
+            built = await self.agent_factory._build_tool(binding)
+            tools.extend(built if isinstance(built, list) else [built])
         metadata = trace_metadata(
             tenant_id=str(self.agent_factory.context.tenant_id),
             agent_id=f"team:{version.team_config_id}",
@@ -465,6 +470,7 @@ class TeamFactoryService:
             "instructions": version.instructions,
             "mode": version.mode,
             "model": model,
+            "tools": tools,
             "db": get_agno_db(),
             "metadata": metadata,
             "add_history_to_context": True,

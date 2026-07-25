@@ -242,6 +242,18 @@ class ToolDefinitionVersionOut(BaseModel):
     updated_at: datetime
 
 
+class ToolRestoreIn(BaseModel):
+    """Restore a historical editable-Python tool version.
+
+    ``as_draft=False`` (default) pins live published traffic to the snapshot
+    (publishing it first when the row is still draft/validated).
+    ``as_draft=True`` copies the snapshot into the editable draft without
+    changing the live published pointer.
+    """
+
+    as_draft: bool = False
+
+
 class PlatformPythonPackageIn(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$")
     version: str = Field(min_length=1, max_length=64)
@@ -361,6 +373,7 @@ class TeamCreateIn(BaseModel):
     model_id: str = "openai:gpt-4.1-mini"
     temperature: float = Field(default=0.2, ge=0, le=2)
     member_config_ids: list[uuid.UUID] = Field(default_factory=list)
+    tools: list[ToolBindingIn] = Field(default_factory=list)
 
 
 class TeamUpdateIn(BaseModel):
@@ -371,6 +384,7 @@ class TeamUpdateIn(BaseModel):
     model_id: str | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
     member_config_ids: list[uuid.UUID] | None = None
+    tools: list[ToolBindingIn] | None = None
 
 
 class TeamMemberOut(BaseModel):
@@ -422,6 +436,7 @@ class TeamConfigOut(BaseModel):
     description: str | None
     published_version_id: uuid.UUID | None
     updated_at: datetime
+    tools: list[ToolBindingIn] = Field(default_factory=list)
     draft: TeamVersionOut | None = None
     published: TeamVersionOut | None = None
 

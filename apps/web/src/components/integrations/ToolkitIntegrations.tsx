@@ -29,6 +29,40 @@ function optionDefaults(toolkit: ToolkitCatalogEntry): Record<string, unknown> {
   );
 }
 
+function isMissingPackage(toolkit: ToolkitCatalogEntry): boolean {
+  const reason = `${toolkit.unavailable_reason ?? ""} ${toolkit.install_hint ?? ""}`;
+  return Boolean(
+    toolkit.install_hint &&
+      /pip install|not installed|no module named/i.test(reason),
+  );
+}
+
+function unavailableTitle(toolkit: ToolkitCatalogEntry): string {
+  if (toolkit.disabled_reason || toolkit.status === "blocked") {
+    return "Unavailable by policy";
+  }
+  if (isMissingPackage(toolkit)) {
+    return "Server package required";
+  }
+  if (
+    /credential|oauth|option|configuration|configure|multi-value/i.test(
+      toolkit.unavailable_reason ?? "",
+    )
+  ) {
+    return "Configuration required";
+  }
+  return "Toolkit unavailable";
+}
+
+function unavailableDetail(toolkit: ToolkitCatalogEntry): string {
+  return (
+    toolkit.unavailable_reason ||
+    toolkit.disabled_reason ||
+    toolkit.install_hint ||
+    "This toolkit is not available in the backend image."
+  );
+}
+
 export function ToolkitIntegrations({
   catalog,
   initialCredentials,
@@ -344,9 +378,23 @@ export function ToolkitIntegrations({
                   <div className="flex flex-wrap gap-2">
                     <Badge
                       dot
-                      tone={selected.available ? "success" : "danger"}
+                      tone={
+                        selected.available
+                          ? "success"
+                          : selected.disabled_reason || selected.status === "blocked"
+                            ? "warning"
+                            : "danger"
+                      }
                     >
-                      {selected.available ? "Package ready" : "Unavailable"}
+                      {selected.available
+                        ? selected.credentials.length
+                          ? "Needs credential"
+                          : "Ready"
+                        : selected.disabled_reason || selected.status === "blocked"
+                          ? "Policy"
+                          : isMissingPackage(selected)
+                            ? "Package missing"
+                            : "Unavailable"}
                     </Badge>
                     {selected.side_effects ? (
                       <Badge tone="warning">Writes / approval</Badge>
@@ -364,18 +412,31 @@ export function ToolkitIntegrations({
                 {!selected.available ? (
                   <section className="rounded-xl border border-rose/25 bg-rose/8 p-4">
                     <h3 className="text-sm font-semibold text-rose">
-                      Server package required
+                      {unavailableTitle(selected)}
                     </h3>
                     <p className="mt-1 text-sm text-slate-muted">
-                      {selected.unavailable_reason ||
-                        selected.install_hint ||
-                        "This toolkit is not available in the backend image."}
+                      {unavailableDetail(selected)}
                     </p>
-                    <p className="mt-2 text-xs text-slate-muted">
-                      Install the dependency in <code>apps/backend/pyproject.toml</code>{" "}
-                      and rebuild the backend image. Packages cannot be installed with
-                      tenant credentials.
-                    </p>
+                    {isMissingPackage(selected) ? (
+                      <p className="mt-2 text-xs text-slate-muted">
+                        Install the dependency in{" "}
+                        <code>apps/backend/pyproject.toml</code> and rebuild the
+                        backend image. Packages cannot be installed with tenant
+                        credentials.
+                      </p>
+                    ) : selected.disabled_reason ||
+                      selected.status === "blocked" ? (
+                      <p className="mt-2 text-xs text-slate-muted">
+                        This integration stays hidden from agent attachment until
+                        Atlas supports the required credential or runtime model.
+                      </p>
+                    ) : (
+                      <p className="mt-2 text-xs text-slate-muted">
+                        Availability is determined by the backend toolkit catalog.
+                        Non-secret settings belong in toolkit options; secrets stay
+                        in Credentials.
+                      </p>
+                    )}
                   </section>
                 ) : null}
 

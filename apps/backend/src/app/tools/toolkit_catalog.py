@@ -46,6 +46,7 @@ def _credential(
     side_effects: bool = False,
     hint: str | None = None,
     disabled: str | None = None,
+    options: dict[str, dict[str, Any]] | None = None,
 ) -> ToolkitSpec:
     return ToolkitSpec(
         key=key,
@@ -56,6 +57,7 @@ def _credential(
         class_name=class_name,
         tier="credential",
         credentials=(CredentialSpec(env_var, provider, kwarg),),
+        options=options or {},
         side_effects=side_effects,
         install_hint=hint,
         disabled_reason=disabled,
@@ -72,6 +74,7 @@ def _safe(
     *,
     options: dict[str, dict[str, Any]] | None = None,
     hint: str | None = None,
+    disabled: str | None = None,
 ) -> ToolkitSpec:
     return ToolkitSpec(
         key=key,
@@ -83,6 +86,7 @@ def _safe(
         tier="safe",
         options=options or {},
         install_hint=hint,
+        disabled_reason=disabled,
     )
 
 
@@ -181,6 +185,10 @@ SAFE_TOOLKITS = (
         "NewspaperTools",
         "Extract article text and metadata.",
         hint="pip install newspaper3k lxml_html_clean",
+        disabled=(
+            "newspaper3k conflicts with newspaper4k on the shared `newspaper` import; "
+            "use Newspaper4k instead."
+        ),
     ),
     _safe(
         "newspaper4k",
@@ -214,9 +222,9 @@ SAFE_TOOLKITS = (
         "llms.txt",
         "Content",
         "llms_txt",
-        "LlmTxtTools",
+        "LLMsTxtTools",
         "Read public llms.txt documentation.",
-        hint="pip install requests",
+        hint="pip install beautifulsoup4",
     ),
     _safe(
         "baidusearch",
@@ -281,6 +289,7 @@ CREDENTIAL_TOOLKITS = (
         "SCAVIO_API_KEY",
         side_effects=True,
         hint="pip install scavio",
+        disabled="scavio is not published on PyPI for the Atlas backend image.",
     ),
     _credential(
         "seltz",
@@ -292,6 +301,8 @@ CREDENTIAL_TOOLKITS = (
         "SELTZ_API_KEY",
         side_effects=True,
         hint="pip install seltz",
+        options={"endpoint": {"type": "string", "kwarg": "endpoint"}},
+        disabled="seltz is not published on PyPI for the Atlas backend image.",
     ),
     _credential(
         "sofya",
@@ -313,6 +324,7 @@ CREDENTIAL_TOOLKITS = (
         "SUPERSERVE_API_KEY",
         side_effects=True,
         hint="pip install superserve",
+        disabled="superserve is not published on PyPI for the Atlas backend image.",
     ),
     _credential(
         "email",
@@ -324,7 +336,15 @@ CREDENTIAL_TOOLKITS = (
         "EMAIL_PASSKEY",
         kwarg="sender_passkey",
         side_effects=True,
-        disabled="Sender and receiver configuration requires multi-value credentials.",
+        description=(
+            "Send email through Gmail SMTP (ssl://smtp.gmail.com:465). "
+            "Uses stdlib smtplib; configure sender/receiver as toolkit options."
+        ),
+        options={
+            "sender_email": {"type": "string", "kwarg": "sender_email"},
+            "sender_name": {"type": "string", "kwarg": "sender_name"},
+            "receiver_email": {"type": "string", "kwarg": "receiver_email"},
+        },
     ),
     _credential(
         "tavily",
@@ -387,14 +407,18 @@ CREDENTIAL_TOOLKITS = (
         "BraveSearchTools",
         "brave",
         "BRAVE_API_KEY",
+        hint="pip install brave-search",
+        disabled=(
+            "brave-search requires httpx<0.26, which conflicts with Atlas (httpx>=0.27)."
+        ),
     ),
-    _credential("youcom", "You.com", "Search", "youcom", "YouComTools", "youcom", "YOUCOM_API_KEY"),
+    _credential("youcom", "You.com", "Search", "youcom", "YouTools", "youcom", "YOUCOM_API_KEY"),
     _credential(
         "perplexity",
         "Perplexity",
         "Search",
         "perplexity",
-        "PerplexityTools",
+        "PerplexitySearch",
         "perplexity",
         "PERPLEXITY_API_KEY",
     ),
@@ -406,9 +430,21 @@ CREDENTIAL_TOOLKITS = (
         "ParallelTools",
         "parallel",
         "PARALLEL_API_KEY",
+        hint="pip install parallel-web",
     ),
-    _credential("valyu", "Valyu", "Search", "valyu", "ValyuTools", "valyu", "VALYU_API_KEY"),
-    _credential("jina", "Jina Reader", "Search", "jina", "JinaReaderTools", "jina", "JINA_API_KEY"),
+    _credential(
+        "valyu", "Valyu", "Search", "valyu", "ValyuTools", "valyu", "VALYU_API_KEY", hint="pip install valyu"
+    ),
+    _credential(
+        "jina",
+        "Jina Reader",
+        "Search",
+        "jina",
+        "JinaReaderTools",
+        "jina",
+        "JINA_API_KEY",
+        hint="pip install requests",
+    ),
     _credential(
         "firecrawl",
         "Firecrawl",
@@ -421,12 +457,16 @@ CREDENTIAL_TOOLKITS = (
     ),
     _credential(
         "crawl4ai",
-        "Crawl4AI Cloud",
+        "Crawl4AI",
         "Web & scraping",
         "crawl4ai",
         "Crawl4aiTools",
         "crawl4ai",
         "CRAWL4AI_API_KEY",
+        disabled=(
+            "Runs a local headless browser inside the backend process; "
+            "not allowed in multi-tenant Atlas."
+        ),
     ),
     _credential(
         "apify",
@@ -436,9 +476,10 @@ CREDENTIAL_TOOLKITS = (
         "ApifyTools",
         "apify",
         "APIFY_API_TOKEN",
-        kwarg="api_token",
+        kwarg="apify_api_token",
         side_effects=True,
-        hint="pip install requests",
+        hint="pip install apify-client",
+        options={"actors": {"type": "string", "kwarg": "actors"}},
     ),
     _credential(
         "agentql",
@@ -448,6 +489,7 @@ CREDENTIAL_TOOLKITS = (
         "AgentQLTools",
         "agentql",
         "AGENTQL_API_KEY",
+        hint="pip install agentql",
     ),
     _credential(
         "browserbase",
@@ -458,6 +500,8 @@ CREDENTIAL_TOOLKITS = (
         "browserbase",
         "BROWSERBASE_API_KEY",
         side_effects=True,
+        hint="pip install browserbase",
+        options={"project_id": {"type": "string", "kwarg": "project_id"}},
     ),
     _credential(
         "brightdata",
@@ -467,6 +511,7 @@ CREDENTIAL_TOOLKITS = (
         "BrightDataTools",
         "brightdata",
         "BRIGHT_DATA_API_KEY",
+        hint="pip install requests",
     ),
     _credential(
         "oxylabs",
@@ -477,6 +522,8 @@ CREDENTIAL_TOOLKITS = (
         "oxylabs",
         "OXYLABS_PASSWORD",
         kwarg="password",
+        hint="pip install oxylabs",
+        options={"username": {"type": "string", "kwarg": "username"}},
     ),
     _credential(
         "scrapegraph",
@@ -486,9 +533,25 @@ CREDENTIAL_TOOLKITS = (
         "ScrapeGraphTools",
         "scrapegraph",
         "SGAI_API_KEY",
+        hint="pip install scrapegraph-py",
+        disabled=(
+            "Installed Agno expects scrapegraph_py.FetchConfig, which is not present in "
+            "current scrapegraph-py releases."
+        ),
     ),
     _credential(
-        "spider", "Spider", "Web & scraping", "spider", "SpiderTools", "spider", "SPIDER_API_KEY"
+        "spider",
+        "Spider",
+        "Web & scraping",
+        "spider",
+        "SpiderTools",
+        "spider",
+        "SPIDER_API_KEY",
+        hint="pip install spider-client",
+        disabled=(
+            "Spider reads its API key from process environment only; "
+            "tenant-scoped credentials are not supported."
+        ),
     ),
     _credential(
         "github",
@@ -501,18 +564,20 @@ CREDENTIAL_TOOLKITS = (
         kwarg="access_token",
         side_effects=True,
         hint="pip install pygithub",
+        options={"base_url": {"type": "string", "kwarg": "base_url"}},
     ),
     _credential(
         "gitlab",
         "GitLab",
         "Engineering",
         "gitlab",
-        "GitLabTools",
+        "GitlabTools",
         "gitlab",
         "GITLAB_TOKEN",
-        kwarg="private_token",
+        kwarg="access_token",
         side_effects=True,
         hint="pip install python-gitlab",
+        options={"base_url": {"type": "string", "kwarg": "base_url"}},
     ),
     _credential(
         "bitbucket",
@@ -522,8 +587,19 @@ CREDENTIAL_TOOLKITS = (
         "BitbucketTools",
         "bitbucket",
         "BITBUCKET_TOKEN",
-        kwarg="access_token",
+        kwarg="token",
         side_effects=True,
+        hint="pip install requests",
+        options={
+            "username": {"type": "string", "kwarg": "username"},
+            "workspace": {"type": "string", "kwarg": "workspace"},
+            "repo_slug": {"type": "string", "kwarg": "repo_slug"},
+            "server_url": {
+                "type": "string",
+                "kwarg": "server_url",
+                "default": "api.bitbucket.org",
+            },
+        },
     ),
     _credential(
         "jira",
@@ -536,6 +612,10 @@ CREDENTIAL_TOOLKITS = (
         kwarg="token",
         side_effects=True,
         hint="pip install jira",
+        options={
+            "server_url": {"type": "string", "kwarg": "server_url"},
+            "username": {"type": "string", "kwarg": "username"},
+        },
     ),
     _credential(
         "linear",
@@ -556,9 +636,13 @@ CREDENTIAL_TOOLKITS = (
         "ConfluenceTools",
         "confluence",
         "CONFLUENCE_API_TOKEN",
-        kwarg="token",
+        kwarg="api_key",
         side_effects=True,
         hint="pip install requests",
+        options={
+            "username": {"type": "string", "kwarg": "username"},
+            "url": {"type": "string", "kwarg": "url"},
+        },
     ),
     _credential(
         "notion",
@@ -568,9 +652,10 @@ CREDENTIAL_TOOLKITS = (
         "NotionTools",
         "notion",
         "NOTION_TOKEN",
-        kwarg="token",
+        kwarg="api_key",
         side_effects=True,
         hint="pip install notion-client",
+        options={"database_id": {"type": "string", "kwarg": "database_id"}},
     ),
     _credential(
         "trello",
@@ -583,6 +668,10 @@ CREDENTIAL_TOOLKITS = (
         kwarg="token",
         side_effects=True,
         hint="pip install py-trello",
+        disabled=(
+            "Requires API key, API secret, and token; Atlas supports one secret "
+            "credential plus non-secret toolkit options."
+        ),
     ),
     _credential(
         "clickup",
@@ -594,6 +683,7 @@ CREDENTIAL_TOOLKITS = (
         "CLICKUP_API_KEY",
         side_effects=True,
         hint="pip install requests",
+        options={"master_space_id": {"type": "string", "kwarg": "master_space_id"}},
     ),
     _credential(
         "todoist",
@@ -616,6 +706,11 @@ CREDENTIAL_TOOLKITS = (
         "calcom",
         "CALCOM_API_KEY",
         side_effects=True,
+        hint="pip install requests",
+        options={
+            "event_type_id": {"type": "integer", "kwarg": "event_type_id", "minimum": 1},
+            "user_timezone": {"type": "string", "kwarg": "user_timezone"},
+        },
     ),
     _credential(
         "slack",
@@ -652,6 +747,7 @@ CREDENTIAL_TOOLKITS = (
         kwarg="token",
         side_effects=True,
         hint="pip install pyTelegramBotAPI",
+        options={"chat_id": {"type": "string", "kwarg": "chat_id"}},
     ),
     _credential(
         "resend",
@@ -663,6 +759,7 @@ CREDENTIAL_TOOLKITS = (
         "RESEND_API_KEY",
         side_effects=True,
         hint="pip install resend",
+        options={"from_email": {"type": "string", "kwarg": "from_email"}},
     ),
     _credential(
         "plivo",
@@ -674,6 +771,8 @@ CREDENTIAL_TOOLKITS = (
         "PLIVO_AUTH_TOKEN",
         kwarg="auth_token",
         side_effects=True,
+        hint="pip install plivo",
+        options={"auth_id": {"type": "string", "kwarg": "auth_id"}},
     ),
     _credential(
         "twilio",
@@ -685,6 +784,8 @@ CREDENTIAL_TOOLKITS = (
         "TWILIO_AUTH_TOKEN",
         kwarg="auth_token",
         side_effects=True,
+        hint="pip install twilio",
+        options={"account_sid": {"type": "string", "kwarg": "account_sid"}},
     ),
     _credential(
         "webex",
@@ -696,6 +797,7 @@ CREDENTIAL_TOOLKITS = (
         "WEBEX_ACCESS_TOKEN",
         kwarg="access_token",
         side_effects=True,
+        hint="pip install webexpythonsdk",
     ),
     _credential(
         "whatsapp",
@@ -707,6 +809,16 @@ CREDENTIAL_TOOLKITS = (
         "WHATSAPP_ACCESS_TOKEN",
         kwarg="access_token",
         side_effects=True,
+        hint="pip install requests",
+        options={
+            "phone_number_id": {
+                "type": "string",
+                "kwarg": "phone_number_id",
+                "availability_placeholder": "0",
+            },
+            "recipient_waid": {"type": "string", "kwarg": "recipient_waid"},
+            "version": {"type": "string", "kwarg": "version"},
+        },
     ),
     _credential(
         "zoom",
@@ -715,20 +827,37 @@ CREDENTIAL_TOOLKITS = (
         "zoom",
         "ZoomTools",
         "zoom",
-        "ZOOM_ACCESS_TOKEN",
-        kwarg="access_token",
+        "ZOOM_CLIENT_SECRET",
+        kwarg="client_secret",
         side_effects=True,
+        hint="pip install requests",
+        options={
+            "account_id": {
+                "type": "string",
+                "kwarg": "account_id",
+                "availability_placeholder": "atlas-availability-check",
+            },
+            "client_id": {
+                "type": "string",
+                "kwarg": "client_id",
+                "availability_placeholder": "atlas-availability-check",
+            },
+        },
     ),
     _credential(
         "aws_ses",
         "Amazon SES",
         "Communication",
         "aws_ses",
-        "AwsSesTools",
+        "AWSSESTool",
         "aws",
         "AWS_SECRET_ACCESS_KEY",
         kwarg="secret_access_key",
         side_effects=True,
+        disabled=(
+            "Uses the host AWS credential chain rather than tenant-scoped SES keys; "
+            "not safe in multi-tenant Atlas."
+        ),
     ),
     _credential(
         "openweather",
@@ -739,15 +868,23 @@ CREDENTIAL_TOOLKITS = (
         "openweather",
         "OPENWEATHER_API_KEY",
         hint="pip install requests",
+        options={
+            "units": {
+                "type": "string",
+                "kwarg": "units",
+                "default": "metric",
+            }
+        },
     ),
     _credential(
         "google_maps",
         "Google Maps",
         "Location",
         "google_maps",
-        "GoogleMapsTools",
+        "GoogleMapTools",
         "google_maps",
         "GOOGLE_MAPS_API_KEY",
+        kwarg="key",
         hint="pip install googlemaps google-maps-places",
     ),
     _credential(
@@ -760,7 +897,21 @@ CREDENTIAL_TOOLKITS = (
         "FINANCIAL_DATASETS_API_KEY",
         hint="pip install requests",
     ),
-    _credential("openbb", "OpenBB", "Finance", "openbb", "OpenBBTools", "openbb", "OPENBB_API_KEY"),
+    _credential(
+        "openbb",
+        "OpenBB",
+        "Finance",
+        "openbb",
+        "OpenBBTools",
+        "openbb",
+        "OPENBB_API_KEY",
+        kwarg="openbb_pat",
+        hint="pip install openbb",
+        disabled=(
+            "OpenBB is a large optional dependency and is not bundled in the Atlas "
+            "backend image."
+        ),
+    ),
     _credential(
         "salesforce",
         "Salesforce",
@@ -768,10 +919,14 @@ CREDENTIAL_TOOLKITS = (
         "salesforce",
         "SalesforceTools",
         "salesforce",
-        "SALESFORCE_ACCESS_TOKEN",
-        kwarg="access_token",
+        "SALESFORCE_PASSWORD",
+        kwarg="password",
         side_effects=True,
         hint="pip install simple-salesforce",
+        disabled=(
+            "Requires username, password, and security token; Atlas supports one secret "
+            "credential plus non-secret toolkit options."
+        ),
     ),
     _credential(
         "shopify",
@@ -783,6 +938,7 @@ CREDENTIAL_TOOLKITS = (
         "SHOPIFY_ACCESS_TOKEN",
         kwarg="access_token",
         side_effects=True,
+        options={"shop_name": {"type": "string", "kwarg": "shop_name"}},
     ),
     _credential(
         "zendesk",
@@ -792,9 +948,13 @@ CREDENTIAL_TOOLKITS = (
         "ZendeskTools",
         "zendesk",
         "ZENDESK_API_TOKEN",
-        kwarg="token",
+        kwarg="password",
         side_effects=True,
         hint="pip install requests",
+        options={
+            "username": {"type": "string", "kwarg": "username"},
+            "company_name": {"type": "string", "kwarg": "company_name"},
+        },
     ),
     _credential(
         "redmine",
@@ -804,7 +964,13 @@ CREDENTIAL_TOOLKITS = (
         "RedmineTools",
         "redmine",
         "REDMINE_API_KEY",
+        kwarg="token",
         side_effects=True,
+        hint="pip install python-redmine",
+        options={
+            "server_url": {"type": "string", "kwarg": "server_url"},
+            "username": {"type": "string", "kwarg": "username"},
+        },
     ),
     _credential(
         "reddit",
@@ -816,7 +982,14 @@ CREDENTIAL_TOOLKITS = (
         "REDDIT_CLIENT_SECRET",
         kwarg="client_secret",
         hint="pip install praw",
-        disabled="Reddit also requires a client ID; multi-value credentials are coming soon.",
+        options={
+            "client_id": {"type": "string", "kwarg": "client_id"},
+            "user_agent": {
+                "type": "string",
+                "kwarg": "user_agent",
+                "default": "atlas-agent",
+            },
+        },
     ),
     _credential(
         "spotify",
@@ -883,7 +1056,7 @@ CREDENTIAL_TOOLKITS = (
         "ReplicateTools",
         "replicate",
         "REPLICATE_API_TOKEN",
-        kwarg="api_token",
+        kwarg="api_key",
         side_effects=True,
         hint="pip install replicate",
     ),
@@ -908,6 +1081,7 @@ CREDENTIAL_TOOLKITS = (
         "cartesia",
         "CARTESIA_API_KEY",
         side_effects=True,
+        hint="pip install cartesia",
     ),
     _credential(
         "lumalab",
@@ -918,6 +1092,7 @@ CREDENTIAL_TOOLKITS = (
         "lumalab",
         "LUMAAI_API_KEY",
         side_effects=True,
+        hint="pip install lumaai",
     ),
     _credential(
         "twelvelabs",
@@ -927,6 +1102,7 @@ CREDENTIAL_TOOLKITS = (
         "TwelveLabsTools",
         "twelvelabs",
         "TWELVE_LABS_API_KEY",
+        hint="pip install twelvelabs",
     ),
     _credential(
         "brandfetch",
@@ -936,6 +1112,7 @@ CREDENTIAL_TOOLKITS = (
         "BrandfetchTools",
         "brandfetch",
         "BRANDFETCH_API_KEY",
+        options={"client_id": {"type": "string", "kwarg": "client_id"}},
     ),
     _credential(
         "gmail",
@@ -945,7 +1122,10 @@ CREDENTIAL_TOOLKITS = (
         "GmailTools",
         "google_workspace",
         "GOOGLE_CREDENTIALS",
-        disabled="OAuth/service-account credential bundles are not supported yet.",
+        disabled=(
+            "OAuth/service-account credential bundles are not supported yet; "
+            "Atlas stores a single secret value per credential."
+        ),
     ),
     _credential(
         "google_drive",
@@ -955,7 +1135,10 @@ CREDENTIAL_TOOLKITS = (
         "GoogleDriveTools",
         "google_workspace",
         "GOOGLE_CREDENTIALS",
-        disabled="OAuth/service-account credential bundles are not supported yet.",
+        disabled=(
+            "OAuth/service-account credential bundles are not supported yet; "
+            "Atlas stores a single secret value per credential."
+        ),
     ),
     _credential(
         "googlecalendar",
@@ -965,7 +1148,10 @@ CREDENTIAL_TOOLKITS = (
         "GoogleCalendarTools",
         "google_workspace",
         "GOOGLE_CREDENTIALS",
-        disabled="OAuth/service-account credential bundles are not supported yet.",
+        disabled=(
+            "OAuth/service-account credential bundles are not supported yet; "
+            "Atlas stores a single secret value per credential."
+        ),
     ),
     _credential(
         "googlesheets",
@@ -975,7 +1161,10 @@ CREDENTIAL_TOOLKITS = (
         "GoogleSheetsTools",
         "google_workspace",
         "GOOGLE_CREDENTIALS",
-        disabled="OAuth/service-account credential bundles are not supported yet.",
+        disabled=(
+            "OAuth/service-account credential bundles are not supported yet; "
+            "Atlas stores a single secret value per credential."
+        ),
     ),
 )
 
@@ -1056,6 +1245,27 @@ def toolkit_availability(spec: ToolkitSpec) -> tuple[bool, str | None]:
     return _toolkit_availability(spec.key)
 
 
+def _availability_kwargs(spec: ToolkitSpec) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    for name, schema in spec.options.items():
+        kwarg = str(schema.get("kwarg", name))
+        if "availability_placeholder" in schema:
+            kwargs[kwarg] = schema["availability_placeholder"]
+        elif "default" in schema:
+            kwargs[kwarg] = schema["default"]
+    if spec.credentials:
+        cred_kwarg = spec.credentials[0].kwarg
+        # Telegram-style bot tokens require a colon; keep other placeholders simple.
+        if cred_kwarg in {"token", "bot_token", "access_token"} and spec.key in {
+            "telegram",
+            "discord",
+        }:
+            kwargs[cred_kwarg] = "000000000:atlas-availability-check"
+        else:
+            kwargs[cred_kwarg] = "atlas-availability-check"
+    return kwargs
+
+
 @cache
 def _toolkit_availability(key: str) -> tuple[bool, str | None]:
     spec = TOOLKIT_BY_KEY[key]
@@ -1066,10 +1276,22 @@ def _toolkit_availability(key: str) -> tuple[bool, str | None]:
         if not hasattr(module, spec.class_name):
             return False, f"Agno {spec.class_name} is not installed in this release."
         toolkit_type = getattr(module, spec.class_name)
-        kwargs = {spec.credentials[0].kwarg: "atlas-availability-check"} if spec.credentials else {}
-        toolkit_type(**kwargs)
+        toolkit_type(**_availability_kwargs(spec))
+    except TypeError as exc:
+        return False, (
+            f"{spec.label} is incompatible with the installed Agno version ({exc})"
+        )
     except Exception as exc:
-        return False, spec.install_hint or str(exc)
+        message = str(exc)
+        missing_dep = isinstance(exc, (ImportError, ModuleNotFoundError)) or any(
+            token in message.lower()
+            for token in ("not installed", "pip install", "no module named")
+        )
+        if missing_dep:
+            return False, spec.install_hint or message
+        # Placeholder secrets/options often fail auth or URL validation; the package
+        # itself is present and the toolkit can be configured by the tenant.
+        return True, None
     return True, None
 
 
@@ -1081,14 +1303,16 @@ def public_toolkit_catalog() -> list[dict[str, Any]]:
         item["credentials"] = [asdict(credential) for credential in spec.credentials]
         item["available"] = available
         item["unavailable_reason"] = reason
-        item["status"] = (
-            "blocked"
-            if spec.tier == "blocked"
-            else "unavailable"
-            if not available
-            else "needs_credential"
-            if spec.credentials
-            else "ready"
-        )
+        if spec.tier == "blocked":
+            status = "blocked"
+        elif not available and spec.disabled_reason:
+            status = "blocked"
+        elif not available:
+            status = "unavailable"
+        elif spec.credentials:
+            status = "needs_credential"
+        else:
+            status = "ready"
+        item["status"] = status
         result.append(item)
     return result

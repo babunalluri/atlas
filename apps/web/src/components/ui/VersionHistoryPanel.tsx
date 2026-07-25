@@ -2,13 +2,12 @@
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import type { AgentStatus } from "@/lib/api/types";
 import { formatRelative } from "@/lib/utils";
 
 export interface VersionHistoryItem {
   id: string;
   version: number;
-  status: AgentStatus;
+  status: string;
   isLive: boolean;
   createdAt: string;
   /** Short secondary labels shown after status (mode, member count, etc.). */
@@ -66,7 +65,13 @@ export function VersionHistoryPanel({
             >
               <span className="text-sm font-semibold">v{version.version}</span>
               <Badge
-                tone={version.status === "published" ? "success" : "warning"}
+                tone={
+                  version.status === "published"
+                    ? "success"
+                    : version.status === "validated"
+                      ? "info"
+                      : "warning"
+                }
               >
                 {version.status}
               </Badge>

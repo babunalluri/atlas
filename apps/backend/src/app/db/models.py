@@ -338,6 +338,39 @@ class AgentToolBinding(Base, TenantScoped, TimestampMixin):
     )
 
 
+class TeamToolBinding(Base, TenantScoped, TimestampMixin):
+    """Team-leader tool attachments (Agno Team.tools), versioned with TeamVersion."""
+
+    __tablename__ = "team_tool_bindings"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    team_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("team_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tool_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tool_definition_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    credential_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "tool_definition_id"],
+            ["tool_definitions.tenant_id", "tool_definitions.id"],
+            ondelete="RESTRICT",
+            name="fk_team_tool_binding_tenant_definition",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "credential_id"],
+            ["tenant_credentials.tenant_id", "tenant_credentials.id"],
+            ondelete="SET NULL",
+            name="fk_team_tool_binding_tenant_credential",
+        ),
+        CheckConstraint(
+            "(tool_key IS NOT NULL) <> (tool_definition_id IS NOT NULL)",
+            name="ck_team_tool_binding_source",
+        ),
+        Index("ix_team_tool_bindings_tenant_definition", "tenant_id", "tool_definition_id"),
+    )
+
+
 class ToolDefinition(Base, TenantScoped, TimestampMixin):
     __tablename__ = "tool_definitions"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

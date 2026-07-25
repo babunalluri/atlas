@@ -228,6 +228,37 @@ async def test_rag_ranking_and_tenant_isolation(session, tenant_a, tenant_b):
 
 
 @pytest.mark.asyncio
+async def test_knowledge_base_delete_cascades_sources_and_chunks(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = KnowledgeRepository(session, tenant_a)
+    base = await repo.create_base(name="Disposable")
+    source = await repo.create_source(
+        knowledge_base_id=base.id,
+        kind="test",
+        uri="/tmp/disposable.txt",
+    )
+    session.add(
+        KnowledgeChunk(
+            id=uuid.uuid4(),
+            tenant_id=tenant_a.tenant_id,
+            knowledge_base_id=base.id,
+            source_id=source.id,
+            content="temporary chunk",
+            embedding=[0.0] * 1536,
+            content_hash="c" * 64,
+            metadata_={},
+        )
+    )
+    await session.flush()
+
+    uris = await repo.delete_base(base.id)
+    assert uris == ["/tmp/disposable.txt"]
+    assert await repo.get_base(base.id) is None
+    assert await repo.get_source(source.id) is None
+    assert await repo.delete_base(base.id) is None
+
+
+@pytest.mark.asyncio
 async def test_service_account_token_is_hashed_scoped_and_revocable(
     session, tenant_a, tenant_b, monkeypatch
 ):

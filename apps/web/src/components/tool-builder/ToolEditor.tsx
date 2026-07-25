@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { PythonCodeEditor } from "@/components/tool-builder/PythonCodeEditor";
 import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -26,24 +27,90 @@ import { cn } from "@/lib/utils";
 import { slugifyName } from "@/lib/validation/agent-form";
 
 const EMPTY_SCHEMA = { type: "object", properties: {} };
+const SUBSTANTIAL_SOURCE_DELTA = 500;
+
+function shouldLockPythonSource(tool: {
+  kind: ToolDefinition["kind"];
+  config: Record<string, unknown>;
+  publishedVersionId?: string | null;
+}): boolean {
+  if (tool.kind !== "tenant_python") return false;
+  const status = String(tool.config.version_status ?? "draft");
+  return (
+    status === "validated" ||
+    status === "published" ||
+    Boolean(tool.publishedVersionId)
+  );
+}
 
 type ToolKind = ToolDefinition["kind"];
+type CreateKind = "http" | "openapi" | "tenant_python" | "mcp";
+type ToolFamily = "api" | "python" | "mcp";
 
 type KindOption = {
-  kind: "http" | "openapi" | "tenant_python" | "mcp";
+  kind: CreateKind;
   label: string;
 };
 
-/** Create options for the Tools UI. Editable Python replaces toolkit/custom Python. */
+/** Create options — labels align with Tools list family names. Legacy is never offered. */
 const KIND_TABS: KindOption[] = [
-  { kind: "http", label: "HTTP Request" },
+  { kind: "http", label: "HTTP" },
   { kind: "openapi", label: "OpenAPI" },
-  { kind: "tenant_python", label: "Editable Python" },
-  { kind: "mcp", label: "MCP Server" },
+  { kind: "tenant_python", label: "Python Tools" },
+  { kind: "mcp", label: "MCP Tools" },
 ];
+
+const FAMILY_KINDS: Record<ToolFamily, ReadonlyArray<CreateKind>> = {
+  api: ["http", "openapi"],
+  python: ["tenant_python"],
+  mcp: ["mcp"],
+};
+
+const FAMILY_DEFAULT_KIND: Record<ToolFamily, CreateKind> = {
+  api: "http",
+  python: "tenant_python",
+  mcp: "mcp",
+};
 
 /** Removed from create/edit; existing definitions stay viewable. */
 const DEPRECATED_KINDS = new Set<ToolKind>(["python_toolkit", "custom_python"]);
+
+function kindBadgeLabel(kind: ToolKind, httpMethod?: string | null): string {
+  switch (kind) {
+    case "http":
+      return httpMethod ?? "HTTP";
+    case "openapi":
+      return "OpenAPI";
+    case "tenant_python":
+      return "Python Tools";
+    case "mcp":
+      return "MCP Tools";
+    case "python_toolkit":
+      return "Python Toolkit";
+    case "custom_python":
+      return "Custom Python";
+    default:
+      return String(kind).replaceAll("_", " ");
+  }
+}
+
+function familyFromKind(kind: ToolKind): ToolFamily | null {
+  if (kind === "http" || kind === "openapi") return "api";
+  if (kind === "tenant_python") return "python";
+  if (kind === "mcp") return "mcp";
+  return null;
+}
+
+function resolveFamily(
+  family?: string | null,
+  kind?: ToolKind,
+): ToolFamily | null {
+  if (family === "api" || family === "python" || family === "mcp") {
+    return family;
+  }
+  if (kind) return familyFromKind(kind);
+  return null;
+}
 
 type EditableTool = Omit<ToolDefinition, "id" | "createdAt" | "updatedAt">;
 
@@ -98,7 +165,7 @@ function capabilitiesToConfig(capabilities: ToolCapability[]): TenantCapability[
   }));
 }
 
-function emptyConfigForKind(kind: KindOption["kind"]): Record<string, unknown> {
+function emptyConfigForKind(kind: CreateKind): Record<string, unknown> {
   if (kind === "tenant_python") return tenantPythonDefaults();
   if (kind === "mcp") {
     return {
@@ -120,15 +187,20 @@ function emptyConfigForKind(kind: KindOption["kind"]): Record<string, unknown> {
 
 function resolveCreateKind(
   defaultKind?: ToolKind,
-): KindOption["kind"] {
+  family?: ToolFamily | null,
+): CreateKind {
   if (
     defaultKind === "http" ||
     defaultKind === "openapi" ||
     defaultKind === "tenant_python" ||
     defaultKind === "mcp"
   ) {
+    if (family && !FAMILY_KINDS[family].includes(defaultKind)) {
+      return FAMILY_DEFAULT_KIND[family];
+    }
     return defaultKind;
   }
+  if (family) return FAMILY_DEFAULT_KIND[family];
   return "http";
 }
 
@@ -136,15 +208,24 @@ export function ToolEditor({
   initial,
   credentials,
   defaultKind,
+  defaultFamily,
 }: {
   initial?: ToolDefinition;
   credentials: CredentialSummary[];
   /** Prefill kind when creating from a Tools list tab. */
   defaultKind?: ToolKind;
+  /** When set (create from a list family tab), only that family's kinds are offered. */
+  defaultFamily?: string | null;
 }) {
   const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
-  const createKind = resolveCreateKind(defaultKind);
+  const createFamily = initial
+    ? null
+    : resolveFamily(defaultFamily, defaultKind);
+  const createKind = resolveCreateKind(defaultKind, createFamily);
+  const visibleKindTabs = createFamily
+    ? KIND_TABS.filter((tab) => FAMILY_KINDS[createFamily].includes(tab.kind))
+    : KIND_TABS;
   const [form, setForm] = useState<EditableTool>(
     initial ?? {
       name: "",
@@ -175,11 +256,23 @@ export function ToolEditor({
   );
   const [banner, setBanner] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<ToolCapability[]>([]);
+  const [sourceLocked, setSourceLocked] = useState(() =>
+    initial ? shouldLockPythonSource(initial) : false,
+  );
+  const [showSourceEditBanner, setShowSourceEditBanner] = useState(false);
+  const [savedSource, setSavedSource] = useState(() =>
+    String(initial?.config.source_code ?? ""),
+  );
   const isDeprecatedKind = DEPRECATED_KINDS.has(form.kind);
   const tenantCapabilities =
     (form.config.capabilities as TenantCapability[] | undefined) ?? [];
   const versionStatus = String(form.config.version_status ?? "draft");
   const kindLocked = Boolean(initial) || isDeprecatedKind;
+  const showKindTabs =
+    !kindLocked && visibleKindTabs.length > 1;
+  const sourceEmpty =
+    form.kind === "tenant_python" &&
+    !String(form.config.source_code ?? "").trim();
 
   function update<K extends keyof EditableTool>(key: K, value: EditableTool[K]) {
     setForm((previous) => ({ ...previous, [key]: value }));
@@ -192,8 +285,9 @@ export function ToolEditor({
     }));
   }
 
-  function selectKind(kind: KindOption["kind"]) {
+  function selectKind(kind: CreateKind) {
     if (kindLocked) return;
+    if (createFamily && !FAMILY_KINDS[createFamily].includes(kind)) return;
     update("kind", kind);
     update("config", emptyConfigForKind(kind));
     setCapabilities([]);
@@ -232,11 +326,23 @@ export function ToolEditor({
     };
   }
 
+  function unlockSource() {
+    if (
+      !window.confirm(
+        "Editing may break a working tool. Continue?",
+      )
+    ) {
+      return;
+    }
+    setSourceLocked(false);
+    setShowSourceEditBanner(true);
+  }
+
   async function save() {
     setBanner(null);
     if (isDeprecatedKind) {
       setBanner(
-        "This tool kind is no longer available for editing; recreate as Editable Python or HTTP.",
+        "This tool kind is no longer available for editing; recreate as a Python Tool or HTTP tool.",
       );
       return;
     }
@@ -264,6 +370,17 @@ export function ToolEditor({
     ) {
       setBanner("Complete the required provider fields");
       return;
+    }
+    if (form.kind === "tenant_python") {
+      const nextSource = String(form.config.source_code ?? "");
+      if (
+        Math.abs(nextSource.length - savedSource.length) > SUBSTANTIAL_SOURCE_DELTA &&
+        !window.confirm(
+          "Source changed substantially. Saving creates a new draft version. Continue?",
+        )
+      ) {
+        return;
+      }
     }
     setBusy("save");
     try {
@@ -314,6 +431,11 @@ export function ToolEditor({
             inputSchema: capability.input_schema,
           })),
         );
+        setSavedSource(String(saved.config.source_code ?? ""));
+        if (shouldLockPythonSource(saved)) {
+          setSourceLocked(true);
+          setShowSourceEditBanner(false);
+        }
       }
       setBanner(
         saved.kind === "tenant_python"
@@ -359,6 +481,9 @@ export function ToolEditor({
             version_status: "validated",
           },
         });
+        setSavedSource(String(saved.config.source_code ?? ""));
+        setSourceLocked(true);
+        setShowSourceEditBanner(false);
         setBanner(
           `${result.message} — synced ${result.capabilities.length} capabilities from source`,
         );
@@ -387,6 +512,9 @@ export function ToolEditor({
         approvalRequired: saved.approvalRequired,
         publishedVersionId: saved.publishedVersionId ?? null,
       }));
+      setSavedSource(String(saved.config.source_code ?? ""));
+      setSourceLocked(true);
+      setShowSourceEditBanner(false);
       setBanner("Published — agents can now attach this tool");
     } catch (error) {
       setBanner(error instanceof Error ? error.message : "Publish failed");
@@ -454,7 +582,9 @@ export function ToolEditor({
                 tenantCapabilities.some((item) => item.mutating))) && (
               <Badge tone="warning">requires approval</Badge>
             )}
-            <Badge tone="info">{form.kind.replace("_", " ")}</Badge>
+            <Badge tone="info">
+              {kindBadgeLabel(form.kind, form.httpMethod)}
+            </Badge>
             {form.kind === "tenant_python" ? (
               <Badge tone={versionStatus === "published" ? "success" : "neutral"}>
                 {versionStatus}
@@ -513,7 +643,7 @@ export function ToolEditor({
               variant="accent"
               size="sm"
               onClick={save}
-              disabled={busy !== null}
+              disabled={busy !== null || sourceEmpty}
             >
               <SaveIcon />
               {busy === "save" ? "Saving…" : "Save tool"}
@@ -541,8 +671,9 @@ export function ToolEditor({
             Kind no longer available
           </h2>
           <p className="mt-2 text-sm text-slate-muted">
-            This tool kind is no longer available for editing; recreate as Editable
-            Python or HTTP. You can deactivate this definition or delete it.
+            This tool kind is no longer available for editing; recreate as a
+            Python Tool or HTTP tool. You can deactivate this definition or
+            delete it.
           </p>
           <p className="mt-3 mono-cell text-xs text-slate-muted">
             kind: {form.kind}
@@ -558,34 +689,34 @@ export function ToolEditor({
 
       {!isDeprecatedKind ? (
         <>
-          <div
-            role="tablist"
-            aria-label="Tool type"
-            className="flex flex-wrap gap-1 border-b border-line"
-          >
-            {KIND_TABS.map(({ kind, label }) => {
-              const selected = form.kind === kind;
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  role="tab"
-                  aria-selected={selected}
-                  disabled={kindLocked && !selected}
-                  onClick={() => selectKind(kind)}
-                  className={cn(
-                    "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition",
-                    selected
-                      ? "border-teal text-ink"
-                      : "border-transparent text-slate-muted hover:text-ink",
-                    kindLocked && !selected && "cursor-not-allowed opacity-40",
-                  )}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          {showKindTabs ? (
+            <div
+              role="tablist"
+              aria-label="Tool type"
+              className="flex flex-wrap gap-1 border-b border-line"
+            >
+              {visibleKindTabs.map(({ kind, label }) => {
+                const selected = form.kind === kind;
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    onClick={() => selectKind(kind)}
+                    className={cn(
+                      "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition",
+                      selected
+                        ? "border-teal text-ink"
+                        : "border-transparent text-slate-muted hover:text-ink",
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
 
           <section
             className="rounded-xl border border-line bg-raised/40 p-4"
@@ -755,21 +886,44 @@ export function ToolEditor({
                   </div>
 
                   <div>
-                    <Label htmlFor="tenant-python-source">Source</Label>
-                    <Textarea
+                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <Label htmlFor="tenant-python-source">
+                        Editable Python Source
+                      </Label>
+                      {sourceLocked ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={unlockSource}
+                          disabled={busy !== null}
+                        >
+                          Edit source
+                        </Button>
+                      ) : null}
+                    </div>
+                    {showSourceEditBanner && !sourceLocked ? (
+                      <p className="mb-2 rounded-md border border-teal/30 bg-teal/5 px-2.5 py-1.5 text-xs text-slate-muted">
+                        Editing draft source — Save creates a new draft version.
+                      </p>
+                    ) : null}
+                    <PythonCodeEditor
                       id="tenant-python-source"
-                      className="min-h-[28rem] font-mono text-[13px] leading-relaxed"
+                      height={360}
+                      readOnly={sourceLocked}
                       value={String(form.config.source_code ?? "")}
-                      onChange={(event) => {
-                        updateConfig("source_code", event.target.value);
+                      onChange={(source) => {
+                        updateConfig("source_code", source);
                         updateConfig("version_status", "draft");
                       }}
-                      placeholder="async def …"
                     />
                     <p className="mt-1 text-xs text-slate-muted">
                       Capabilities are derived from{" "}
                       <code className="font-mono">async def</code> names on save
-                      and validate — no manual list required.
+                      and validate — no manual list required.{" "}
+                      <code className="font-mono">import requests</code> is
+                      allowlisted and proxied through the Atlas host allowlist
+                      (same as{" "}
+                      <code className="font-mono">ctx.http</code>).
                     </p>
                     {discoveredNames.length > 0 ? (
                       <p className="mt-2 text-xs text-slate-muted">

@@ -26,6 +26,7 @@ from app.db.models import (
     ServiceAccount,
     TeamConfig,
     TeamMember,
+    TeamToolBinding,
     TeamVersion,
     Tenant,
     TenantCredential,
@@ -551,6 +552,15 @@ class TeamRepository(TenantRepository):
         )
         return rows.all()
 
+    async def bindings(self, version_id: uuid.UUID) -> Sequence[TeamToolBinding]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(TeamToolBinding).where(TeamToolBinding.team_version_id == version_id),
+                TeamToolBinding,
+            )
+        )
+        return rows.all()
+
     async def restore_version(
         self, config_id: uuid.UUID, version_id: uuid.UUID, *, as_draft: bool = False
     ) -> TeamVersion:
@@ -569,6 +579,15 @@ class TeamRepository(TenantRepository):
 
         if as_draft:
             member_ids = [member.agent_config_id for member in await self.members(version.id)]
+            tools = [
+                {
+                    "tool_key": binding.tool_key,
+                    "tool_definition_id": binding.tool_definition_id,
+                    "config": binding.config or {},
+                    "credential_id": binding.credential_id,
+                }
+                for binding in await self.bindings(version.id)
+            ]
             draft = await self.create_draft(
                 config_id=config_id,
                 instructions=version.instructions,
@@ -576,6 +595,7 @@ class TeamRepository(TenantRepository):
                 model_id=version.model_id,
                 temperature=version.temperature,
                 member_config_ids=member_ids,
+                tools=tools,
             )
             await self.audit(
                 action="team.restore_draft",
@@ -619,6 +639,7 @@ class TeamRepository(TenantRepository):
         model_id: str,
         temperature: float,
         member_config_ids: list[uuid.UUID],
+        tools: list[dict[str, Any]] | None = None,
     ) -> TeamVersion:
         if mode not in {"route", "coordinate"}:
             raise ValueError("Team mode must be route or coordinate")
@@ -677,6 +698,32 @@ class TeamRepository(TenantRepository):
                     position=position,
                 )
             )
+        for tool in tools or []:
+            credential_id = tool.get("credential_id")
+            definition_id = tool.get("tool_definition_id")
+            if (
+                credential_id
+                and await CredentialRepository(self.session, self.context).get(credential_id)
+                is None
+            ):
+                raise LookupError("Tool credential not found for tenant")
+            if definition_id:
+                definition = await ToolDefinitionRepository(self.session, self.context).get(
+                    definition_id
+                )
+                if definition is None or not definition.active:
+                    raise LookupError("Active tool definition not found for tenant")
+            self.session.add(
+                TeamToolBinding(
+                    id=new_id(),
+                    tenant_id=self.context.tenant_id,
+                    team_version_id=version.id,
+                    tool_key=tool.get("tool_key"),
+                    tool_definition_id=definition_id,
+                    config=tool.get("config") or {},
+                    credential_id=credential_id,
+                )
+            )
         await self.session.flush()
         await self.audit(
             action="team.draft",
@@ -693,8 +740,8 @@ class TeamRepository(TenantRepository):
         if version.status != AgentStatus.draft:
             raise ValueError("Only draft team versions can be published")
         members = list(await self.members(version.id))
-        if len(members) < 2:
-            raise ValueError("Published teams require at least two agents")
+        if len(members) < 1:
+            raise ValueError("Published teams require at least one agent")
 
         agent_repo = AgentRepository(self.session, self.context)
         for member in members:
@@ -1501,6 +1548,14 @@ class ToolDefinitionRepository(TenantRepository):
             )
         )
 
+    async def get_by_slug(self, slug: str) -> ToolDefinition | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(ToolDefinition).where(ToolDefinition.slug == slug),
+                ToolDefinition,
+            )
+        )
+
     async def create(self, values: dict[str, Any]) -> ToolDefinition:
         credential_id = values.get("credential_id")
         if (
@@ -1515,6 +1570,9 @@ class ToolDefinitionRepository(TenantRepository):
         )
         self.session.add(definition)
         await self.session.flush()
+        # Server-side onupdate (updated_at) expires attrs after flush; refresh so
+        # sync serializers like _out() never trigger MissingGreenlet lazy loads.
+        await self.session.refresh(definition)
         await self.audit(
             action="tool.create",
             resource_type="tool_definition",
@@ -1538,6 +1596,7 @@ class ToolDefinitionRepository(TenantRepository):
         for key, value in values.items():
             setattr(definition, key, value)
         await self.session.flush()
+        await self.session.refresh(definition)
         action = "tool.update"
         if "active" in values:
             action = "tool.enable" if values["active"] else "tool.disable"
@@ -1681,6 +1740,7 @@ class ToolDefinitionVersionRepository(TenantRepository):
         if any(bool(item.get("mutating")) for item in row.capabilities if isinstance(item, dict)):
             tool.approval_required = True
         await self.session.flush()
+        await self.session.refresh(tool)
         await self.audit(
             action="tool.publish",
             resource_type="tool_definition",
@@ -1688,6 +1748,74 @@ class ToolDefinitionVersionRepository(TenantRepository):
             details={"version_id": str(row.id), "version": row.version},
         )
         return row
+
+    def _apply_version_to_tool(
+        self, tool: ToolDefinition, row: ToolDefinitionVersion, *, version_status: str
+    ) -> None:
+        config = dict(tool.config or {})
+        config["source_code"] = row.source_code
+        config["dependencies"] = list(row.dependencies or [])
+        config["capabilities"] = list(row.capabilities or [])
+        config["settings"] = dict(row.settings or {})
+        config["version_status"] = version_status
+        tool.config = config
+        if any(bool(item.get("mutating")) for item in row.capabilities if isinstance(item, dict)):
+            tool.approval_required = True
+
+    async def restore_version(
+        self,
+        tool: ToolDefinition,
+        version_id: uuid.UUID,
+        *,
+        as_draft: bool,
+        created_by: str,
+    ) -> ToolDefinitionVersion:
+        """Restore a historical tool source snapshot."""
+        version = await self.get(version_id)
+        if version is None or version.tool_definition_id != tool.id:
+            raise LookupError("Tool version not found")
+
+        if as_draft:
+            draft = await self.upsert_draft(
+                tool_definition_id=tool.id,
+                source_code=version.source_code,
+                dependencies=list(version.dependencies or []),
+                capabilities=list(version.capabilities or []),
+                settings=dict(version.settings or {}),
+                created_by=created_by,
+            )
+            self._apply_version_to_tool(tool, draft, version_status="draft")
+            await self.session.flush()
+            await self.session.refresh(tool)
+            await self.audit(
+                action="tool.restore_draft",
+                resource_type="tool_definition",
+                resource_id=str(tool.id),
+                details={
+                    "source_version_id": str(version.id),
+                    "source_version": version.version,
+                    "draft_version": draft.version,
+                },
+            )
+            return draft
+
+        if version.status != "published":
+            published = await self.publish(version.id, tool)
+            if published is None:
+                raise ValueError("Unable to publish tool version")
+            return published
+
+        tool.published_version_id = version.id
+        self._apply_version_to_tool(tool, version, version_status="published")
+        await self.session.flush()
+        await self.session.refresh(tool)
+        await self.audit(
+            action="tool.restore",
+            resource_type="tool_definition",
+            resource_id=str(tool.id),
+            details={"version_id": str(version.id), "version": version.version},
+        )
+        return version
 
 
 class PlatformPythonPackageRepository:
@@ -1883,6 +2011,38 @@ class KnowledgeRepository(TenantRepository):
             base.config = config
         await self.session.flush()
         return base
+
+    async def delete_base(self, knowledge_base_id: uuid.UUID) -> list[str] | None:
+        """Delete a knowledge base and its sources/chunks. Returns source URIs to unlink."""
+        base = await self.get_base(knowledge_base_id)
+        if base is None:
+            return None
+        sources = await self.list_sources(knowledge_base_id)
+        uris = [source.uri for source in sources]
+        await self.session.execute(
+            delete(KnowledgeChunk).where(
+                KnowledgeChunk.tenant_id == self.context.tenant_id,
+                KnowledgeChunk.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        await self.session.execute(
+            delete(KnowledgeSource).where(
+                KnowledgeSource.tenant_id == self.context.tenant_id,
+                KnowledgeSource.knowledge_base_id == knowledge_base_id,
+            )
+        )
+        await self.session.execute(
+            delete(KnowledgeBase).where(
+                KnowledgeBase.id == knowledge_base_id,
+                KnowledgeBase.tenant_id == self.context.tenant_id,
+            )
+        )
+        await self.audit(
+            action="knowledge.delete",
+            resource_type="knowledge_base",
+            resource_id=str(knowledge_base_id),
+        )
+        return uris
 
     async def create_source(
         self,

@@ -1,19 +1,41 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { TrashIcon } from "@/components/ui/icons";
-import { deleteToolDefinition } from "@/lib/api/admin";
+import {
+  CloneIcon,
+  HistoryIcon,
+  PencilIcon,
+  TrashIcon,
+} from "@/components/ui/icons";
+import {
+  VersionHistoryPanel,
+  type VersionHistoryItem,
+} from "@/components/ui/VersionHistoryPanel";
+import {
+  cloneToolDefinition,
+  deleteToolDefinition,
+  getToolVersion,
+  listToolVersions,
+  restoreToolVersion,
+} from "@/lib/api/admin";
 import type { ToolDefinition } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn, formatRelative } from "@/lib/utils";
 
 type ToolFamily = "api" | "python" | "mcp" | "legacy";
 type StatusFilter = "all" | "active" | "inactive";
+
+type ViewingSource = {
+  version: number;
+  status: string;
+  sourceCode: string;
+};
 
 const PAGE_SIZE = 25;
 
@@ -45,9 +67,9 @@ function kindLabel(tool: ToolDefinition): string {
     case "openapi":
       return "OpenAPI";
     case "tenant_python":
-      return "Editable Python";
+      return "Python Tools";
     case "mcp":
-      return "MCP";
+      return "MCP Tools";
     case "python_toolkit":
       return "Python Toolkit";
     case "custom_python":
@@ -64,14 +86,24 @@ function truncate(text: string, max = 120): string {
 }
 
 export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
+  const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
   const [tools, setTools] = useState(initialTools);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [cloningId, setCloningId] = useState<string | null>(null);
   const [family, setFamily] = useState<ToolFamily>("api");
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
+
+  const [versionsTool, setVersionsTool] = useState<ToolDefinition | null>(null);
+  const [versions, setVersions] = useState<VersionHistoryItem[]>([]);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [versionError, setVersionError] = useState<string | null>(null);
+  const [viewingSource, setViewingSource] = useState<ViewingSource | null>(
+    null,
+  );
 
   const legacyCount = useMemo(
     () =>
@@ -110,8 +142,22 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
 
   const createHref =
     family === "legacy"
-      ? "/admin/tools/new?kind=http"
-      : `/admin/tools/new?kind=${FAMILY_CREATE_KIND[family]}`;
+      ? "/admin/tools/new?family=api&kind=http"
+      : `/admin/tools/new?family=${family}&kind=${FAMILY_CREATE_KIND[family]}`;
+
+  async function onClone(tool: ToolDefinition) {
+    setCloningId(tool.id);
+    setError(null);
+    try {
+      const cloned = await cloneToolDefinition(await getAccessToken(), tool.id);
+      router.push(`/admin/tools/${cloned.id}`);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Failed to clone tool",
+      );
+      setCloningId(null);
+    }
+  }
 
   async function onDelete(tool: ToolDefinition) {
     if (!window.confirm(`Delete “${tool.name}”? This cannot be undone.`)) {
@@ -122,12 +168,141 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
     try {
       await deleteToolDefinition(await getAccessToken(), tool.id);
       setTools((prev) => prev.filter((item) => item.id !== tool.id));
+      if (versionsTool?.id === tool.id) {
+        closeVersions();
+      }
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : "Failed to delete tool",
       );
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  function closeVersions() {
+    setVersionsTool(null);
+    setVersions([]);
+    setVersionError(null);
+    setViewingSource(null);
+    setVersionBusy(false);
+  }
+
+  async function refreshVersions(tool: ToolDefinition) {
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const rows = await listToolVersions(await getAccessToken(), tool.id);
+      const liveId = tool.publishedVersionId ?? null;
+      setVersions(
+        rows.map((row) => ({
+          id: row.id,
+          version: row.version,
+          status: row.status,
+          isLive: liveId !== null && row.id === liveId,
+          createdAt: row.createdAt,
+        })),
+      );
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Failed to load versions",
+      );
+    } finally {
+      setVersionBusy(false);
+    }
+  }
+
+  async function openVersions(tool: ToolDefinition) {
+    setVersionsTool(tool);
+    setVersions([]);
+    setViewingSource(null);
+    setVersionError(null);
+    await refreshVersions(tool);
+  }
+
+  async function viewVersion(version: VersionHistoryItem) {
+    if (!versionsTool) return;
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const detail = await getToolVersion(
+        await getAccessToken(),
+        versionsTool.id,
+        version.id,
+      );
+      setViewingSource({
+        version: detail.version,
+        status: detail.status,
+        sourceCode: detail.sourceCode,
+      });
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Failed to load version",
+      );
+    } finally {
+      setVersionBusy(false);
+    }
+  }
+
+  async function restoreLive(version: VersionHistoryItem) {
+    if (!versionsTool || version.isLive) return;
+    if (
+      !window.confirm(
+        `Make v${version.version} the live published version? Current live stays available in history.`,
+      )
+    ) {
+      return;
+    }
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const restored = await restoreToolVersion(
+        await getAccessToken(),
+        versionsTool.id,
+        version.id,
+      );
+      setTools((prev) =>
+        prev.map((item) => (item.id === restored.id ? restored : item)),
+      );
+      setVersionsTool(restored);
+      setViewingSource(null);
+      await refreshVersions(restored);
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Restore failed",
+      );
+      setVersionBusy(false);
+    }
+  }
+
+  async function restoreDraft(version: VersionHistoryItem) {
+    if (!versionsTool) return;
+    if (
+      !window.confirm(
+        `Clone v${version.version} into a draft for editing? Live published version will not change until you publish.`,
+      )
+    ) {
+      return;
+    }
+    setVersionBusy(true);
+    setVersionError(null);
+    try {
+      const restored = await restoreToolVersion(
+        await getAccessToken(),
+        versionsTool.id,
+        version.id,
+        { asDraft: true },
+      );
+      setTools((prev) =>
+        prev.map((item) => (item.id === restored.id ? restored : item)),
+      );
+      closeVersions();
+      router.push(`/admin/tools/${restored.id}`);
+    } catch (reason) {
+      setVersionError(
+        reason instanceof Error ? reason.message : "Restore failed",
+      );
+      setVersionBusy(false);
     }
   }
 
@@ -256,7 +431,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
             <span className="th-label">Kind</span>
             <span className="th-label">Status</span>
           </div>
-          <span className="th-label w-20 shrink-0 text-right">Actions</span>
+          <span className="th-label w-auto shrink-0 text-right">Actions</span>
         </div>
         <ul>
           {pageItems.map((tool) => (
@@ -286,20 +461,42 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
                     </span>
                   </div>
                 </Link>
-                <div className="flex w-20 shrink-0 items-center justify-end gap-1">
+                <div className="flex shrink-0 items-center justify-end gap-0.5">
                   <Link
                     href={`/admin/tools/${tool.id}`}
                     className={buttonClassName({
-                      variant: "secondary",
-                      size: "sm",
+                      variant: "ghost",
+                      size: "icon",
                     })}
+                    aria-label={`Edit ${tool.name}`}
+                    title="Edit"
                   >
-                    Edit
+                    <PencilIcon />
                   </Link>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Versions for ${tool.name}`}
+                    title="Versions"
+                    onClick={() => void openVersions(tool)}
+                  >
+                    <HistoryIcon />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Clone ${tool.name}`}
+                    title="Clone"
+                    disabled={cloningId === tool.id}
+                    onClick={() => void onClone(tool)}
+                  >
+                    {cloningId === tool.id ? "…" : <CloneIcon />}
+                  </Button>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${tool.name}`}
+                    title="Delete"
                     disabled={deletingId === tool.id}
                     onClick={() => void onDelete(tool)}
                   >
@@ -320,6 +517,78 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
           ) : null}
         </ul>
       </section>
+
+      {versionsTool ? (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="tool-versions-title"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-ink/40"
+            aria-label="Close version history"
+            onClick={closeVersions}
+          />
+          <div className="relative z-10 flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-line bg-canvas shadow-lg">
+            <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+              <div className="min-w-0">
+                <h2
+                  id="tool-versions-title"
+                  className="truncate text-sm font-semibold"
+                >
+                  Versions · {versionsTool.name}
+                </h2>
+                <p className="mt-0.5 truncate text-xs text-slate-muted">
+                  /{versionsTool.slug}
+                </p>
+              </div>
+              <Button size="sm" variant="ghost" onClick={closeVersions}>
+                Close
+              </Button>
+            </div>
+            <div className="space-y-3 overflow-y-auto p-4">
+              {versionError ? (
+                <p className="text-sm text-rose">{versionError}</p>
+              ) : null}
+              <VersionHistoryPanel
+                versions={versions}
+                busy={versionBusy}
+                onRefresh={() => {
+                  if (versionsTool) void refreshVersions(versionsTool);
+                }}
+                onView={(version) => void viewVersion(version)}
+                onRestoreLive={(version) => void restoreLive(version)}
+                onRestoreDraft={(version) => void restoreDraft(version)}
+                onCloseView={() => setViewingSource(null)}
+                viewing={
+                  viewingSource ? (
+                    <div className="space-y-2 text-sm">
+                      <div className="flex flex-wrap gap-2">
+                        <Badge
+                          tone={
+                            viewingSource.status === "published"
+                              ? "success"
+                              : viewingSource.status === "validated"
+                                ? "info"
+                                : "warning"
+                          }
+                        >
+                          v{viewingSource.version} · {viewingSource.status}
+                        </Badge>
+                      </div>
+                      <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-canvas/80 p-3 font-mono text-[12px] leading-relaxed">
+                        {viewingSource.sourceCode || "(empty)"}
+                      </pre>
+                    </div>
+                  ) : null
+                }
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

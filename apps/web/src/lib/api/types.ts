@@ -35,6 +35,14 @@ export type ModelId =
   | "llama-3.1-8b"
   | "gpt-oss-120b";
 
+export type ModelProvider = "openai" | "anthropic" | "groq";
+
+export const MODEL_PROVIDER_LABELS: Record<ModelProvider, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  groq: "Groq",
+};
+
 export type ToolKind = "web_search" | "rest_read" | "rest_mutate";
 
 export type IngestionStatus =
@@ -236,6 +244,7 @@ export interface TeamConfig {
   model: ModelId;
   temperature: number;
   status: AgentStatus;
+  tools: ToolBinding[];
   members: TeamMember[];
   draftVersion: number;
   publishedVersion: number | null;
@@ -283,6 +292,7 @@ export interface TeamDraftInput {
   model: ModelId;
   temperature: number;
   memberConfigIds: string[];
+  tools: ToolBinding[];
 }
 
 export interface WorkflowStep {
@@ -359,6 +369,25 @@ export interface ConversationSession {
 export interface AdminSession extends ConversationSession {
   userId: string;
   targetId: string;
+  createdAt: string;
+}
+
+export type ActivityChannel = "live_chat" | "scheduled" | "api" | "email";
+
+export interface ActivityRow {
+  id: string;
+  title: string;
+  userId: string;
+  personaName: string;
+  personaType: "agent" | "team" | "workflow";
+  taskName: string;
+  status: AdminSession["status"];
+  channel: ActivityChannel;
+  createdAt: string;
+  updatedAt: string;
+  lastRunId: string | null;
+  targetId: string;
+  scheduleName: string | null;
 }
 
 export interface UserMemory {
@@ -456,15 +485,52 @@ export interface TenantUserInput {
   workflowIds: string[];
 }
 
-export const ALLOWED_MODELS: Array<{ id: ModelId; label: string }> = [
-  { id: "gpt-4.1", label: "GPT-4.1" },
-  { id: "gpt-4.1-mini", label: "GPT-4.1 Mini" },
-  { id: "claude-sonnet-4", label: "Claude Sonnet 4" },
-  { id: "claude-haiku", label: "Claude Haiku" },
-  { id: "llama-3.3-70b", label: "Groq Llama 3.3 70B" },
-  { id: "llama-3.1-8b", label: "Groq Llama 3.1 8B" },
-  { id: "gpt-oss-120b", label: "Groq GPT-OSS 120B" },
+export const ALLOWED_MODELS: Array<{
+  id: ModelId;
+  label: string;
+  provider: ModelProvider;
+}> = [
+  { id: "gpt-4.1", label: "GPT-4.1", provider: "openai" },
+  { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", provider: "openai" },
+  { id: "claude-sonnet-4", label: "Claude Sonnet 4", provider: "anthropic" },
+  { id: "claude-haiku", label: "Claude Haiku", provider: "anthropic" },
+  { id: "llama-3.3-70b", label: "Groq Llama 3.3 70B", provider: "groq" },
+  { id: "llama-3.1-8b", label: "Groq Llama 3.1 8B", provider: "groq" },
+  { id: "gpt-oss-120b", label: "Groq GPT-OSS 120B", provider: "groq" },
 ];
+
+export function providerForModel(modelId: ModelId | string): ModelProvider {
+  const known = ALLOWED_MODELS.find((model) => model.id === modelId);
+  if (known) return known.provider;
+  if (typeof modelId === "string") {
+    if (modelId.startsWith("claude-")) return "anthropic";
+    if (modelId.startsWith("llama-") || modelId === "gpt-oss-120b") {
+      return "groq";
+    }
+  }
+  return "openai";
+}
+
+export function toBackendModelId(modelId: ModelId): string {
+  return `${providerForModel(modelId)}:${modelId}`;
+}
+
+/** Providers that have at least one tenant credential usable for LLM models. */
+export function modelProvidersWithCredentials(
+  credentials: Array<{ provider: string }>,
+): Set<ModelProvider> {
+  const providers = new Set<ModelProvider>();
+  for (const credential of credentials) {
+    if (
+      credential.provider === "openai" ||
+      credential.provider === "anthropic" ||
+      credential.provider === "groq"
+    ) {
+      providers.add(credential.provider);
+    }
+  }
+  return providers;
+}
 
 export const TOOL_CATALOG: Array<{
   kind: ToolKind;

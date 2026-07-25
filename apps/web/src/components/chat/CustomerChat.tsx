@@ -240,7 +240,10 @@ export function CustomerChat({
         guestId,
         signal: controller.signal,
         onEvent: (event: RunEventBase) => {
-          if (event.event === "RunContent") {
+          if (
+            event.event === "RunContent" ||
+            event.event === "TeamRunContent"
+          ) {
             const chunk = extractTextContent(event.content);
             if (chunk) {
               setMessages((prev) =>

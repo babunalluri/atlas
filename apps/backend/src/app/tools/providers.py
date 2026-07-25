@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import inspect
 import json
 import re
 from collections.abc import Mapping
@@ -220,18 +220,49 @@ class TenantPythonConfig(BaseModel):
     def validate_source_and_caps(self) -> TenantPythonConfig:
         from app.tools.sandbox.validator import (
             SandboxValidationError,
-            validate_tenant_python_source,
+            discover_capability_specs,
         )
 
         try:
-            discovered = set(validate_tenant_python_source(self.source_code))
+            discovered_specs = discover_capability_specs(self.source_code)
         except SandboxValidationError as exc:
             raise ValueError(str(exc)) from exc
+        by_name = {item["name"]: item for item in discovered_specs}
+        discovered = set(by_name)
         if not self.capabilities:
             self.capabilities = [
-                TenantPythonCapability(name=name, description=name.replace("_", " "))
-                for name in sorted(discovered)
+                TenantPythonCapability(
+                    name=spec["name"],
+                    description=str(spec.get("description") or spec["name"]),
+                    input_schema=dict(
+                        spec.get("input_schema")
+                        or {"type": "object", "properties": {}}
+                    ),
+                )
+                for spec in sorted(discovered_specs, key=lambda row: row["name"])
             ]
+        else:
+            # Fill empty schemas/descriptions from AST so Agno tool call
+            # validation accepts real method parameters (query, ticket_id, …).
+            enriched: list[TenantPythonCapability] = []
+            for item in self.capabilities:
+                spec = by_name.get(item.name) or {}
+                schema = item.input_schema or {}
+                props = schema.get("properties") if isinstance(schema, dict) else None
+                if not props:
+                    schema = dict(
+                        spec.get("input_schema")
+                        or {"type": "object", "properties": {}}
+                    )
+                description = item.description or str(
+                    spec.get("description") or item.name.replace("_", " ")
+                )
+                enriched.append(
+                    item.model_copy(
+                        update={"input_schema": schema, "description": description}
+                    )
+                )
+            self.capabilities = enriched
         declared = {item.name for item in self.capabilities}
         missing = declared - discovered
         if missing:
@@ -483,7 +514,7 @@ class OpenAPIProvider(BaseProvider):
             tools.append(
                 build_definition_tool(
                     context.client,
-                    name=f"{context.prefix}_{_safe_callable_name(capability.name)}",
+                    name=_safe_callable_name(capability.name),
                     description=capability.description,
                     method=method,
                     base_url=base_url,
@@ -562,8 +593,8 @@ class PythonToolkitProvider(BaseProvider):
             toolkit.functions = {
                 name: function for name, function in toolkit.functions.items() if name in include
             }
-        _prefix_toolkit(
-            toolkit, context.prefix, context.approval_required, parsed.destructive_tools
+        _mark_toolkit_approvals(
+            toolkit, context.approval_required, parsed.destructive_tools
         )
         return [toolkit]
 
@@ -654,14 +685,13 @@ class CustomPythonProvider(BaseProvider):
                 raise ProviderValidationError(
                     f"Custom builder returned unregistered capability: {old_name}"
                 )
-            function.__name__ = f"{context.prefix}_{_safe_callable_name(old_name)}"
+            # Keep capability names as exposed tool names so agent instructions
+            # that say get_ticket / search_tickets match request.tools.
+            function.__name__ = _safe_callable_name(old_name)
             if context.approval_required or capability.approval_required:
                 function = approval(function)
             functions.append(function)
-        if set(capability_by_name) != {
-            function.__name__.removeprefix(f"{context.prefix}_")
-            for function in functions
-        }:
+        if set(capability_by_name) != {function.__name__ for function in functions}:
             raise ProviderValidationError(
                 "Custom builder capabilities do not match its registry declaration"
             )
@@ -768,7 +798,6 @@ class TenantPythonProvider(BaseProvider):
                 orchestrator=orchestrator,
                 parsed=parsed,
                 capability=capability,
-                prefix=context.prefix,
                 headers=proxy_headers,
                 force_approval=context.approval_required,
                 wall_seconds=settings.sandbox_wall_seconds,
@@ -783,7 +812,6 @@ class TenantPythonProvider(BaseProvider):
         orchestrator: Any,
         parsed: TenantPythonConfig,
         capability: TenantPythonCapability,
-        prefix: str,
         headers: dict[str, str],
         force_approval: bool,
         wall_seconds: int,
@@ -810,11 +838,72 @@ class TenantPythonProvider(BaseProvider):
                 raise RuntimeError(result.error or "Sandbox run failed")
             return result.value
 
-        _runner.__name__ = f"{prefix}_{_safe_callable_name(capability.name)}"
+        # Bare capability name (get_ticket) so model calls match agent/skill docs.
+        _runner.__name__ = _safe_callable_name(capability.name)
         _runner.__doc__ = capability.description or capability.name
+        _apply_json_schema_signature(_runner, capability.input_schema)
         if force_approval or capability.mutating:
             return approval(_runner)
         return _runner
+
+
+def _apply_json_schema_signature(
+    function: Any, input_schema: Mapping[str, Any] | None
+) -> None:
+    """Expose JSON-schema properties as real kwargs so Agno validates correctly.
+
+    Without this, ``async def _runner(**kwargs)`` becomes a schema with an empty
+    ``kwargs`` object (additionalProperties=false), and every tool call fails.
+
+    Also sets ``__annotations__`` to match the signature. Agno wraps callables with
+    Pydantic ``validate_call``, which reads annotations (not Parameter.annotation).
+    Missing annotations raise KeyError and Agno silently drops the tool — the model
+    then invents calls like ``get_ticket`` that are "not in request.tools".
+    """
+    schema = dict(input_schema or {})
+    properties = (
+        schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    )
+    required = {
+        str(name)
+        for name in (schema.get("required") or [])
+        if isinstance(name, str) and name.isidentifier()
+    }
+    type_by_json: dict[str, Any] = {
+        "string": str,
+        "number": float,
+        "integer": int,
+        "boolean": bool,
+        "object": dict[str, Any],
+        "array": list[Any],
+    }
+    parameters: list[inspect.Parameter] = []
+    annotations: dict[str, Any] = {"return": Any}
+    for parameter_name, prop in properties.items():
+        name = str(parameter_name)
+        if not name.isidentifier():
+            continue
+        prop_schema = prop if isinstance(prop, dict) else {}
+        annotation = type_by_json.get(str(prop_schema.get("type") or "string"), Any)
+        default = (
+            inspect.Parameter.empty
+            if name in required
+            else prop_schema.get("default", None)
+        )
+        parameters.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=default,
+                annotation=annotation,
+            )
+        )
+        annotations[name] = annotation
+    function.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+        parameters=parameters,
+        return_annotation=Any,
+    )
+    function.__annotations__ = annotations
 
 
 class MCPProvider(BaseProvider):
@@ -855,6 +944,8 @@ class MCPProvider(BaseProvider):
             include_tools=parsed.include_tools,
             exclude_tools=parsed.exclude_tools,
             requires_confirmation_tools=approvals,
+            # Empty prefix keeps MCP tool names as published by the server.
+            # Discovery still uses a temporary "preview" prefix (stripped later).
             tool_name_prefix=prefix,
             refresh_connection=True,
         )
@@ -901,7 +992,7 @@ class MCPProvider(BaseProvider):
         if not parsed.include_tools:
             raise ProviderValidationError("Select at least one reviewed MCP tool")
         await context.client.validate_url(parsed.url)
-        toolkit = self._toolkit(parsed, context.headers, context.prefix)
+        toolkit = self._toolkit(parsed, context.headers, "")
         if context.approval_required:
             toolkit.requires_confirmation_tools = list(parsed.include_tools)
         return [toolkit]
@@ -1055,17 +1146,17 @@ def _safe_callable_name(name: str) -> str:
     return value if value and not value[0].isdigit() else f"tool_{value}"
 
 
-def _prefix_toolkit(
-    toolkit: Any, prefix: str, require_all: bool, destructive_tools: list[str]
+def _mark_toolkit_approvals(
+    toolkit: Any, require_all: bool, destructive_tools: list[str]
 ) -> None:
-    renamed: dict[str, Any] = {}
-    for old_name, function in toolkit.functions.items():
-        new_name = f"{prefix}_{_safe_callable_name(old_name)}"
-        function.name = new_name
-        if require_all or old_name in destructive_tools or is_destructive_name(old_name):
+    """Flag destructive/mutating toolkit functions without renaming them.
+
+    Tool names stay as capability names (``add``, ``get_ticket``, …) so model
+    tool calls match agent instructions and ``request.tools``.
+    """
+    for name, function in toolkit.functions.items():
+        if require_all or name in destructive_tools or is_destructive_name(name):
             function.requires_confirmation = True
-        renamed[new_name] = function
-    toolkit.functions = renamed
 
 
 def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> None:

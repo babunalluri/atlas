@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.copy_helpers import copy_name, unique_copy_slug
 from app.api.schemas import (
     PlatformPythonPackageOut,
     ToolDefinitionBase,
@@ -14,6 +15,7 @@ from app.api.schemas import (
     ToolDefinitionUpdateIn,
     ToolDefinitionVersionOut,
     ToolProviderCatalogOut,
+    ToolRestoreIn,
     ToolValidationOut,
 )
 from app.auth.dependencies import require_roles
@@ -239,6 +241,12 @@ async def _sync_tenant_python_draft(
     )
 
 
+async def _serialize_tool(session: AsyncSession, row: ToolDefinition) -> ToolDefinitionOut:
+    """Refresh before sync serialization to avoid expired timestamp lazy-loads."""
+    await session.refresh(row)
+    return _out(row)
+
+
 def _apply_mutating_approval(values: dict[str, Any]) -> None:
     if values.get("kind") != "tenant_python":
         return
@@ -395,7 +403,7 @@ async def create_tool(
     except LookupError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     await _sync_tenant_python_draft(row, context, session)
-    return _out(row)
+    return await _serialize_tool(session, row)
 
 
 @router.get("/{tool_id}", response_model=ToolDefinitionOut)
@@ -406,6 +414,48 @@ async def get_tool(
     if row is None:
         raise HTTPException(status_code=404, detail="Tool not found")
     return _out(row)
+
+
+@router.post("/{tool_id}/clone", response_model=ToolDefinitionOut, status_code=201)
+async def clone_tool(
+    tool_id: uuid.UUID,
+    context: AdminContext,
+    session: TenantSession,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ToolDefinitionOut:
+    repo = ToolDefinitionRepository(session, context)
+    source = await repo.get(tool_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Tool not found")
+
+    async def slug_taken(slug: str) -> bool:
+        return await repo.get_by_slug(slug) is not None
+
+    try:
+        new_slug = await unique_copy_slug(source.slug, slug_taken)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    values = _row_values(source)
+    values["name"] = copy_name(source.name)
+    values["slug"] = new_slug
+    if values["kind"] == "tenant_python":
+        values["config"] = {**dict(values.get("config") or {}), "version_status": "draft"}
+    _apply_mutating_approval(values)
+    await _validate_targets(values["kind"], values["config"], settings)
+    await _validate_tenant_python_deps(values["kind"], values["config"], session)
+    await _validate_python_toolkit_credential(
+        values["kind"], values["config"], values.get("credential_id"), context, session
+    )
+    await _validate_custom_python_credential(
+        values["kind"], values["config"], values.get("credential_id"), context, session
+    )
+    try:
+        row = await repo.create(values)
+    except LookupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await _sync_tenant_python_draft(row, context, session)
+    return await _serialize_tool(session, row)
 
 
 @router.patch("/{tool_id}", response_model=ToolDefinitionOut)
@@ -446,7 +496,7 @@ async def update_tool(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     assert row is not None
     await _sync_tenant_python_draft(row, context, session)
-    return _out(row)
+    return await _serialize_tool(session, row)
 
 
 @router.post("/{tool_id}/validate-source", response_model=ToolValidationOut)
@@ -508,7 +558,7 @@ async def publish_tenant_python(
     published = await versions.publish(draft.id, row)
     if published is None:
         raise HTTPException(status_code=422, detail="Unable to publish tool version")
-    return _out(row)
+    return await _serialize_tool(session, row)
 
 
 @router.get("/{tool_id}/versions", response_model=list[ToolDefinitionVersionOut])
@@ -520,6 +570,49 @@ async def list_tool_versions(
         raise HTTPException(status_code=404, detail="Tool not found")
     versions = await ToolDefinitionVersionRepository(session, context).list_for_tool(tool_id)
     return [_version_out(item) for item in versions]
+
+
+@router.get("/{tool_id}/versions/{version_id}", response_model=ToolDefinitionVersionOut)
+async def get_tool_version(
+    tool_id: uuid.UUID,
+    version_id: uuid.UUID,
+    context: AdminContext,
+    session: TenantSession,
+) -> ToolDefinitionVersionOut:
+    row = await ToolDefinitionRepository(session, context).get(tool_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tool not found")
+    version = await ToolDefinitionVersionRepository(session, context).get(version_id)
+    if version is None or version.tool_definition_id != tool_id:
+        raise HTTPException(status_code=404, detail="Tool version not found")
+    return _version_out(version)
+
+
+@router.post("/{tool_id}/versions/{version_id}/restore", response_model=ToolDefinitionOut)
+async def restore_tool_version(
+    tool_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: ToolRestoreIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> ToolDefinitionOut:
+    repo = ToolDefinitionRepository(session, context)
+    row = await repo.get(tool_id)
+    if row is None or row.kind != "tenant_python":
+        raise HTTPException(status_code=404, detail="Editable Python tool not found")
+    versions = ToolDefinitionVersionRepository(session, context)
+    try:
+        await versions.restore_version(
+            row,
+            version_id,
+            as_draft=body.as_draft,
+            created_by=context.user_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _serialize_tool(session, row)
 
 
 @router.post("/{tool_id}/test", response_model=ToolValidationOut)

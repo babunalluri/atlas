@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.copy_helpers import copy_name, unique_copy_slug
 from app.api.schemas import (
     AgentCatalogItemOut,
     AgentCatalogPageOut,
@@ -158,6 +159,71 @@ async def get_agent(
     if config is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return await _config_out(repo, config)
+
+
+@router.post("/{agent_id}/clone", response_model=AgentConfigOut, status_code=201)
+async def clone_agent(
+    agent_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> AgentConfigOut:
+    repo = AgentRepository(session, context)
+    source = await repo.get_config(agent_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    draft = await repo.get_latest_draft(agent_id)
+    published = (
+        await repo.get_version(source.published_version_id, allow_draft=False)
+        if source.published_version_id
+        else None
+    )
+    editable = draft or published
+    if editable is None:
+        raise HTTPException(status_code=400, detail="Agent has no version to clone")
+
+    async def slug_taken(slug: str) -> bool:
+        return await repo.get_config_by_slug(slug) is not None
+
+    try:
+        new_slug = await unique_copy_slug(source.slug, slug_taken)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    bindings = await repo.bindings(editable.id)
+    knowledge_base_id = None
+    if editable.team_config and editable.team_config.get("knowledge_base_id"):
+        knowledge_base_id = uuid.UUID(str(editable.team_config["knowledge_base_id"]))
+
+    config = await repo.create_config(
+        slug=new_slug,
+        name=copy_name(source.name),
+        description=source.description,
+    )
+    try:
+        await repo.create_draft(
+            config_id=config.id,
+            instructions=editable.instructions,
+            model_id=editable.model_id,
+            temperature=editable.temperature,
+            memory_mode=editable.memory_mode,
+            tools=[
+                {
+                    "tool_key": binding.tool_key,
+                    "tool_definition_id": binding.tool_definition_id,
+                    "config": binding.config or {},
+                    "credential_id": binding.credential_id,
+                }
+                for binding in bindings
+            ],
+            knowledge_base_id=knowledge_base_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    refreshed = await repo.get_config(config.id)
+    assert refreshed is not None
+    return await _config_out(repo, refreshed)
 
 
 @router.patch("/{agent_id}", response_model=AgentConfigOut)

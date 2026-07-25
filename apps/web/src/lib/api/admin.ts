@@ -13,6 +13,7 @@ import type {
   AdminSession,
   ApprovalRequest,
   CatalogPage,
+  ChatMessage,
   KnowledgeBaseSummary,
   KnowledgeSearchResult,
   KnowledgeSource,
@@ -39,7 +40,7 @@ import type {
   WorkflowDraftInput,
   WorkflowSummary,
 } from "./types";
-import { TOOL_CATALOG } from "./types";
+import { TOOL_CATALOG, toBackendModelId } from "./types";
 import {
   buildPublicApiRunCatalog,
   teamStepsFromPublished,
@@ -121,6 +122,12 @@ interface BackendTeam {
   description: string | null;
   published_version_id: string | null;
   updated_at: string;
+  tools: Array<{
+    tool_key: ToolBinding["kind"] | null;
+    tool_definition_id?: string | null;
+    config: Record<string, unknown>;
+    credential_id?: string | null;
+  }>;
   draft: BackendTeamVersion | null;
   published: BackendTeamVersion | null;
 }
@@ -183,13 +190,7 @@ function frontendModel(modelId: string): AgentConfig["model"] {
 }
 
 function backendModel(modelId: AgentDraftInput["model"]): string {
-  if (modelId.startsWith("claude-")) {
-    return `anthropic:${modelId}`;
-  }
-  if (modelId.startsWith("llama-") || modelId === "gpt-oss-120b") {
-    return `groq:${modelId}`;
-  }
-  return `openai:${modelId}`;
+  return toBackendModelId(modelId);
 }
 
 function mapAgent(raw: BackendAgent): AgentConfig {
@@ -262,6 +263,25 @@ function backendDraft(draft: AgentDraftInput) {
 
 function mapTeam(raw: BackendTeam): TeamConfig {
   const editable = raw.draft ?? raw.published;
+  const tools = (raw.tools ?? []).map((tool) => {
+    const catalog = TOOL_CATALOG.find((item) => item.kind === tool.tool_key);
+    return {
+      id: `${raw.id}:${tool.tool_key ?? tool.tool_definition_id}`,
+      kind: tool.tool_key ?? ("rest_mutate" as const),
+      label: catalog?.label ?? "Reusable tool",
+      enabled: true,
+      config: {
+        ...tool.config,
+        ...(tool.credential_id
+          ? { credential_id: tool.credential_id }
+          : {}),
+      },
+      requiresApproval: catalog?.requiresApproval ?? true,
+      ...(tool.tool_definition_id
+        ? { definitionId: tool.tool_definition_id }
+        : {}),
+    };
+  });
   return {
     id: raw.id,
     name: raw.name,
@@ -276,6 +296,7 @@ function mapTeam(raw: BackendTeam): TeamConfig {
     ),
     temperature: editable?.temperature ?? 0.2,
     status: raw.published ? "published" : "draft",
+    tools,
     members: (editable?.members ?? []).map((member) => ({
       agentConfigId: member.agent_config_id,
       agentVersionId: member.agent_version_id,
@@ -651,6 +672,18 @@ export async function deleteAgent(
   });
 }
 
+export async function cloneAgent(
+  accessToken: string,
+  agentId: string,
+): Promise<AgentConfig> {
+  return mapAgent(
+    await apiFetch<BackendAgent>(`/admin/agents/${agentId}/clone`, {
+      accessToken,
+      method: "POST",
+    }),
+  );
+}
+
 export function createAgent(
   accessToken: string,
   input: Pick<AgentDraftInput, "name" | "slug">,
@@ -725,6 +758,18 @@ export async function createTeam(
   );
 }
 
+export async function cloneTeam(
+  accessToken: string,
+  teamId: string,
+): Promise<TeamConfig> {
+  return mapTeam(
+    await apiFetch<BackendTeam>(`/admin/teams/${teamId}/clone`, {
+      accessToken,
+      method: "POST",
+    }),
+  );
+}
+
 export async function saveTeamDraft(
   accessToken: string,
   teamId: string,
@@ -742,6 +787,20 @@ export async function saveTeamDraft(
         model_id: backendModel(draft.model),
         temperature: draft.temperature,
         member_config_ids: draft.memberConfigIds,
+        tools: draft.tools
+          .filter((tool) => tool.enabled)
+          .map((tool) => {
+            const { credential_id, ...config } = tool.config;
+            return {
+              tool_key: tool.definitionId ? null : tool.kind,
+              tool_definition_id: tool.definitionId ?? null,
+              config,
+              credential_id:
+                typeof credential_id === "string" && credential_id
+                  ? credential_id
+                  : null,
+            };
+          }),
       },
     }),
   );
@@ -1048,6 +1107,18 @@ export async function createWorkflow(
   );
 }
 
+export async function cloneWorkflow(
+  accessToken: string,
+  workflowId: string,
+): Promise<WorkflowConfig> {
+  return mapWorkflow(
+    await apiFetch<BackendWorkflow>(`/admin/workflows/${workflowId}/clone`, {
+      accessToken,
+      method: "POST",
+    }),
+  );
+}
+
 export async function saveWorkflowDraft(
   accessToken: string,
   workflowId: string,
@@ -1327,6 +1398,16 @@ export async function updateKnowledgeBase(
   );
 }
 
+export async function deleteKnowledgeBase(
+  accessToken: string,
+  knowledgeBaseId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/knowledge/bases/${knowledgeBaseId}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
 export async function listKnowledgeBases(
   accessToken: string,
 ): Promise<Array<Pick<KnowledgeBaseSummary, "id" | "name">>> {
@@ -1471,6 +1552,7 @@ export async function listAdminSessions(
       user_id: string;
       last_run_id: string | null;
       status: AdminSession["status"];
+      created_at: string;
       updated_at: string;
     }>
   >("/api/sessions?all_users=true", { accessToken });
@@ -1492,6 +1574,7 @@ export async function listAdminSessions(
     lastRunId: row.last_run_id,
     status: row.status,
     pausedForApproval: row.status === "paused",
+    createdAt: row.created_at,
     updatedAt: row.updated_at,
   }));
 }
@@ -1504,6 +1587,93 @@ export async function deleteAdminSession(
     accessToken,
     method: "DELETE",
   });
+}
+
+export async function getAdminSessionDetail(
+  accessToken: string,
+  sessionId: string,
+): Promise<{ session: AdminSession; messages: ChatMessage[] }> {
+  const row = await apiFetch<{
+    id: string;
+    title: string;
+    target_type: "agent" | "team" | "workflow";
+    agent_config_id: string | null;
+    agent_version_id: string | null;
+    team_config_id: string | null;
+    team_version_id: string | null;
+    workflow_config_id: string | null;
+    workflow_version_id: string | null;
+    user_id: string;
+    last_run_id: string | null;
+    status: AdminSession["status"];
+    created_at: string;
+    updated_at: string;
+    history?: { runs?: Array<Record<string, unknown>> };
+  }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { accessToken });
+
+  const messages: ChatMessage[] = [];
+  for (const [index, run] of (row.history?.runs ?? []).entries()) {
+    const input = run.input;
+    let userContent = "";
+    if (typeof input === "string") {
+      userContent = input;
+    } else if (input && typeof input === "object") {
+      const value = input as Record<string, unknown>;
+      userContent = String(
+        value.input_content ?? value.input ?? value.message ?? "",
+      );
+    }
+    const createdAt = new Date(
+      Number(run.created_at ?? 0) * 1000,
+    ).toISOString();
+    if (userContent) {
+      messages.push({
+        id: `${String(run.run_id ?? index)}:user`,
+        role: "user",
+        content: userContent,
+        createdAt,
+        status: "complete",
+      });
+    }
+    const content = typeof run.content === "string" ? run.content : "";
+    if (content) {
+      messages.push({
+        id: `${String(run.run_id ?? index)}:assistant`,
+        role: "assistant",
+        content,
+        createdAt,
+        status:
+          String(run.status).toUpperCase() === "PAUSED"
+            ? "paused"
+            : "complete",
+      });
+    }
+  }
+
+  return {
+    session: {
+      id: row.id,
+      title: row.title,
+      targetType: row.target_type,
+      targetId:
+        row.agent_config_id ??
+        row.team_config_id ??
+        row.workflow_config_id ??
+        "",
+      versionId:
+        row.agent_version_id ??
+        row.team_version_id ??
+        row.workflow_version_id ??
+        "",
+      userId: row.user_id,
+      lastRunId: row.last_run_id,
+      status: row.status,
+      pausedForApproval: row.status === "paused",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    },
+    messages,
+  };
 }
 
 export async function listUserMemories(
@@ -1820,10 +1990,18 @@ function mapTrace(row: BackendTraceSummary): TraceSummary {
   };
 }
 
-export async function listTraces(accessToken: string): Promise<TraceSummary[]> {
-  const rows = await apiFetch<BackendTraceSummary[]>("/api/admin/traces", {
-    accessToken,
-  });
+export async function listTraces(
+  accessToken: string,
+  options?: { sessionId?: string; limit?: number },
+): Promise<TraceSummary[]> {
+  const params = new URLSearchParams();
+  if (options?.sessionId) params.set("session_id", options.sessionId);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const query = params.toString();
+  const rows = await apiFetch<BackendTraceSummary[]>(
+    `/api/admin/traces${query ? `?${query}` : ""}`,
+    { accessToken },
+  );
   return rows.map(mapTrace);
 }
 
@@ -2023,6 +2201,18 @@ export async function deleteToolDefinition(
   });
 }
 
+export async function cloneToolDefinition(
+  accessToken: string,
+  toolId: string,
+): Promise<ToolDefinition> {
+  return mapToolDefinition(
+    await apiFetch<BackendToolDefinition>(`/admin/tools/${toolId}/clone`, {
+      accessToken,
+      method: "POST",
+    }),
+  );
+}
+
 export async function testToolDefinition(
   accessToken: string,
   toolId: string,
@@ -2081,6 +2271,89 @@ export async function publishTenantPythonTool(
       accessToken,
       method: "POST",
     }),
+  );
+}
+
+export type ToolDefinitionVersion = {
+  id: string;
+  toolDefinitionId: string;
+  version: number;
+  status: string;
+  sourceCode: string;
+  dependencies: Array<Record<string, unknown>>;
+  capabilities: Array<Record<string, unknown>>;
+  settings: Record<string, unknown>;
+  publishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapToolDefinitionVersion(row: {
+  id: string;
+  tool_definition_id: string;
+  version: number;
+  status: string;
+  source_code: string;
+  dependencies: Array<Record<string, unknown>>;
+  capabilities: Array<Record<string, unknown>>;
+  settings: Record<string, unknown>;
+  published_at: string | null;
+  created_at: string;
+  updated_at: string;
+}): ToolDefinitionVersion {
+  return {
+    id: row.id,
+    toolDefinitionId: row.tool_definition_id,
+    version: row.version,
+    status: row.status,
+    sourceCode: row.source_code,
+    dependencies: row.dependencies,
+    capabilities: row.capabilities,
+    settings: row.settings,
+    publishedAt: row.published_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listToolVersions(
+  accessToken: string,
+  toolId: string,
+): Promise<ToolDefinitionVersion[]> {
+  const rows = await apiFetch<
+    Array<Parameters<typeof mapToolDefinitionVersion>[0]>
+  >(`/admin/tools/${toolId}/versions`, { accessToken });
+  return rows.map(mapToolDefinitionVersion);
+}
+
+export async function getToolVersion(
+  accessToken: string,
+  toolId: string,
+  versionId: string,
+): Promise<ToolDefinitionVersion> {
+  return mapToolDefinitionVersion(
+    await apiFetch<Parameters<typeof mapToolDefinitionVersion>[0]>(
+      `/admin/tools/${toolId}/versions/${versionId}`,
+      { accessToken },
+    ),
+  );
+}
+
+export async function restoreToolVersion(
+  accessToken: string,
+  toolId: string,
+  versionId: string,
+  options: { asDraft?: boolean } = {},
+): Promise<ToolDefinition> {
+  return mapToolDefinition(
+    await apiFetch<BackendToolDefinition>(
+      `/admin/tools/${toolId}/versions/${versionId}/restore`,
+      {
+        accessToken,
+        method: "POST",
+        body: { as_draft: options.asDraft ?? false },
+      },
+    ),
   );
 }
 

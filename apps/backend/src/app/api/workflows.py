@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.copy_helpers import copy_name, unique_copy_slug
 from app.api.schemas import (
     WorkflowAssignmentsIn,
     WorkflowAssignmentsOut,
@@ -236,6 +237,65 @@ async def get_workflow(
     config = await repo.get_config(workflow_id)
     if config is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    return await workflow_config_out(repo, config)
+
+
+@router.post("/{workflow_id}/clone", response_model=WorkflowConfigOut, status_code=201)
+async def clone_workflow(
+    workflow_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> WorkflowConfigOut:
+    repo = WorkflowRepository(session, context)
+    source = await repo.get_config(workflow_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    draft = await repo.get_latest_draft(workflow_id)
+    published = (
+        await repo.get_version(source.published_version_id)
+        if source.published_version_id
+        else None
+    )
+    editable = draft or published
+
+    async def slug_taken(slug: str) -> bool:
+        return await repo.get_config_by_slug(slug) is not None
+
+    try:
+        new_slug = await unique_copy_slug(source.slug, slug_taken)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    config = await repo.create_config(
+        slug=new_slug,
+        name=copy_name(source.name),
+        description=source.description,
+    )
+    if editable is not None:
+        steps = await repo.steps(editable.id)
+        if steps:
+            try:
+                await repo.create_draft(
+                    config_id=config.id,
+                    mode=editable.mode,
+                    steps=[
+                        {
+                            "name": step.name,
+                            "target_type": step.target_type,
+                            "target_config_id": (
+                                step.agent_config_id
+                                if step.target_type == "agent"
+                                else step.team_config_id
+                            ),
+                            "condition_expression": step.condition_expression,
+                        }
+                        for step in steps
+                    ],
+                )
+            except (LookupError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await workflow_config_out(repo, config)
 
 

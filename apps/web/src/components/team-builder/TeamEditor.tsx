@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { BackLink } from "@/components/ui/BackLink";
@@ -8,28 +8,21 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select, Textarea } from "@/components/ui/Field";
+import { ModelSelect } from "@/components/ui/ModelSelect";
 import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
-import {
-  VersionHistoryPanel,
-  type VersionHistoryItem,
-} from "@/components/ui/VersionHistoryPanel";
+import { ToolAttachmentSection } from "@/components/tools/ToolAttachmentSection";
 import {
   deleteTeam,
-  getTeamVersion,
-  listTeamVersions,
   publishTeam,
-  restoreTeamVersion,
   saveTeamDraft,
+  type CredentialSummary,
 } from "@/lib/api/admin";
 import {
-  ALLOWED_MODELS,
   type AgentSummary,
-  type ModelId,
   type TeamConfig,
   type TeamDraftInput,
   type TeamMode,
-  type TeamVersionDetail,
-  type TeamVersionSummary,
+  type ToolDefinition,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { formatRelative } from "@/lib/utils";
@@ -43,15 +36,20 @@ function applyTeamToForm(team: TeamConfig): TeamDraftInput {
     model: team.model,
     temperature: team.temperature,
     memberConfigIds: team.members.map((member) => member.agentConfigId),
+    tools: team.tools,
   };
 }
 
 export function TeamEditor({
   initial,
   agents,
+  toolDefinitions = [],
+  credentials = [],
 }: {
   initial: TeamConfig;
   agents: AgentSummary[];
+  toolDefinitions?: ToolDefinition[];
+  credentials?: CredentialSummary[];
 }) {
   const { getAccessToken } = useAgentOsToken();
   const router = useRouter();
@@ -59,12 +57,8 @@ export function TeamEditor({
   const [status, setStatus] = useState(initial.status);
   const [draftVersion, setDraftVersion] = useState(initial.draftVersion);
   const [publishedVersion, setPublishedVersion] = useState(initial.publishedVersion);
-  const [busy, setBusy] = useState<
-    "save" | "publish" | "delete" | "versions" | "restore" | null
-  >(null);
+  const [busy, setBusy] = useState<"save" | "publish" | "delete" | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
-  const [versions, setVersions] = useState<TeamVersionSummary[]>([]);
-  const [viewing, setViewing] = useState<TeamVersionDetail | null>(null);
 
   const agentMap = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
@@ -74,30 +68,22 @@ export function TeamEditor({
     (agent) => !form.memberConfigIds.includes(agent.id),
   );
 
+  const credentialMap = useMemo(
+    () => new Map(credentials.map((credential) => [credential.id, credential.name])),
+    [credentials],
+  );
+
+  const credentialNames = useMemo(
+    () => Object.fromEntries(credentialMap.entries()),
+    [credentialMap],
+  );
+
   function applyTeam(team: TeamConfig) {
     setForm(applyTeamToForm(team));
     setStatus(team.status);
     setDraftVersion(team.draftVersion);
     setPublishedVersion(team.publishedVersion);
   }
-
-  async function refreshVersions() {
-    setBusy("versions");
-    try {
-      const rows = await listTeamVersions(await getAccessToken(), initial.id);
-      setVersions(rows);
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Failed to load versions");
-    } finally {
-      setBusy((current) => (current === "versions" ? null : current));
-    }
-  }
-
-  useEffect(() => {
-    void refreshVersions();
-    // Load once on mount for this team.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only
-  }, [initial.id]);
 
   function update<K extends keyof TeamDraftInput>(
     key: K,
@@ -140,7 +126,6 @@ export function TeamEditor({
       );
       applyTeam(saved);
       setBanner("Draft saved");
-      void refreshVersions();
       return saved;
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Save failed");
@@ -151,8 +136,8 @@ export function TeamEditor({
   }
 
   async function publish() {
-    if (form.memberConfigIds.length < 2) {
-      setBanner("Add at least two agents before publishing");
+    if (form.memberConfigIds.length < 1) {
+      setBanner("Add at least one agent before publishing");
       return;
     }
     setBusy("publish");
@@ -162,7 +147,6 @@ export function TeamEditor({
       const published = await publishTeam(await getAccessToken(), initial.id);
       applyTeam(published);
       setBanner(`Published v${published.publishedVersion}`);
-      void refreshVersions();
     } catch (err) {
       setBanner(err instanceof Error ? err.message : "Publish failed");
     } finally {
@@ -188,91 +172,6 @@ export function TeamEditor({
       setBusy(null);
     }
   }
-
-  async function viewVersion(version: VersionHistoryItem) {
-    setBusy("versions");
-    setBanner(null);
-    try {
-      const detail = await getTeamVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-      );
-      setViewing(detail);
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Failed to load version");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function restoreLive(version: VersionHistoryItem) {
-    if (version.isLive) {
-      setBanner(`v${version.version} is already live`);
-      return;
-    }
-    if (
-      !window.confirm(
-        `Make v${version.version} the live published version? Current live stays available in history.`,
-      )
-    ) {
-      return;
-    }
-    setBusy("restore");
-    setBanner(null);
-    try {
-      const restored = await restoreTeamVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-      );
-      applyTeam(restored);
-      setViewing(null);
-      setBanner(`Restored live to v${restored.publishedVersion}`);
-      void refreshVersions();
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Restore failed");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function restoreDraft(version: VersionHistoryItem) {
-    if (
-      !window.confirm(
-        `Clone v${version.version} into a new draft for editing? Live published version will not change until you publish.`,
-      )
-    ) {
-      return;
-    }
-    setBusy("restore");
-    setBanner(null);
-    try {
-      const restored = await restoreTeamVersion(
-        await getAccessToken(),
-        initial.id,
-        version.id,
-        { asDraft: true },
-      );
-      applyTeam(restored);
-      setViewing(null);
-      setBanner(`Loaded v${version.version} into draft v${restored.draftVersion}`);
-      void refreshVersions();
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Restore failed");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  const historyItems: VersionHistoryItem[] = versions.map((version) => ({
-    id: version.id,
-    version: version.version,
-    status: version.status,
-    isLive: version.isLive,
-    createdAt: version.createdAt,
-    details: [version.mode, `${version.memberCount} members`],
-  }));
 
   return (
     <div className="space-y-3">
@@ -361,20 +260,13 @@ export function TeamEditor({
               placeholder="Optional"
             />
           </div>
-          <div>
-            <Label htmlFor="team-model">Leader model</Label>
-            <Select
-              id="team-model"
-              value={form.model}
-              onChange={(event) => update("model", event.target.value as ModelId)}
-            >
-              {ALLOWED_MODELS.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
-            </Select>
-          </div>
+          <ModelSelect
+            id="team-model"
+            label="Leader model"
+            value={form.model}
+            onChange={(model) => update("model", model)}
+            credentials={credentials}
+          />
           <div>
             <Label htmlFor="team-temperature" hint={form.temperature.toFixed(2)}>
               Temperature
@@ -405,17 +297,25 @@ export function TeamEditor({
         </div>
       </section>
 
+      <ToolAttachmentSection
+        tools={form.tools}
+        onChange={(tools) => update("tools", tools)}
+        toolDefinitions={toolDefinitions}
+        credentialNames={credentialNames}
+        description="Attached to the team leader (in addition to tools on member agents)."
+      />
+
       <section className="rounded-xl border border-line bg-raised/40 p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">Members</h2>
           <Badge
-            tone={form.memberConfigIds.length >= 2 ? "success" : "warning"}
+            tone={form.memberConfigIds.length >= 1 ? "success" : "warning"}
           >
             {form.memberConfigIds.length} selected
           </Badge>
         </div>
         <p className="mb-3 text-xs text-slate-muted">
-          Need at least two published agents. Order is routing priority.
+          Need at least one published agent. Order is routing priority.
         </p>
 
         {form.memberConfigIds.length === 0 ? (
@@ -497,51 +397,6 @@ export function TeamEditor({
           )}
         </div>
       </section>
-
-      <VersionHistoryPanel
-        versions={historyItems}
-        busy={busy !== null}
-        onRefresh={() => void refreshVersions()}
-        onView={(version) => void viewVersion(version)}
-        onRestoreLive={(version) => void restoreLive(version)}
-        onRestoreDraft={(version) => void restoreDraft(version)}
-        onCloseView={() => setViewing(null)}
-        viewing={
-          viewing ? (
-            <dl className="grid gap-2 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-xs text-slate-muted">Mode</dt>
-                <dd>{viewing.mode}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-slate-muted">Model</dt>
-                <dd>{viewing.model}</dd>
-              </div>
-              <div className="sm:col-span-2">
-                <dt className="text-xs text-slate-muted">Instructions</dt>
-                <dd className="mt-0.5 whitespace-pre-wrap font-mono text-[13px]">
-                  {viewing.instructions}
-                </dd>
-              </div>
-              <div className="sm:col-span-2">
-                <dt className="mb-1 text-xs text-slate-muted">Members</dt>
-                <dd>
-                  <ul className="space-y-1">
-                    {viewing.members.map((member) => (
-                      <li key={member.agentConfigId} className="text-sm">
-                        {member.position + 1}. {member.name}{" "}
-                        <span className="text-xs text-slate-muted">
-                          (agent v{member.version})
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </dd>
-              </div>
-            </dl>
-          ) : null
-        }
-      />
     </div>
   );
 }
