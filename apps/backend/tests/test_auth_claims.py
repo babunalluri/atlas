@@ -24,9 +24,21 @@ def test_flatten_nested_org_claims():
 
 def test_flatten_multivalued_org_claims():
     flat = _flatten_oidc_payload(
-        {"sub": "u1", "org_id": ["org_demo_acme", "org_other"], "org_role": ["org:admin"]}
+        {
+            "sub": "u1",
+            "org_id": ["org_demo_acme", "org_other"],
+            "org_role": ["org:member", "org:admin"],
+        }
     )
     assert flat["org_id"] == "org_demo_acme"
+    # Privilege-aware: admin wins over member regardless of order.
+    assert flat["org_role"] == "org:admin"
+
+
+def test_flatten_org_role_prefers_admin_when_member_first():
+    flat = _flatten_oidc_payload(
+        {"sub": "u1", "org_id": "org_x", "org_role": ["org:member", "org:admin"]}
+    )
     assert flat["org_role"] == "org:admin"
 
 

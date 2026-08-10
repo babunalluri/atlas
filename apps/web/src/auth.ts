@@ -85,7 +85,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       authorization: `${keycloakIssuer}/protocol/openid-connect/auth`,
       token: `${keycloakInternalIssuer}/protocol/openid-connect/token`,
       userinfo: `${keycloakInternalIssuer}/protocol/openid-connect/userinfo`,
-      jwks_endpoint: `${keycloakInternalIssuer}/protocol/openid-connect/certs`,
     }),
   ],
   session: { strategy: "jwt" },

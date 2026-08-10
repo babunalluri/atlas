@@ -78,10 +78,14 @@ token before calling the Atlas API. Access tokens must include `org_id`,
 `org_role`, `platform_admin` (optional), `email` (for invite binding), and
 audience `atlas-web` (realm client mappers in `infra/keycloak/atlas-realm.json`).
 
-`org_id` / `org_role` mappers aggregate **user and group** attributes. Add staff
-to the org group matching `tenants.auth_org_id`, and set `org_role` on the user
-(or on the group). Unmanaged attributes are enabled so the Admin Console can
-edit `org_id` / `org_role` / `platform_admin`.
+`org_id` / `org_role` mappers aggregate **user and group** attributes. Put staff
+in the org group matching `tenants.auth_org_id` (for `org_id`). Set `org_role` on
+the **user** (`org:admin` / `org:member`) — Atlas picks the most privileged role
+if multiple values appear. Optional `platform_admin=true` for platform operators.
+
+In Keycloak Admin → Realm settings → User profile, set unmanaged attribute
+policy to **Enabled** so `org_id` / `org_role` / `platform_admin` can be edited
+on users.
 
 Sign-out uses Keycloak RP-initiated logout (`end_session_endpoint`) so the SSO
 session ends — not only the Auth.js cookie.

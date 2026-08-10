@@ -69,12 +69,10 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HTTP_PORT: "8080"
-      # Pin public hostname so token `iss` stays browser-reachable (localhost),
-      # even when the web container talks to Keycloak over the Docker network.
-      KC_HOSTNAME: localhost
-      KC_HOSTNAME_PORT: "8080"
+      # Hostname v2: full URL keeps token `iss` as http://localhost:8080/realms/atlas
+      # for both browser and in-network clients.
+      KC_HOSTNAME: http://localhost:8080
       KC_HOSTNAME_STRICT: "false"
-      KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HEALTH_ENABLED: "true"
     ports:
       - "8080:8080"

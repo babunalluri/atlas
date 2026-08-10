@@ -403,7 +403,8 @@ class Settings(BaseSettings):
         # Keycloak (and compatible realm IdPs) serve JWKS at the OIDC certs path.
         if "/realms/" in issuer:
             return f"{issuer}/protocol/openid-connect/certs"
-        return f"{issuer}/.well-known/jwks.json"
+        # Non-Keycloak OIDC: set AUTH_JWKS_URL explicitly (from discovery jwks_uri).
+        return ""
 
     @property
     def is_development(self) -> bool:

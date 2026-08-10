@@ -1,6 +1,8 @@
 /**
  * Staff Auth.js / Keycloak configuration guards.
  * Development may use committed local defaults; production must fail closed.
+ * `next build` (NEXT_PHASE=phase-production-build) may see placeholder env from
+ * compose/.env.example — allow that only at build time; runtime still rejects it.
  */
 
 export const DEV_AUTH_SECRET = "dev-only-auth-secret-change-me-please";
@@ -39,8 +41,10 @@ export function staffAuthConfigured(): boolean {
   const clientId = process.env.AUTH_KEYCLOAK_ID?.trim() ?? "";
 
   if (isWebDevelopment()) {
-    // Local defaults are allowed; still require that something resolves.
-    return Boolean(secret || DEV_AUTH_SECRET) && Boolean(keycloakSecret || DEV_KEYCLOAK_SECRET);
+    return (
+      Boolean(secret || DEV_AUTH_SECRET) &&
+      Boolean(keycloakSecret || DEV_KEYCLOAK_SECRET)
+    );
   }
 
   return (
@@ -53,23 +57,38 @@ export function staffAuthConfigured(): boolean {
   );
 }
 
-export function resolveAuthSecret(): string {
-  const fromEnv = process.env.AUTH_SECRET?.trim() ?? "";
+function resolveSecretOrPlaceholder(
+  fromEnv: string,
+  options: { missingMessage: string; devFallback: string; label: string },
+): string {
   if (fromEnv) {
-    if (!isWebDevelopment() && isInsecurePlaceholder(fromEnv)) {
+    // Build may load compose/.env.example placeholders under NODE_ENV=production.
+    if (
+      !isWebDevelopment() &&
+      !isProductionBuildPhase() &&
+      isInsecurePlaceholder(fromEnv)
+    ) {
       throw new Error(
-        "AUTH_SECRET must not use a development placeholder in production",
+        `${options.label} must not use a development placeholder in production`,
       );
     }
     return fromEnv;
   }
   if (isWebDevelopment()) {
-    return DEV_AUTH_SECRET;
+    return options.devFallback;
   }
   if (isProductionBuildPhase()) {
     return "build-time-placeholder-not-used-at-runtime";
   }
-  throw new Error("AUTH_SECRET is required outside development");
+  throw new Error(options.missingMessage);
+}
+
+export function resolveAuthSecret(): string {
+  return resolveSecretOrPlaceholder(process.env.AUTH_SECRET?.trim() ?? "", {
+    missingMessage: "AUTH_SECRET is required outside development",
+    devFallback: DEV_AUTH_SECRET,
+    label: "AUTH_SECRET",
+  });
 }
 
 export function resolveKeycloakClientId(): string {
@@ -80,20 +99,14 @@ export function resolveKeycloakClientId(): string {
 }
 
 export function resolveKeycloakSecret(): string {
-  const fromEnv = process.env.AUTH_KEYCLOAK_SECRET?.trim() ?? "";
-  if (fromEnv) {
-    if (!isWebDevelopment() && isInsecurePlaceholder(fromEnv)) {
-      throw new Error(
-        "AUTH_KEYCLOAK_SECRET must not use a development placeholder in production",
-      );
-    }
-    return fromEnv;
-  }
-  if (isWebDevelopment()) return DEV_KEYCLOAK_SECRET;
-  if (isProductionBuildPhase()) {
-    return "build-time-placeholder-not-used-at-runtime";
-  }
-  throw new Error("AUTH_KEYCLOAK_SECRET is required outside development");
+  return resolveSecretOrPlaceholder(
+    process.env.AUTH_KEYCLOAK_SECRET?.trim() ?? "",
+    {
+      missingMessage: "AUTH_KEYCLOAK_SECRET is required outside development",
+      devFallback: DEV_KEYCLOAK_SECRET,
+      label: "AUTH_KEYCLOAK_SECRET",
+    },
+  );
 }
 
 export function resolveKeycloakIssuer(): string {
@@ -103,11 +116,7 @@ export function resolveKeycloakIssuer(): string {
   throw new Error("AUTH_KEYCLOAK_ISSUER is required outside development");
 }
 
-/**
- * Server-side Keycloak base URL (Docker DNS). Defaults to the public issuer.
- * Browser redirects still use {@link resolveKeycloakIssuer}; token/userinfo/jwks
- * and refresh use this internal URL when set (compose split-horizon).
- */
+/** Server-side Keycloak base URL (Docker DNS). Defaults to the public issuer. */
 export function resolveKeycloakInternalIssuer(): string {
   const fromEnv = process.env.AUTH_KEYCLOAK_INTERNAL_ISSUER?.trim() ?? "";
   if (fromEnv) return fromEnv;

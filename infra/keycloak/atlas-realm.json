@@ -7,22 +7,6 @@
   "resetPasswordAllowed": true,
   "editUsernameAllowed": false,
   "sslRequired": "external",
-  "attributes": {
-    "userProfileEnabled": ["true"]
-  },
-  "components": {
-    "org.keycloak.userprofile.UserProfileProvider": [
-      {
-        "providerId": "declarative-user-profile",
-        "subComponents": {},
-        "config": {
-          "kc.user.profile.config": [
-            "{\"attributes\":[],\"groups\":[],\"unmanagedAttributePolicy\":\"ENABLED\"}"
-          ]
-        }
-      }
-    ]
-  },
   "roles": {
     "realm": [
       { "name": "platform_admin", "description": "Atlas platform administrator" },
@@ -34,16 +18,14 @@
       "name": "org_demo_acme",
       "path": "/org_demo_acme",
       "attributes": {
-        "org_id": ["org_demo_acme"],
-        "org_role": ["org:member"]
+        "org_id": ["org_demo_acme"]
       }
     },
     {
       "name": "org_demo_globex",
       "path": "/org_demo_globex",
       "attributes": {
-        "org_id": ["org_demo_globex"],
-        "org_role": ["org:member"]
+        "org_id": ["org_demo_globex"]
       }
     }
   ],

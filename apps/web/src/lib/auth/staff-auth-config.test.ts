@@ -36,4 +36,13 @@ describe("staffAuthConfigured", () => {
     expect(staffAuthConfigured()).toBe(true);
     expect(resolveAuthSecret()).toBe("prod-secret-not-a-placeholder-value");
   });
+
+  it("allows placeholders during next production build phase only", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PHASE", "phase-production-build");
+    vi.stubEnv("AUTH_SECRET", DEV_AUTH_SECRET);
+    vi.stubEnv("AUTH_KEYCLOAK_SECRET", DEV_KEYCLOAK_SECRET);
+    expect(resolveAuthSecret()).toBe(DEV_AUTH_SECRET);
+    expect(resolveKeycloakSecret()).toBe(DEV_KEYCLOAK_SECRET);
+  });
 });

@@ -101,6 +101,29 @@ def _first_str_claim(value: Any) -> str | None:
     return None
 
 
+_ORG_ROLE_RANK: dict[str, int] = {
+    "org:owner": 40,
+    "org:admin": 30,
+    "admin": 30,
+    "org:member": 10,
+    "member": 10,
+}
+
+
+def _best_org_role(value: Any) -> str | None:
+    """Pick the most privileged org_role when Keycloak aggregates multiple values."""
+    candidates: list[str] = []
+    if isinstance(value, str) and value.strip():
+        candidates = [value.strip()]
+    elif isinstance(value, list):
+        candidates = [
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda role: _ORG_ROLE_RANK.get(role.lower(), 0))
+
+
 def _flatten_oidc_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize org claims from Keycloak mappers or nested `o` shapes."""
     org_from_o: str | None = None
@@ -109,12 +132,12 @@ def _flatten_oidc_payload(payload: dict[str, Any]) -> dict[str, Any]:
         org_from_o = _first_str_claim(
             payload["o"].get("id") or payload["o"].get("org_id")
         )
-        org_role_from_o = _first_str_claim(
+        org_role_from_o = _best_org_role(
             payload["o"].get("rol") or payload["o"].get("role")
         )
     next_payload = dict(payload)
     org_id = _first_str_claim(payload.get("org_id")) or org_from_o
-    org_role = _first_str_claim(payload.get("org_role")) or org_role_from_o
+    org_role = _best_org_role(payload.get("org_role")) or org_role_from_o
     if org_id:
         next_payload["org_id"] = org_id
     if org_role:
