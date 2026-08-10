@@ -1,6 +1,8 @@
 import base64
+import asyncio
 import os
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -25,19 +27,38 @@ class CredentialCipher(ABC):
 
 
 class LocalFernetCipher(CredentialCipher):
-    """Development cipher. Production should implement this interface with AWS KMS."""
+    """Local Fernet cipher with a small keyring for rotation.
 
-    def __init__(self, key: str, key_version: str = "local-v1") -> None:
+    Encrypt always uses the current key_version. Decrypt selects the Fernet
+    instance matching envelope.key_version (current or previous).
+    """
+
+    def __init__(
+        self,
+        key: str,
+        key_version: str = "local-v1",
+        *,
+        previous_keys: dict[str, str] | None = None,
+    ) -> None:
         if not key:
             raise CredentialError("BACKEND_ENCRYPTION_KEY must be configured")
+        self.key_version = key_version
+        self._fernets: dict[str, Fernet] = {
+            key_version: self._fernet_from_key(key),
+        }
+        for version, prior in (previous_keys or {}).items():
+            if version and prior and version not in self._fernets:
+                self._fernets[version] = self._fernet_from_key(prior)
+
+    @staticmethod
+    def _fernet_from_key(key: str) -> Fernet:
         try:
             raw = key.encode()
             if len(raw) != 44:
                 raw = base64.urlsafe_b64encode(key.encode().ljust(32, b"\0")[:32])
-            self._fernet = Fernet(raw)
+            return Fernet(raw)
         except ValueError as exc:
             raise CredentialError("Invalid encryption key") from exc
-        self.key_version = key_version
 
     @classmethod
     def generate_key(cls) -> str:
@@ -47,20 +68,27 @@ class LocalFernetCipher(CredentialCipher):
         if not plaintext:
             raise CredentialError("Credential value cannot be empty")
         return EncryptedEnvelope(
-            self._fernet.encrypt(plaintext.encode()).decode(), self.key_version
+            self._fernets[self.key_version].encrypt(plaintext.encode()).decode(),
+            self.key_version,
         )
 
     def decrypt(self, envelope: EncryptedEnvelope) -> str:
-        if envelope.key_version != self.key_version:
-            raise CredentialError("Unsupported key version")
+        fernet = self._fernets.get(envelope.key_version)
+        if fernet is None:
+            raise CredentialError(
+                f"Unsupported key version {envelope.key_version!r}; "
+                "add it to ENCRYPTION_PREVIOUS_KEYS to rotate safely"
+            )
         try:
-            return self._fernet.decrypt(envelope.ciphertext.encode()).decode()
+            return fernet.decrypt(envelope.ciphertext.encode()).decode()
         except InvalidToken as exc:
             raise CredentialError("Credential authentication failed") from exc
 
 
 class AwsKmsCipher(CredentialCipher):
     """Production envelope provider backed by an AWS KMS customer-managed key."""
+
+    _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kms")
 
     def __init__(self, key_id: str, region_name: str, key_version: str = "kms-v1") -> None:
         if not key_id:
@@ -83,8 +111,7 @@ class AwsKmsCipher(CredentialCipher):
         return EncryptedEnvelope(ciphertext, self.key_version)
 
     def decrypt(self, envelope: EncryptedEnvelope) -> str:
-        if envelope.key_version != self.key_version:
-            raise CredentialError("Unsupported key version")
+        # KMS ciphertext is self-describing; version tag is informational.
         try:
             response = self._client.decrypt(
                 CiphertextBlob=base64.b64decode(envelope.ciphertext),
@@ -93,6 +120,12 @@ class AwsKmsCipher(CredentialCipher):
             return response["Plaintext"].decode()
         except Exception as exc:
             raise CredentialError("KMS credential decryption failed") from exc
+
+    async def aencrypt(self, plaintext: str) -> EncryptedEnvelope:
+        return await asyncio.to_thread(self.encrypt, plaintext)
+
+    async def adecrypt(self, envelope: EncryptedEnvelope) -> str:
+        return await asyncio.to_thread(self.decrypt, envelope)
 
 
 def ephemeral_cipher() -> LocalFernetCipher:

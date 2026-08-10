@@ -55,7 +55,8 @@ class SafeRestClient:
         self.max_response_bytes = max_response_bytes
         self.timeout = httpx.Timeout(timeout_seconds)
 
-    async def validate_url(self, url: str) -> None:
+    async def validate_url(self, url: str) -> set[str]:
+        """Validate scheme/host allowlist and return resolved global IPs."""
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme != "https" or not host or host not in self.allowed_hosts:
@@ -64,10 +65,13 @@ class SafeRestClient:
             addresses = await _resolve(host, parsed.port or 443)
         except OSError as exc:
             raise UnsafeOutboundRequest("Host could not be resolved") from exc
+        if not addresses:
+            raise UnsafeOutboundRequest("Host could not be resolved")
         for address in addresses:
             ip = ipaddress.ip_address(address)
             if not ip.is_global:
                 raise UnsafeOutboundRequest("Private or non-global addresses are forbidden")
+        return addresses
 
     async def request(
         self,
@@ -79,9 +83,20 @@ class SafeRestClient:
         allowed_methods: Sequence[str] = ("GET",),
     ) -> dict[str, Any]:
         method = method.upper()
-        if method not in allowed_methods:
+        if method not in {m.upper() for m in allowed_methods}:
             raise UnsafeOutboundRequest("HTTP method is not permitted")
-        await self.validate_url(url)
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        addresses = await self.validate_url(url)
+        # Pin the TCP connection to a pre-validated IP so a later DNS rebind
+        # cannot steer the request at a private address (TOCTOU).
+        pinned_ip = sorted(addresses)[0]
+        port = parsed.port or 443
+        if ":" in pinned_ip:
+            netloc = f"[{pinned_ip}]:{port}"
+        else:
+            netloc = f"{pinned_ip}:{port}"
+        pinned_url = parsed._replace(netloc=netloc).geturl()
         body = json.dumps(json_body).encode() if json_body is not None else b""
         if len(body) > 100_000:
             raise UnsafeOutboundRequest("Request body is too large")
@@ -90,9 +105,14 @@ class SafeRestClient:
             for key, value in (headers or {}).items()
             if key.lower() not in {"host", "content-length", "connection"}
         }
+        safe_headers["Host"] = host if parsed.port in (None, 443) else f"{host}:{parsed.port}"
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
             async with client.stream(
-                method, url, headers=safe_headers, content=body or None
+                method,
+                pinned_url,
+                headers=safe_headers,
+                content=body or None,
+                extensions={"sni_hostname": host},
             ) as response:
                 response.raise_for_status()
                 content = bytearray()

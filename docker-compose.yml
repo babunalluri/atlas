@@ -9,11 +9,57 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/docker-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent_saas} -d ${POSTGRES_DB:-agent_saas}"]
       interval: 5s
       timeout: 5s
       retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass atlas-redis-dev
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "atlas-redis-dev", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "minio", "--version"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 3s
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      i=0;
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do
+        i=$$((i+1));
+        if [ $$i -gt 30 ]; then echo 'minio not ready' >&2; exit 1; fi;
+        sleep 1;
+      done;
+      mc mb --ignore-existing local/atlas-documents
+      "
 
   sandbox-python:
     build:
@@ -25,13 +71,20 @@ services:
     build:
       context: ./services/sandbox-manager
     environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:-atlas-redis-dev}@redis:6379/0
+      SANDBOX_INTERNAL_TOKEN: ${SANDBOX_INTERNAL_TOKEN:-dev-sandbox-internal-token-change-me}
+      SANDBOX_ALLOWED_PROXY_PREFIXES: http://backend:7777/
       DOCKER_BIN: docker
       SANDBOX_PYTHON_IMAGE: atlas-sandbox-python:local
       SANDBOX_MAX_CONCURRENT: "8"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "8090:8090"
+    # Internal-only — do not publish 8090 to the host.
+    expose:
+      - "8090"
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -52,16 +105,34 @@ services:
       - path: .env
         required: false
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent_saas}:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
-      AGNO_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-agent_saas}:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
+      # Runtime uses non-superuser app role so FORCE RLS applies.
+      DATABASE_URL: postgresql+asyncpg://agent_saas_app:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
+      AGNO_DATABASE_URL: postgresql+psycopg://agent_saas_app:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent_saas}:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_PASSWORD:-agent_saas_dev}
       AUTH_DISABLED: "false"
       CLERK_ISSUER: https://emerging-unicorn-41.clerk.accounts.dev
       CLERK_JWKS_URL: https://emerging-unicorn-41.clerk.accounts.dev/.well-known/jwks.json
       CLERK_AUDIENCE: agent-saas
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-dev-only-change-me-please-32b}
       DOCUMENT_UPLOAD_DIR: /data/uploads
+      # Force MinIO for compose; empty DOCUMENT_BUCKET= in host .env would otherwise win.
+      DOCUMENT_BUCKET: atlas-documents
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      REDIS_URL: redis://:${REDIS_PASSWORD:-atlas-redis-dev}@redis:6379/0
+      SANDBOX_INTERNAL_TOKEN: ${SANDBOX_INTERNAL_TOKEN:-dev-sandbox-internal-token-change-me}
+      DB_POOL_SIZE: "5"
+      DB_MAX_OVERFLOW: "10"
       CORS_ORIGINS: http://localhost:3000
       ENVIRONMENT: development
+      EMAIL_INBOUND_DOMAIN: ${EMAIL_INBOUND_DOMAIN:-}
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
       SANDBOX_MANAGER_URL: http://sandbox-manager:8090
       SANDBOX_CALLBACK_BASE_URL: http://backend:7777
       SANDBOX_PYTHON_IMAGE: atlas-sandbox-python:local
@@ -73,10 +144,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       sandbox-manager:
         condition: service_healthy
     command: >
-      sh -c "alembic upgrade head &&
+      sh -c "python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
+      alembic upgrade head &&
+      python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
       uvicorn app.main:app --host 0.0.0.0 --port 7777 --reload"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7777/health')"]
@@ -126,5 +203,6 @@ services:
 volumes:
   postgres_data:
   document_uploads:
+  minio_data:
   web_node_modules:
   web_next:

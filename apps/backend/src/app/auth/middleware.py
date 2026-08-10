@@ -10,8 +10,9 @@ from app.core.settings import get_settings
 
 
 def _service_account_scope(method: str, path: str) -> str | None:
+    # Agents are not top-level external targets — only teams and workflows.
     if path.startswith("/v1/agents/") and path.endswith("/runs"):
-        return "agents:run"
+        return None
     if path.startswith("/v1/teams/") and path.endswith("/runs"):
         return "teams:run"
     if path.startswith("/v1/workflows/") and path.endswith("/runs"):
@@ -60,6 +61,8 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/docs")
             or path.startswith("/public/tenants/")
             or path.startswith("/public/t/")
+            or path.startswith("/public/webhooks/")
+            or path.startswith("/public/email/")
             or path.startswith("/admin/onboarding")
             or path.startswith("/internal/sandbox/")
         ):
@@ -70,6 +73,7 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
             context = await require_tenant(
                 request,
                 authorization=request.headers.get("authorization"),
+                x_platform_tenant_id=request.headers.get("x-platform-tenant-id"),
                 settings=settings,
             )
             request.state.tenant = context
@@ -87,19 +91,49 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
             private_agentos_prefixes = (
                 "/sessions",
                 "/memories",
+                "/learnings",
                 "/approvals",
                 "/traces",
+                "/schedules",
                 "/agents/tenant-agent",
                 "/teams/tenant-team",
+                "/workflows/tenant-workflow",
             )
             if path.startswith(private_agentos_prefixes):
                 return JSONResponse(status_code=404, content={"detail": "Not found"})
+            # Builder / control-plane routes are for tenant admins only.
+            # End users run assigned workflows via /api/workflows/available and
+            # /t/{slug}/chat — not the admin catalogs.
             admin_only_prefixes = (
                 "/metrics",
                 "/evals",
                 "/knowledge",
                 "/database",
                 "/service-accounts",
+                "/admin/agents",
+                "/admin/teams",
+                "/admin/workflows",
+                "/admin/tools",
+                "/admin/users",
+                "/admin/notifications",
+                "/admin/vault",
+                "/admin/customers",
+                "/admin/credentials",
+                "/admin/channels",
+                "/admin/knowledge",
+                "/admin/integrations",
+                "/admin/mcp",
+                "/admin/public-api",
+                "/admin/evals",
+                "/admin/metrics",
+                "/admin/schedules",
+                "/admin/approvals",
+                "/admin/traces",
+                "/admin/service-accounts",
+                "/admin/platform",
+                "/api/admin/",
+                "/api/approvals",
+                "/api/knowledge",
             )
             if path.startswith(admin_only_prefixes) and not context.can_administer():
                 clear_tenant_context(request)

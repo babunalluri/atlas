@@ -1,5 +1,6 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 
 const isPublicRoute = createRouteMatcher([
   "/",
@@ -13,25 +14,35 @@ const clerkConfigured =
   !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
   !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace_me");
 
-// When true, admin pages are reachable without a Clerk browser session.
-// Keep this false in any shared/staging/production environment.
-const devAuthBypass = process.env.NEXT_PUBLIC_DEV_AUTH === "true";
+// Local-only bypass. Ignored when NODE_ENV is not development.
+const allowDevAuthBypass =
+  process.env.NEXT_PUBLIC_DEV_AUTH === "true" &&
+  (process.env.NODE_ENV ?? "development") === "development";
 
-export default clerkConfigured && !devAuthBypass
+function denyMisconfiguredAuth() {
+  return new NextResponse(
+    "Authentication is not configured. Set a real NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.",
+    { status: 503 },
+  );
+}
+
+export default clerkConfigured
   ? clerkMiddleware(async (auth, request) => {
-      if (isPublicRoute(request)) {
+      if (isPublicRoute(request) || allowDevAuthBypass) {
         return NextResponse.next();
       }
       const session = await auth();
       if (!session.userId) {
-        // Prefer an explicit sign-in redirect over Clerk's protect rewrite,
-        // which can surface as a blank Next.js 404 in local browsers.
         return session.redirectToSignIn({ returnBackUrl: request.url });
       }
       return NextResponse.next();
     })
-  : function passthrough() {
-      return NextResponse.next();
+  : function failClosed(request: NextRequest) {
+      // Without Clerk, only public surfaces may load — never /admin.
+      if (isPublicRoute(request) || allowDevAuthBypass) {
+        return NextResponse.next();
+      }
+      return denyMisconfiguredAuth();
     };
 
 export const config = {

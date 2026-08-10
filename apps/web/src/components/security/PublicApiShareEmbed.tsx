@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/Button";
 import { Label, Select } from "@/components/ui/Field";
 import {
   getWorkspaceInfo,
-  listAgentCatalog,
   listTeamCatalog,
   listWorkflowCatalog,
 } from "@/lib/api/admin";
@@ -20,14 +19,13 @@ import { useAgentOsToken } from "@/lib/auth/token";
 type CatalogItem = { id: string; name: string; slug: string };
 
 const KIND_OPTIONS: { value: EmbedKind; label: string }[] = [
-  { value: "agent", label: "Agent" },
   { value: "team", label: "Team" },
   { value: "workflow", label: "Workflow" },
 ];
 
 export function PublicApiShareEmbed() {
   const { getAccessToken } = useAgentOsToken();
-  const [kind, setKind] = useState<EmbedKind>("agent");
+  const [kind, setKind] = useState<EmbedKind>("team");
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [tenantSlug, setTenantSlug] = useState<string | null>(null);
@@ -46,14 +44,12 @@ export function PublicApiShareEmbed() {
         const token = await getAccessToken();
         const [workspace, catalog] = await Promise.all([
           getWorkspaceInfo(token),
-          kind === "team"
-            ? listTeamCatalog(token, { status: "published", pageSize: 100 })
-            : kind === "workflow"
-              ? listWorkflowCatalog(token, {
-                  status: "published",
-                  pageSize: 100,
-                })
-              : listAgentCatalog(token, { status: "published", pageSize: 100 }),
+          kind === "workflow"
+            ? listWorkflowCatalog(token, {
+                status: "published",
+                pageSize: 100,
+              })
+            : listTeamCatalog(token, { status: "published", pageSize: 100 }),
         ]);
         if (cancelled) return;
         setTenantSlug(workspace.slug);
@@ -104,12 +100,11 @@ export function PublicApiShareEmbed() {
     <section className="rounded-xl border border-line bg-raised/40 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold tracking-tight">Share / Embed</h2>
+          <h2 className="text-sm font-semibold tracking-tight">Share workspace link</h2>
           <p className="mt-1 max-w-2xl text-sm text-slate-muted">
-            Customers can chat without joining your Clerk org. Pick a published
-            agent, team, or workflow, then drop the hosted link, iframe, or
-            script on your site. The widget only talks to public chat
-            endpoints — no admin credentials are embedded.
+            Share a hosted chat URL with organization members. Recipients must
+            sign in with your Clerk org — anonymous public chat and email
+            channels are disabled in this deployment.
           </p>
         </div>
         {snippets ? (
@@ -140,9 +135,7 @@ export function PublicApiShareEmbed() {
           </Select>
         </div>
         <div>
-          <Label htmlFor="share-resource">
-            Published {kind}
-          </Label>
+          <Label htmlFor="share-resource">Published {kind}</Label>
           <Select
             id="share-resource"
             value={selectedId}
@@ -166,8 +159,8 @@ export function PublicApiShareEmbed() {
 
       {!loading && items.length === 0 ? (
         <p className="mt-3 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-sm text-amber">
-          Publish a {kind} before sharing. Drafts are never available on the
-          public chat or embed URLs.
+          Publish a {kind} before sharing. Drafts are never available to org
+          members in the workspace portal.
         </p>
       ) : null}
 
@@ -178,7 +171,7 @@ export function PublicApiShareEmbed() {
           <div>
             <div className="mb-1 flex items-center justify-between gap-2">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-muted">
-                Hosted link
+                Hosted link (sign-in required)
               </p>
               <Button
                 variant="secondary"
@@ -195,7 +188,7 @@ export function PublicApiShareEmbed() {
           <div>
             <div className="mb-1 flex items-center justify-between gap-2">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-muted">
-                Iframe
+                Iframe (sign-in required)
               </p>
               <Button
                 variant="secondary"
@@ -212,7 +205,7 @@ export function PublicApiShareEmbed() {
           <div>
             <div className="mb-1 flex items-center justify-between gap-2">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-muted">
-                Script snippet
+                Script snippet (sign-in required)
               </p>
               <Button
                 variant="secondary"

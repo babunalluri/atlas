@@ -195,6 +195,7 @@ export function streamConfiguredAgent(
   const body = new FormData();
   body.set("message", message);
   body.set("stream", "true");
+  body.set("background", "true");
   body.set("agent_config_id", agentConfigId);
   body.set("session_id", sessionId ?? crypto.randomUUID());
   body.set("preview", String(preview));
@@ -216,30 +217,6 @@ export type StreamPublicTargetOptions = Omit<
   guestId?: string;
 };
 
-/** Anonymous published-agent run via /public/t/... (no Clerk token). */
-export function streamPublicAgent(
-  options: StreamPublicTargetOptions & { agentSlug: string },
-): Promise<{ lastEventId?: string }> {
-  const {
-    tenantSlug,
-    agentSlug,
-    message,
-    sessionId,
-    guestId = getOrCreateGuestId(),
-    ...rest
-  } = options;
-  const body = new FormData();
-  body.set("message", message);
-  body.set("stream", "true");
-  body.set("session_id", sessionId ?? crypto.randomUUID());
-  return streamPublicRun({
-    ...rest,
-    guestId,
-    url: agentOsUrl(`/public/t/${tenantSlug}/agents/${agentSlug}/runs`),
-    body,
-  });
-}
-
 /** Anonymous published-team run via /public/t/... */
 export function streamPublicTeam(
   options: StreamPublicTargetOptions & { teamSlug: string },
@@ -255,6 +232,7 @@ export function streamPublicTeam(
   const body = new FormData();
   body.set("message", message);
   body.set("stream", "true");
+  body.set("background", "true");
   body.set("session_id", sessionId ?? crypto.randomUUID());
   return streamPublicRun({
     ...rest,
@@ -279,6 +257,7 @@ export function streamPublicWorkflow(
   const body = new FormData();
   body.set("message", message);
   body.set("stream", "true");
+  body.set("background", "true");
   body.set("session_id", sessionId ?? crypto.randomUUID());
   return streamPublicRun({
     ...rest,
@@ -286,6 +265,137 @@ export function streamPublicWorkflow(
     url: agentOsUrl(`/public/t/${tenantSlug}/workflows/${workflowSlug}/runs`),
     body,
   });
+}
+
+export type IdentityStatus = {
+  verified: boolean;
+  endUserId: string | null;
+  email: string | null;
+  displayName: string | null;
+  metadata: Record<string, unknown> | null;
+};
+
+async function publicJsonFetch<T>(
+  path: string,
+  options: {
+    method?: string;
+    body?: unknown;
+    guestId: string;
+    signal?: AbortSignal;
+  },
+): Promise<T> {
+  const { method = "GET", body, guestId, signal } = options;
+  const response = await fetch(agentOsUrl(path), {
+    method,
+    signal,
+    headers: {
+      Accept: "application/json",
+      "X-Guest-Id": guestId,
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    const detail = summarizeApiErrorBody(text, response.statusText);
+    throw new ApiError(
+      `API ${method} ${path} failed (${response.status}): ${detail}`,
+      response.status,
+    );
+  }
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  return (await response.json()) as T;
+}
+
+export async function getPublicIdentityStatus(options: {
+  tenantSlug: string;
+  sessionId: string;
+  guestId?: string;
+  signal?: AbortSignal;
+}): Promise<IdentityStatus> {
+  const guestId = options.guestId ?? getOrCreateGuestId();
+  const params = new URLSearchParams({ session_id: options.sessionId });
+  const row = await publicJsonFetch<{
+    verified: boolean;
+    end_user_id?: string | null;
+    email?: string | null;
+    display_name?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }>(`/public/t/${options.tenantSlug}/identity/status?${params}`, {
+    guestId,
+    signal: options.signal,
+  });
+  return {
+    verified: row.verified,
+    endUserId: row.end_user_id ?? null,
+    email: row.email ?? null,
+    displayName: row.display_name ?? null,
+    metadata: row.metadata ?? null,
+  };
+}
+
+export async function requestPublicIdentityChallenge(options: {
+  tenantSlug: string;
+  sessionId: string;
+  email: string;
+  guestId?: string;
+  signal?: AbortSignal;
+}): Promise<{ email: string; expiresAt: string; debugCode: string | null }> {
+  const guestId = options.guestId ?? getOrCreateGuestId();
+  const row = await publicJsonFetch<{
+    email: string;
+    expires_at: string;
+    debug_code?: string | null;
+  }>(`/public/t/${options.tenantSlug}/identity/challenge`, {
+    method: "POST",
+    guestId,
+    signal: options.signal,
+    body: {
+      email: options.email,
+      session_id: options.sessionId,
+    },
+  });
+  return {
+    email: row.email,
+    expiresAt: row.expires_at,
+    debugCode: row.debug_code ?? null,
+  };
+}
+
+export async function verifyPublicIdentity(options: {
+  tenantSlug: string;
+  sessionId: string;
+  email: string;
+  code: string;
+  guestId?: string;
+  signal?: AbortSignal;
+}): Promise<IdentityStatus> {
+  const guestId = options.guestId ?? getOrCreateGuestId();
+  const row = await publicJsonFetch<{
+    verified: boolean;
+    end_user_id: string;
+    email: string;
+    display_name: string;
+    metadata: Record<string, unknown>;
+  }>(`/public/t/${options.tenantSlug}/identity/verify`, {
+    method: "POST",
+    guestId,
+    signal: options.signal,
+    body: {
+      email: options.email,
+      code: options.code,
+      session_id: options.sessionId,
+    },
+  });
+  return {
+    verified: row.verified,
+    endUserId: row.end_user_id,
+    email: row.email,
+    displayName: row.display_name,
+    metadata: row.metadata,
+  };
 }
 
 export type StreamTeamOptions = Omit<StreamRunOptions, "url" | "body"> & {
@@ -309,6 +419,7 @@ export function streamConfiguredTeam(
   const body = new FormData();
   body.set("message", message);
   body.set("stream", "true");
+  body.set("background", "true");
   body.set("team_config_id", teamConfigId);
   body.set("session_id", sessionId ?? crypto.randomUUID());
   body.set("preview", String(preview));
@@ -340,12 +451,153 @@ export function streamConfiguredWorkflow(
   const body = new FormData();
   body.set("message", message);
   body.set("stream", "true");
+  body.set("background", "true");
   body.set("workflow_config_id", workflowConfigId);
   body.set("session_id", sessionId ?? crypto.randomUUID());
   body.set("preview", String(preview));
   return streamAgentRun({
     ...rest,
     url: agentOsUrl("/v1/workflows/tenant-workflow/runs"),
+    body,
+  });
+}
+
+/** Cancel an in-flight Atlas /v1 run. */
+export async function cancelConfiguredRun(options: {
+  accessToken: string;
+  kind: "agent" | "team" | "workflow";
+  runId: string;
+  sessionId: string;
+  configId: string;
+}): Promise<void> {
+  const { accessToken, kind, runId, sessionId, configId } = options;
+  const path =
+    kind === "agent"
+      ? `/v1/agents/tenant-agent/runs/${runId}/cancel`
+      : kind === "team"
+        ? `/v1/teams/tenant-team/runs/${runId}/cancel`
+        : `/v1/workflows/tenant-workflow/runs/${runId}/cancel`;
+  const body = new FormData();
+  body.set("session_id", sessionId);
+  if (kind === "agent") body.set("agent_config_id", configId);
+  if (kind === "team") body.set("team_config_id", configId);
+  if (kind === "workflow") body.set("workflow_config_id", configId);
+  const response = await fetch(agentOsUrl(path), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body,
+  });
+  if (!response.ok) {
+    throw new Error(`Cancel failed (${response.status})`);
+  }
+}
+
+/** Cancel an in-flight public guest run. */
+export async function cancelPublicRun(options: {
+  tenantSlug: string;
+  kind: "team" | "workflow";
+  slug: string;
+  runId: string;
+  sessionId: string;
+  guestId?: string;
+}): Promise<void> {
+  const {
+    tenantSlug,
+    kind,
+    slug,
+    runId,
+    sessionId,
+    guestId = getOrCreateGuestId(),
+  } = options;
+  const path =
+    kind === "team"
+      ? `/public/t/${tenantSlug}/teams/${slug}/runs/${runId}/cancel`
+      : `/public/t/${tenantSlug}/workflows/${slug}/runs/${runId}/cancel`;
+  const body = new FormData();
+  body.set("session_id", sessionId);
+  const response = await fetch(agentOsUrl(path), {
+    method: "POST",
+    headers: {
+      "X-Guest-Id": guestId,
+    },
+    body,
+  });
+  if (!response.ok) {
+    throw new Error(`Cancel failed (${response.status})`);
+  }
+}
+
+/** Resume a background /v1 run after disconnect. */
+export function resumeConfiguredRun(
+  options: Omit<StreamRunOptions, "url" | "body"> & {
+    kind: "agent" | "team" | "workflow";
+    runId: string;
+    sessionId: string;
+    configId: string;
+    lastEventId?: string;
+  },
+): Promise<{ lastEventId?: string }> {
+  const { kind, runId, sessionId, configId, lastEventId, ...rest } = options;
+  const path =
+    kind === "agent"
+      ? `/v1/agents/tenant-agent/runs/${runId}/resume`
+      : kind === "team"
+        ? `/v1/teams/tenant-team/runs/${runId}/resume`
+        : `/v1/workflows/tenant-workflow/runs/${runId}/resume`;
+  const body = new FormData();
+  body.set("session_id", sessionId);
+  if (kind === "agent") body.set("agent_config_id", configId);
+  if (kind === "team") body.set("team_config_id", configId);
+  if (kind === "workflow") body.set("workflow_config_id", configId);
+  if (lastEventId != null && lastEventId !== "") {
+    body.set("last_event_index", lastEventId);
+  }
+  return streamAgentRun({
+    ...rest,
+    lastEventId,
+    url: agentOsUrl(path),
+    body,
+  });
+}
+
+/** Resume a background public guest run after disconnect. */
+export function resumePublicRun(
+  options: Omit<StreamRunOptions, "url" | "body" | "accessToken"> & {
+    tenantSlug: string;
+    kind: "team" | "workflow";
+    slug: string;
+    runId: string;
+    sessionId: string;
+    guestId?: string;
+    lastEventId?: string;
+  },
+): Promise<{ lastEventId?: string }> {
+  const {
+    tenantSlug,
+    kind,
+    slug,
+    runId,
+    sessionId,
+    guestId = getOrCreateGuestId(),
+    lastEventId,
+    ...rest
+  } = options;
+  const path =
+    kind === "team"
+      ? `/public/t/${tenantSlug}/teams/${slug}/runs/${runId}/resume`
+      : `/public/t/${tenantSlug}/workflows/${slug}/runs/${runId}/resume`;
+  const body = new FormData();
+  body.set("session_id", sessionId);
+  if (lastEventId != null && lastEventId !== "") {
+    body.set("last_event_index", lastEventId);
+  }
+  return streamPublicRun({
+    ...rest,
+    guestId,
+    lastEventId,
+    url: agentOsUrl(path),
     body,
   });
 }

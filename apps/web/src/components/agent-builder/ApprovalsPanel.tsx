@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type CSSProperties } from "react";
 
 import { Badge } from "@/components/ui/Badge";
@@ -47,14 +48,14 @@ export function ApprovalsPanel({
     <div className="space-y-6">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-teal">
-          Governance
+          Monitor
         </p>
         <h1 className="font-display text-4xl font-semibold tracking-tight">
           Approvals
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-slate-muted">
-          Mutating tools pause until a tenant or platform admin resolves them.
-          End users can initiate but cannot approve.
+          Mutating tools pause until a tenant or platform admin resolves them
+          here. End users can initiate but cannot approve.
         </p>
       </header>
       {error ? <p className="text-sm text-rose">{error}</p> : null}
@@ -77,85 +78,101 @@ export function ApprovalsPanel({
         </div>
       </div>
 
-      <ul className="space-y-3">
-        {items.map((item) => (
-          <li
-            key={item.id}
-            className="surface-panel rounded-xl p-4"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="font-display text-lg font-semibold">
-                    {item.summary}
-                  </h2>
-                  <Badge
-                    dot
-                    live={item.status === "pending"}
-                    tone={
-                      item.status === "pending"
-                        ? "warning"
-                        : item.status === "approved"
-                          ? "success"
-                          : item.status === "rejected"
-                            ? "danger"
-                            : "neutral"
-                    }
-                  >
-                    {item.status}
-                  </Badge>
+      {items.length === 0 ? (
+        <div className="surface-panel rounded-xl px-4 py-12 text-center">
+          <p className="text-sm text-slate-muted">
+            No pending approvals. When a mutating tool pauses a run, it shows up
+            here.
+          </p>
+          <p className="mt-2 text-sm text-slate-muted">
+            Paused sessions also appear under{" "}
+            <Link href="/admin/traces" className="font-medium text-teal hover:underline">
+              Traces
+            </Link>{" "}
+            (filter status: Paused).
+          </p>
+        </div>
+      ) : (
+        <ul className="space-y-3">
+          {items.map((item) => (
+            <li
+              key={item.id}
+              className="surface-panel rounded-xl p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="font-display text-lg font-semibold">
+                      {item.summary}
+                    </h2>
+                    <Badge
+                      dot
+                      live={item.status === "pending"}
+                      tone={
+                        item.status === "pending"
+                          ? "warning"
+                          : item.status === "approved"
+                            ? "success"
+                            : item.status === "rejected"
+                              ? "danger"
+                              : "neutral"
+                      }
+                    >
+                      {item.status}
+                    </Badge>
+                  </div>
+                  <p className="mono-cell mt-1 text-slate-muted">
+                    {item.agentName} · {item.toolLabel} · {formatRelative(item.createdAt)}
+                  </p>
                 </div>
-                <p className="mono-cell mt-1 text-slate-muted">
-                  {item.agentName} · {item.toolLabel} · {formatRelative(item.createdAt)}
-                </p>
+                {item.status === "pending" ? (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="accent"
+                      disabled={busyId === item.id}
+                      onClick={() => void decide(item.id, "approved")}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      variant="danger"
+                      disabled={
+                        busyId === item.id || !(reasons[item.id] ?? "").trim()
+                      }
+                      onClick={() => void decide(item.id, "rejected")}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                ) : null}
               </div>
-              {item.status === "pending" ? (
-                <div className="flex gap-2">
-                  <Button
-                    variant="accent"
-                    disabled={busyId === item.id}
-                    onClick={() => void decide(item.id, "approved")}
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    variant="danger"
-                    disabled={
-                      busyId === item.id || !(reasons[item.id] ?? "").trim()
-                    }
-                    onClick={() => void decide(item.id, "rejected")}
-                  >
-                    Reject
-                  </Button>
-                </div>
+              <pre className="mt-3 overflow-x-auto rounded-lg border border-line/60 bg-[#071018] px-4 py-3 font-mono text-xs leading-relaxed text-[#d7e0e8]">
+                {JSON.stringify(item.argumentsPreview, null, 2)}
+              </pre>
+              {item.continuationError ? (
+                <p className="mt-2 text-sm text-rose">
+                  {item.continuationError}
+                </p>
               ) : null}
-            </div>
-            <pre className="mt-3 overflow-x-auto rounded-lg border border-line/60 bg-[#071018] px-4 py-3 font-mono text-xs leading-relaxed text-[#d7e0e8]">
-              {JSON.stringify(item.argumentsPreview, null, 2)}
-            </pre>
-            {item.continuationError ? (
-              <p className="mt-2 text-sm text-rose">
-                {item.continuationError}
-              </p>
-            ) : null}
-            {item.status === "pending" ? (
-              <textarea
-                aria-label={`Decision reason for ${item.summary}`}
-                value={reasons[item.id] ?? ""}
-                onChange={(event) =>
-                  setReasons((current) => ({
-                    ...current,
-                    [item.id]: event.target.value,
-                  }))
-                }
-                maxLength={1000}
-                placeholder="Decision reason (recommended; required for clear rejection audits)"
-                className="mt-3 min-h-20 w-full rounded-lg border border-line bg-raised px-3 py-2 text-sm text-ink outline-none transition placeholder:text-slate-muted focus:border-teal focus:ring-2 focus:ring-teal/20"
-              />
-            ) : null}
-          </li>
-        ))}
-      </ul>
+              {item.status === "pending" ? (
+                <textarea
+                  aria-label={`Decision reason for ${item.summary}`}
+                  value={reasons[item.id] ?? ""}
+                  onChange={(event) =>
+                    setReasons((current) => ({
+                      ...current,
+                      [item.id]: event.target.value,
+                    }))
+                  }
+                  maxLength={1000}
+                  placeholder="Decision reason (recommended; required for clear rejection audits)"
+                  className="mt-3 min-h-20 w-full rounded-lg border border-line bg-raised px-3 py-2 text-sm text-ink outline-none transition placeholder:text-slate-muted focus:border-teal focus:ring-2 focus:ring-teal/20"
+                />
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

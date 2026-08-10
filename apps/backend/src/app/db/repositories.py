@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Select, delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -16,7 +17,10 @@ from app.db.models import (
     ApprovalBinding,
     ApprovalStatus,
     AuditEvent,
+    ChannelBinding,
     ConversationSession,
+    EndUser,
+    EndUserSessionBind,
     KnowledgeBase,
     KnowledgeChunk,
     KnowledgeSource,
@@ -24,6 +28,7 @@ from app.db.models import (
     PlatformPythonPackage,
     Role,
     ServiceAccount,
+    TeamAssignment,
     TeamConfig,
     TeamMember,
     TeamToolBinding,
@@ -32,6 +37,9 @@ from app.db.models import (
     TenantCredential,
     ToolDefinition,
     ToolDefinitionVersion,
+    UserVaultEntry,
+    UserNotification,
+    VerificationChallenge,
     WorkflowAssignment,
     WorkflowConfig,
     WorkflowStep,
@@ -39,6 +47,18 @@ from app.db.models import (
 )
 from app.tenancy.context import TenantContext
 from app.tenancy.ids import new_id, validate_slug
+
+
+def _validate_cel_condition_expression(expression: str) -> None:
+    """Reject invalid CEL when the Agno validator is available."""
+    try:
+        from agno.workflow.cel import CEL_AVAILABLE, validate_cel_expression
+    except ImportError:
+        return
+    if not CEL_AVAILABLE:
+        return
+    if not validate_cel_expression(expression):
+        raise ValueError("Invalid CEL condition expression")
 
 
 class TenantRepository:
@@ -193,13 +213,44 @@ class AgentRepository(TenantRepository):
             statement = statement.where(AgentVersion.status == AgentStatus.published)
         return await self.session.scalar(self.scoped(statement, AgentVersion))
 
+    async def _archive_drafts(
+        self, config_id: uuid.UUID, *, except_version_id: uuid.UUID | None = None
+    ) -> None:
+        """Supersede leftover drafts so editors never reopen an older draft than live."""
+        statement = (
+            update(AgentVersion)
+            .where(
+                AgentVersion.agent_config_id == config_id,
+                AgentVersion.tenant_id == self.context.tenant_id,
+                AgentVersion.status == AgentStatus.draft,
+            )
+            .values(status=AgentStatus.archived)
+        )
+        if except_version_id is not None:
+            statement = statement.where(AgentVersion.id != except_version_id)
+        await self.session.execute(statement)
+
     async def get_latest_draft(self, config_id: uuid.UUID) -> AgentVersion | None:
+        """Return the newest draft newer than the live published version, if any.
+
+        Older drafts left behind after save→save→publish are ignored so the
+        editor does not reopen stale tool bindings (e.g. draft v13 vs live v14).
+        """
+        config = await self.get_config(config_id)
+        min_version = 0
+        if config and config.published_version_id:
+            published = await self.get_version(
+                config.published_version_id, allow_draft=False
+            )
+            if published is not None:
+                min_version = published.version
         return await self.session.scalar(
             self.scoped(
                 select(AgentVersion)
                 .where(
                     AgentVersion.agent_config_id == config_id,
                     AgentVersion.status == AgentStatus.draft,
+                    AgentVersion.version > min_version,
                 )
                 .order_by(AgentVersion.version.desc()),
                 AgentVersion,
@@ -236,38 +287,63 @@ class AgentRepository(TenantRepository):
         memory_mode: str = "session",
         tools: list[dict[str, Any]] | None = None,
         knowledge_base_id: uuid.UUID | None = None,
+        guardrails: dict[str, Any] | None = None,
+        framework_adapter: str = "agno",
     ) -> AgentVersion:
         config = await self.get_config(config_id)
         if config is None:
             raise LookupError("Agent config not found")
-        next_version = (
-            await self.session.scalar(
-                self.scoped(
-                    select(func.coalesce(func.max(AgentVersion.version), 0)).where(
-                        AgentVersion.agent_config_id == config_id
-                    ),
-                    AgentVersion,
+        await self._archive_drafts(config_id)
+        team_config: dict[str, Any] = {}
+        if knowledge_base_id:
+            team_config["knowledge_base_id"] = str(knowledge_base_id)
+        if guardrails:
+            cleaned = {
+                "prompt_injection": bool(guardrails.get("prompt_injection")),
+                "pii_detection": bool(guardrails.get("pii_detection")),
+                "openai_moderation": bool(guardrails.get("openai_moderation")),
+            }
+            if any(cleaned.values()):
+                team_config["guardrails"] = cleaned
+        adapter = (framework_adapter or "agno").strip() or "agno"
+        if adapter != "agno":
+            team_config["framework_adapter"] = adapter
+        version: AgentVersion | None = None
+        for _attempt in range(5):
+            next_version = (
+                await self.session.scalar(
+                    self.scoped(
+                        select(func.coalesce(func.max(AgentVersion.version), 0)).where(
+                            AgentVersion.agent_config_id == config_id
+                        ),
+                        AgentVersion,
+                    )
                 )
+                or 0
+            ) + 1
+            candidate = AgentVersion(
+                id=new_id(),
+                tenant_id=self.context.tenant_id,
+                agent_config_id=config_id,
+                version=next_version,
+                status=AgentStatus.draft,
+                instructions=instructions,
+                model_id=model_id,
+                temperature=temperature,
+                memory_mode=memory_mode,
+                team_config=team_config or None,
+                created_by=self.context.user_id,
             )
-            or 0
-        ) + 1
-        version = AgentVersion(
-            id=new_id(),
-            tenant_id=self.context.tenant_id,
-            agent_config_id=config_id,
-            version=next_version,
-            status=AgentStatus.draft,
-            instructions=instructions,
-            model_id=model_id,
-            temperature=temperature,
-            memory_mode=memory_mode,
-            team_config={"knowledge_base_id": str(knowledge_base_id)}
-            if knowledge_base_id
-            else None,
-            created_by=self.context.user_id,
-        )
-        self.session.add(version)
-        await self.session.flush()
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(candidate)
+                    await self.session.flush()
+                version = candidate
+                break
+            except IntegrityError:
+                continue
+        if version is None:
+            raise RuntimeError("Could not allocate a unique agent version number")
         for tool in tools or []:
             credential_id = tool.get("credential_id")
             definition_id = tool.get("tool_definition_id")
@@ -283,6 +359,13 @@ class AgentRepository(TenantRepository):
                 )
                 if definition is None or not definition.active:
                     raise LookupError("Active tool definition not found for tenant")
+                if (
+                    definition.kind == "tenant_python"
+                    and definition.published_version_id is None
+                ):
+                    raise LookupError(
+                        "Editable Python tool must be published before attaching"
+                    )
             self.session.add(
                 AgentToolBinding(
                     id=new_id(),
@@ -310,6 +393,7 @@ class AgentRepository(TenantRepository):
         if version.status != AgentStatus.draft:
             raise ValueError("Only draft versions can be published")
         version.status = AgentStatus.published
+        await self._archive_drafts(version.agent_config_id, except_version_id=version.id)
         await self.session.execute(
             update(AgentConfig)
             .where(
@@ -340,6 +424,10 @@ class AgentRepository(TenantRepository):
         if as_draft:
             kb_raw = (version.team_config or {}).get("knowledge_base_id")
             knowledge_base_id = uuid.UUID(str(kb_raw)) if kb_raw else None
+            guardrails = (version.team_config or {}).get("guardrails")
+            framework_adapter = str(
+                (version.team_config or {}).get("framework_adapter") or "agno"
+            )
             tools = [
                 {
                     "tool_key": binding.tool_key,
@@ -357,6 +445,8 @@ class AgentRepository(TenantRepository):
                 memory_mode=version.memory_mode,
                 tools=tools,
                 knowledge_base_id=knowledge_base_id,
+                guardrails=guardrails if isinstance(guardrails, dict) else None,
+                framework_adapter=framework_adapter,
             )
             await self.audit(
                 action="agent.restore_draft",
@@ -517,13 +607,36 @@ class TeamRepository(TenantRepository):
             statement = statement.where(TeamVersion.status == AgentStatus.published)
         return await self.session.scalar(self.scoped(statement, TeamVersion))
 
+    async def _archive_drafts(
+        self, config_id: uuid.UUID, *, except_version_id: uuid.UUID | None = None
+    ) -> None:
+        statement = (
+            update(TeamVersion)
+            .where(
+                TeamVersion.team_config_id == config_id,
+                TeamVersion.tenant_id == self.context.tenant_id,
+                TeamVersion.status == AgentStatus.draft,
+            )
+            .values(status=AgentStatus.archived)
+        )
+        if except_version_id is not None:
+            statement = statement.where(TeamVersion.id != except_version_id)
+        await self.session.execute(statement)
+
     async def get_latest_draft(self, config_id: uuid.UUID) -> TeamVersion | None:
+        config = await self.get_config(config_id)
+        min_version = 0
+        if config and config.published_version_id:
+            published = await self.get_version(config.published_version_id, allow_draft=False)
+            if published is not None:
+                min_version = published.version
         return await self.session.scalar(
             self.scoped(
                 select(TeamVersion)
                 .where(
                     TeamVersion.team_config_id == config_id,
                     TeamVersion.status == AgentStatus.draft,
+                    TeamVersion.version > min_version,
                 )
                 .order_by(TeamVersion.version.desc()),
                 TeamVersion,
@@ -649,6 +762,7 @@ class TeamRepository(TenantRepository):
         if config is None:
             raise LookupError("Team config not found")
 
+        await self._archive_drafts(config_id)
         agent_repo = AgentRepository(self.session, self.context)
         resolved_members: list[tuple[uuid.UUID, uuid.UUID]] = []
         for member_config_id in member_config_ids:
@@ -661,31 +775,42 @@ class TeamRepository(TenantRepository):
                 raise ValueError(f"Agent {agent_config.name} has no runnable version")
             resolved_members.append((agent_config.id, version_id))
 
-        next_version = (
-            await self.session.scalar(
-                self.scoped(
-                    select(func.coalesce(func.max(TeamVersion.version), 0)).where(
-                        TeamVersion.team_config_id == config_id
-                    ),
-                    TeamVersion,
+        version: TeamVersion | None = None
+        next_version = 0
+        for _attempt in range(5):
+            next_version = (
+                await self.session.scalar(
+                    self.scoped(
+                        select(func.coalesce(func.max(TeamVersion.version), 0)).where(
+                            TeamVersion.team_config_id == config_id
+                        ),
+                        TeamVersion,
+                    )
                 )
+                or 0
+            ) + 1
+            candidate = TeamVersion(
+                id=new_id(),
+                tenant_id=self.context.tenant_id,
+                team_config_id=config_id,
+                version=next_version,
+                status=AgentStatus.draft,
+                instructions=instructions,
+                mode=mode,
+                model_id=model_id,
+                temperature=temperature,
+                created_by=self.context.user_id,
             )
-            or 0
-        ) + 1
-        version = TeamVersion(
-            id=new_id(),
-            tenant_id=self.context.tenant_id,
-            team_config_id=config_id,
-            version=next_version,
-            status=AgentStatus.draft,
-            instructions=instructions,
-            mode=mode,
-            model_id=model_id,
-            temperature=temperature,
-            created_by=self.context.user_id,
-        )
-        self.session.add(version)
-        await self.session.flush()
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(candidate)
+                    await self.session.flush()
+                version = candidate
+                break
+            except IntegrityError:
+                continue
+        if version is None:
+            raise RuntimeError("Could not allocate a unique team version number")
         for position, (agent_config_id, agent_version_id) in enumerate(resolved_members):
             self.session.add(
                 TeamMember(
@@ -713,6 +838,13 @@ class TeamRepository(TenantRepository):
                 )
                 if definition is None or not definition.active:
                     raise LookupError("Active tool definition not found for tenant")
+                if (
+                    definition.kind == "tenant_python"
+                    and definition.published_version_id is None
+                ):
+                    raise LookupError(
+                        "Editable Python tool must be published before attaching"
+                    )
             self.session.add(
                 TeamToolBinding(
                     id=new_id(),
@@ -754,6 +886,7 @@ class TeamRepository(TenantRepository):
             member.agent_version_id = published.id
 
         version.status = AgentStatus.published
+        await self._archive_drafts(version.team_config_id, except_version_id=version.id)
         await self.session.execute(
             update(TeamConfig)
             .where(
@@ -786,6 +919,12 @@ class TeamRepository(TenantRepository):
             raise ValueError(
                 "Team is used by a workflow — remove it from workflows first"
             )
+        await self.session.execute(
+            delete(TeamAssignment).where(
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.team_config_id == config_id,
+            )
+        )
         config.published_version_id = None
         await self.session.flush()
         await self.session.delete(config)
@@ -795,6 +934,81 @@ class TeamRepository(TenantRepository):
             resource_type="team_config",
             resource_id=str(config_id),
         )
+
+    async def list_available_for_user(self, user_id: str) -> Sequence[TeamConfig]:
+        rows = await self.session.scalars(
+            select(TeamConfig)
+            .join(
+                TeamAssignment,
+                TeamAssignment.team_config_id == TeamConfig.id,
+            )
+            .where(
+                TeamConfig.tenant_id == self.context.tenant_id,
+                TeamConfig.published_version_id.is_not(None),
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.user_id == user_id,
+            )
+            .order_by(TeamConfig.name)
+        )
+        return rows.all()
+
+    async def is_assigned(self, config_id: uuid.UUID, user_id: str) -> bool:
+        return (
+            await self.session.scalar(
+                select(TeamAssignment.id).where(
+                    TeamAssignment.tenant_id == self.context.tenant_id,
+                    TeamAssignment.team_config_id == config_id,
+                    TeamAssignment.user_id == user_id,
+                )
+            )
+            is not None
+        )
+
+    async def assigned_team_ids(self, user_id: str) -> list[uuid.UUID]:
+        rows = await self.session.scalars(
+            select(TeamAssignment.team_config_id)
+            .where(
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.user_id == user_id,
+            )
+            .order_by(TeamAssignment.team_config_id)
+        )
+        return list(rows.all())
+
+    async def replace_user_assignments(
+        self, user_id: str, team_ids: Sequence[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        normalized = sorted({value for value in team_ids})
+        for team_id in normalized:
+            config = await self.get_config(team_id)
+            if config is None:
+                raise LookupError(f"Team {team_id} not found")
+            if config.published_version_id is None:
+                raise ValueError(f"Team {config.slug} must be published before assignment")
+        await self.session.execute(
+            delete(TeamAssignment).where(
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.user_id == user_id,
+            )
+        )
+        self.session.add_all(
+            TeamAssignment(
+                id=new_id(),
+                tenant_id=self.context.tenant_id,
+                team_config_id=team_id,
+                user_id=user_id,
+                assigned_by=self.context.user_id,
+            )
+            for team_id in normalized
+        )
+        await self.session.flush()
+        await self.audit(
+            action="user.team_assignments.update",
+            resource_type="membership",
+            resource_id=user_id,
+            details={"team_ids": [str(value) for value in normalized]},
+        )
+        return normalized
 
 
 class MembershipRepository(TenantRepository):
@@ -823,6 +1037,116 @@ class MembershipRepository(TenantRepository):
             )
         )
 
+    async def get_by_email(self, email: str) -> Membership | None:
+        normalized = email.strip().lower()
+        if not normalized:
+            return None
+        return await self.session.scalar(
+            self.scoped(
+                select(Membership).where(Membership.email == normalized),
+                Membership,
+            )
+        )
+
+    async def claim_pending_by_email(
+        self, *, email: str, user_id: str
+    ) -> Membership | None:
+        """Bind a pending/orphan membership to the real sign-in account id."""
+        membership = await self.get_by_email(email)
+        if membership is None or not membership.is_active:
+            return None
+        if membership.user_id == user_id:
+            return membership
+        # Only rewrite placeholders / manual orphans — never steal a real account link.
+        if membership.user_id.startswith("user_"):
+            return None
+        conflict = await self.get_by_user_id(user_id)
+        if conflict is not None and conflict.id != membership.id:
+            raise ValueError("Sign-in account is already linked to another user")
+        old_user_id = membership.user_id
+        await self.session.execute(
+            update(WorkflowAssignment)
+            .where(
+                WorkflowAssignment.tenant_id == self.context.tenant_id,
+                WorkflowAssignment.user_id == old_user_id,
+            )
+            .values(user_id=user_id)
+        )
+        await self.session.execute(
+            update(TeamAssignment)
+            .where(
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.user_id == old_user_id,
+            )
+            .values(user_id=user_id)
+        )
+        await self.session.execute(
+            update(ConversationSession)
+            .where(
+                ConversationSession.tenant_id == self.context.tenant_id,
+                ConversationSession.user_id == old_user_id,
+            )
+            .values(user_id=user_id)
+        )
+        membership.user_id = user_id
+        await self.session.flush()
+        await self.audit(
+            action="user.claim",
+            resource_type="membership",
+            resource_id=str(membership.id),
+            details={"user_id": user_id, "from": old_user_id},
+        )
+        return membership
+
+    async def rebind_user_id(
+        self, membership_id: uuid.UUID, *, new_user_id: str
+    ) -> Membership | None:
+        membership = await self.get(membership_id)
+        if membership is None:
+            return None
+        new_user_id = new_user_id.strip()
+        if not new_user_id:
+            raise ValueError("user_id is required")
+        if membership.user_id == new_user_id:
+            return membership
+        conflict = await self.get_by_user_id(new_user_id)
+        if conflict is not None and conflict.id != membership.id:
+            raise ValueError("Sign-in account is already linked to another user")
+        old_user_id = membership.user_id
+        await self.session.execute(
+            update(WorkflowAssignment)
+            .where(
+                WorkflowAssignment.tenant_id == self.context.tenant_id,
+                WorkflowAssignment.user_id == old_user_id,
+            )
+            .values(user_id=new_user_id)
+        )
+        await self.session.execute(
+            update(TeamAssignment)
+            .where(
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.user_id == old_user_id,
+            )
+            .values(user_id=new_user_id)
+        )
+        await self.session.execute(
+            update(ConversationSession)
+            .where(
+                ConversationSession.tenant_id == self.context.tenant_id,
+                ConversationSession.user_id == old_user_id,
+            )
+            .values(user_id=new_user_id)
+        )
+        membership.user_id = new_user_id
+        await self.session.flush()
+        await self.audit(
+            action="user.rebind",
+            resource_type="membership",
+            resource_id=str(membership.id),
+            details={"user_id": new_user_id, "from": old_user_id},
+        )
+        return membership
+
     async def create(
         self,
         *,
@@ -831,6 +1155,7 @@ class MembershipRepository(TenantRepository):
         email: str | None,
         role: Role,
         is_active: bool = True,
+        phone: str | None = None,
     ) -> Membership:
         existing = await self.get_by_user_id(user_id)
         if existing is not None:
@@ -843,6 +1168,7 @@ class MembershipRepository(TenantRepository):
             user_id=user_id.strip(),
             display_name=display_name.strip(),
             email=(email or "").strip() or None,
+            phone=(phone or "").strip() or None,
             role=role,
             is_active=is_active,
         )
@@ -862,8 +1188,10 @@ class MembershipRepository(TenantRepository):
         *,
         display_name: str | None = None,
         email: str | None = None,
+        phone: str | None = None,
         role: Role | None = None,
         is_active: bool | None = None,
+        clear_phone: bool = False,
     ) -> Membership | None:
         membership = await self.get(membership_id)
         if membership is None:
@@ -872,6 +1200,10 @@ class MembershipRepository(TenantRepository):
             membership.display_name = display_name.strip()
         if email is not None:
             membership.email = email.strip() or None
+        if clear_phone:
+            membership.phone = None
+        elif phone is not None:
+            membership.phone = phone.strip() or None
         if role is not None:
             if role not in {Role.tenant_admin, Role.end_user}:
                 raise ValueError("Tenant users must be tenant_admin or end_user")
@@ -899,6 +1231,12 @@ class MembershipRepository(TenantRepository):
             delete(WorkflowAssignment).where(
                 WorkflowAssignment.tenant_id == self.context.tenant_id,
                 WorkflowAssignment.user_id == membership.user_id,
+            )
+        )
+        await self.session.execute(
+            delete(TeamAssignment).where(
+                TeamAssignment.tenant_id == self.context.tenant_id,
+                TeamAssignment.user_id == membership.user_id,
             )
         )
         await self.session.delete(membership)
@@ -1130,13 +1468,36 @@ class WorkflowRepository(TenantRepository):
             statement = statement.where(WorkflowVersion.status == AgentStatus.published)
         return await self.session.scalar(self.scoped(statement, WorkflowVersion))
 
+    async def _archive_drafts(
+        self, config_id: uuid.UUID, *, except_version_id: uuid.UUID | None = None
+    ) -> None:
+        statement = (
+            update(WorkflowVersion)
+            .where(
+                WorkflowVersion.workflow_config_id == config_id,
+                WorkflowVersion.tenant_id == self.context.tenant_id,
+                WorkflowVersion.status == AgentStatus.draft,
+            )
+            .values(status=AgentStatus.archived)
+        )
+        if except_version_id is not None:
+            statement = statement.where(WorkflowVersion.id != except_version_id)
+        await self.session.execute(statement)
+
     async def get_latest_draft(self, config_id: uuid.UUID) -> WorkflowVersion | None:
+        config = await self.get_config(config_id)
+        min_version = 0
+        if config and config.published_version_id:
+            published = await self.get_version(config.published_version_id, allow_draft=False)
+            if published is not None:
+                min_version = published.version
         return await self.session.scalar(
             self.scoped(
                 select(WorkflowVersion)
                 .where(
                     WorkflowVersion.workflow_config_id == config_id,
                     WorkflowVersion.status == AgentStatus.draft,
+                    WorkflowVersion.version > min_version,
                 )
                 .order_by(WorkflowVersion.version.desc()),
                 WorkflowVersion,
@@ -1254,12 +1615,15 @@ class WorkflowRepository(TenantRepository):
             raise ValueError("Workflow mode must be sequential or parallel")
         if not steps:
             raise ValueError("A workflow requires at least one step")
-        if any(step.get("condition_expression") for step in steps):
-            raise ValueError("CEL conditions are unavailable in this deployment")
+        for step in steps:
+            expression = step.get("condition_expression")
+            if expression:
+                _validate_cel_condition_expression(str(expression))
         config = await self.get_config(config_id)
         if config is None:
             raise LookupError("Workflow config not found")
 
+        await self._archive_drafts(config_id)
         agent_repo = AgentRepository(self.session, self.context)
         team_repo = TeamRepository(self.session, self.context)
         resolved: list[dict[str, Any]] = []
@@ -1294,28 +1658,39 @@ class WorkflowRepository(TenantRepository):
                 )
             resolved.append(step | {"target_id": target_id, "version_id": version_id})
 
-        next_version = (
-            await self.session.scalar(
-                self.scoped(
-                    select(func.coalesce(func.max(WorkflowVersion.version), 0)).where(
-                        WorkflowVersion.workflow_config_id == config_id
-                    ),
-                    WorkflowVersion,
+        version: WorkflowVersion | None = None
+        next_version = 0
+        for _attempt in range(5):
+            next_version = (
+                await self.session.scalar(
+                    self.scoped(
+                        select(func.coalesce(func.max(WorkflowVersion.version), 0)).where(
+                            WorkflowVersion.workflow_config_id == config_id
+                        ),
+                        WorkflowVersion,
+                    )
                 )
+                or 0
+            ) + 1
+            candidate = WorkflowVersion(
+                id=new_id(),
+                tenant_id=self.context.tenant_id,
+                workflow_config_id=config_id,
+                version=next_version,
+                status=AgentStatus.draft,
+                mode=mode,
+                created_by=self.context.user_id,
             )
-            or 0
-        ) + 1
-        version = WorkflowVersion(
-            id=new_id(),
-            tenant_id=self.context.tenant_id,
-            workflow_config_id=config_id,
-            version=next_version,
-            status=AgentStatus.draft,
-            mode=mode,
-            created_by=self.context.user_id,
-        )
-        self.session.add(version)
-        await self.session.flush()
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(candidate)
+                    await self.session.flush()
+                version = candidate
+                break
+            except IntegrityError:
+                continue
+        if version is None:
+            raise RuntimeError("Could not allocate a unique workflow version number")
         for position, item in enumerate(resolved):
             is_agent = item["target_type"] == "agent"
             self.session.add(
@@ -1370,6 +1745,9 @@ class WorkflowRepository(TenantRepository):
                     raise ValueError("Every workflow team step must be published")
                 step.team_version_id = team_config.published_version_id
         version.status = AgentStatus.published
+        await self._archive_drafts(
+            version.workflow_config_id, except_version_id=version.id
+        )
         await self.session.execute(
             update(WorkflowConfig)
             .where(
@@ -1455,6 +1833,417 @@ class CredentialRepository(TenantRepository):
             details={"provider": provider},
         )
         return credential
+
+    async def delete(self, credential_id: uuid.UUID) -> bool:
+        credential = await self.get(credential_id)
+        if credential is None:
+            return False
+
+        tool_refs = await self.session.scalar(
+            select(func.count())
+            .select_from(ToolDefinition)
+            .where(
+                ToolDefinition.tenant_id == self.context.tenant_id,
+                ToolDefinition.credential_id == credential_id,
+            )
+        )
+        if int(tool_refs or 0) > 0:
+            raise ValueError(
+                "Credential is attached to a tool and cannot be deleted; detach it first"
+            )
+
+        agent_refs = await self.session.scalar(
+            select(func.count())
+            .select_from(AgentToolBinding)
+            .where(
+                AgentToolBinding.tenant_id == self.context.tenant_id,
+                AgentToolBinding.credential_id == credential_id,
+            )
+        )
+        if int(agent_refs or 0) > 0:
+            raise ValueError(
+                "Credential is attached to an agent tool and cannot be deleted; "
+                "detach it first"
+            )
+
+        team_refs = await self.session.scalar(
+            select(func.count())
+            .select_from(TeamToolBinding)
+            .where(
+                TeamToolBinding.tenant_id == self.context.tenant_id,
+                TeamToolBinding.credential_id == credential_id,
+            )
+        )
+        if int(team_refs or 0) > 0:
+            raise ValueError(
+                "Credential is attached to a team tool and cannot be deleted; "
+                "detach it first"
+            )
+
+        await self.audit(
+            action="credential.delete",
+            resource_type="tenant_credential",
+            resource_id=str(credential.id),
+            details={"provider": credential.provider, "name": credential.name},
+        )
+        await self.session.delete(credential)
+        await self.session.flush()
+        return True
+
+
+class ChannelBindingRepository(TenantRepository):
+    async def list(self) -> Sequence[ChannelBinding]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(ChannelBinding).order_by(ChannelBinding.created_at.desc()),
+                ChannelBinding,
+            )
+        )
+        return rows.all()
+
+    async def get(self, binding_id: uuid.UUID) -> ChannelBinding | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(ChannelBinding).where(ChannelBinding.id == binding_id),
+                ChannelBinding,
+            )
+        )
+
+    async def list_by_provider(
+        self, provider: str, *, active_only: bool = True
+    ) -> Sequence[ChannelBinding]:
+        statement = select(ChannelBinding).where(ChannelBinding.provider == provider)
+        if active_only:
+            statement = statement.where(ChannelBinding.active.is_(True))
+        rows = await self.session.scalars(
+            self.scoped(statement.order_by(ChannelBinding.created_at.desc()), ChannelBinding)
+        )
+        return rows.all()
+
+    async def create(
+        self,
+        *,
+        provider: str,
+        credential_id: uuid.UUID,
+        target_type: str,
+        target_config_id: uuid.UUID,
+        external_config: dict[str, Any] | None = None,
+        active: bool = True,
+    ) -> ChannelBinding:
+        if await CredentialRepository(self.session, self.context).get(credential_id) is None:
+            raise LookupError("Credential not found for tenant")
+        row = ChannelBinding(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            provider=provider,
+            credential_id=credential_id,
+            target_type=target_type,
+            target_config_id=target_config_id,
+            external_config=external_config or {},
+            active=active,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        await self.audit(
+            action="channel_binding.create",
+            resource_type="channel_binding",
+            resource_id=str(row.id),
+            details={"provider": provider, "target_type": target_type},
+        )
+        return row
+
+    async def update(
+        self,
+        binding_id: uuid.UUID,
+        *,
+        credential_id: uuid.UUID | None = None,
+        target_type: str | None = None,
+        target_config_id: uuid.UUID | None = None,
+        external_config: dict[str, Any] | None = None,
+        active: bool | None = None,
+    ) -> ChannelBinding | None:
+        row = await self.get(binding_id)
+        if row is None:
+            return None
+        if credential_id is not None:
+            if await CredentialRepository(self.session, self.context).get(credential_id) is None:
+                raise LookupError("Credential not found for tenant")
+            row.credential_id = credential_id
+        if target_type is not None:
+            row.target_type = target_type
+        if target_config_id is not None:
+            row.target_config_id = target_config_id
+        if external_config is not None:
+            row.external_config = external_config
+        if active is not None:
+            row.active = active
+        await self.session.flush()
+        return row
+
+    async def delete(self, binding_id: uuid.UUID) -> bool:
+        row = await self.get(binding_id)
+        if row is None:
+            return False
+        await self.session.delete(row)
+        await self.session.flush()
+        await self.audit(
+            action="channel_binding.delete",
+            resource_type="channel_binding",
+            resource_id=str(binding_id),
+        )
+        return True
+
+
+class UserVaultRepository(TenantRepository):
+    """Per-user secrets/variables scoped to the caller's Clerk subject."""
+
+    async def list_for_user(self, user_id: str) -> Sequence[UserVaultEntry]:
+        rows = await self.session.scalars(
+            self.scoped(
+                select(UserVaultEntry)
+                .where(UserVaultEntry.user_id == user_id)
+                .order_by(UserVaultEntry.name.asc()),
+                UserVaultEntry,
+            )
+        )
+        return rows.all()
+
+    async def get_for_user(self, user_id: str, name: str) -> UserVaultEntry | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(UserVaultEntry).where(
+                    UserVaultEntry.user_id == user_id,
+                    UserVaultEntry.name == name,
+                ),
+                UserVaultEntry,
+            )
+        )
+
+    async def upsert(
+        self,
+        *,
+        user_id: str,
+        name: str,
+        kind: str,
+        encrypted_value: str,
+        key_version: str,
+    ) -> UserVaultEntry:
+        existing = await self.get_for_user(user_id, name)
+        if existing is not None:
+            existing.kind = kind
+            existing.encrypted_value = encrypted_value
+            existing.key_version = key_version
+            await self.session.flush()
+            await self.audit(
+                action="user_vault.update",
+                resource_type="user_vault_entry",
+                resource_id=str(existing.id),
+                details={"name": name, "kind": kind},
+            )
+            return existing
+        row = UserVaultEntry(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            user_id=user_id,
+            name=name,
+            kind=kind,
+            encrypted_value=encrypted_value,
+            key_version=key_version,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        await self.audit(
+            action="user_vault.create",
+            resource_type="user_vault_entry",
+            resource_id=str(row.id),
+            details={"name": name, "kind": kind},
+        )
+        return row
+
+    async def delete_for_user(self, user_id: str, name: str) -> bool:
+        row = await self.get_for_user(user_id, name)
+        if row is None:
+            return False
+        await self.session.delete(row)
+        await self.session.flush()
+        await self.audit(
+            action="user_vault.delete",
+            resource_type="user_vault_entry",
+            resource_id=str(row.id),
+            details={"name": name},
+        )
+        return True
+
+
+class UserNotificationRepository(TenantRepository):
+    """Per-user in-app notifications (fan-out rows share a batch_id)."""
+
+    MAX_FANOUT = 500
+
+    async def create_batch(
+        self,
+        *,
+        title: str,
+        body: str,
+        created_by: str,
+        audience: str,
+        recipient_user_ids: Sequence[str],
+    ) -> tuple[uuid.UUID, list[UserNotification]]:
+        recipients = [
+            uid.strip()
+            for uid in recipient_user_ids
+            if uid and uid.strip() and not uid.strip().startswith("invite:")
+        ]
+        # Preserve order, drop dupes.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for uid in recipients:
+            if uid in seen:
+                continue
+            seen.add(uid)
+            unique.append(uid)
+        if not unique:
+            raise ValueError("No recipients for notification")
+        if len(unique) > self.MAX_FANOUT:
+            raise ValueError(
+                f"Too many recipients ({len(unique)}); max is {self.MAX_FANOUT}"
+            )
+        batch_id = new_id()
+        rows: list[UserNotification] = []
+        for uid in unique:
+            row = UserNotification(
+                id=new_id(),
+                tenant_id=self.context.tenant_id,
+                batch_id=batch_id,
+                user_id=uid,
+                title=title,
+                body=body,
+                created_by=created_by,
+                audience=audience,
+            )
+            self.session.add(row)
+            rows.append(row)
+        await self.session.flush()
+        await self.audit(
+            action="notification.send",
+            resource_type="user_notification_batch",
+            resource_id=str(batch_id),
+            details={
+                "audience": audience,
+                "recipient_count": len(rows),
+                "title": title[:80],
+            },
+        )
+        return batch_id, rows
+
+    async def list_for_user(
+        self,
+        user_id: str,
+        *,
+        unread_only: bool = False,
+        limit: int = 50,
+    ) -> Sequence[UserNotification]:
+        stmt = (
+            select(UserNotification)
+            .where(UserNotification.user_id == user_id)
+            .order_by(UserNotification.created_at.desc())
+            .limit(max(1, min(limit, 100)))
+        )
+        if unread_only:
+            stmt = stmt.where(UserNotification.read_at.is_(None))
+        rows = await self.session.scalars(self.scoped(stmt, UserNotification))
+        return rows.all()
+
+    async def unread_count(self, user_id: str) -> int:
+        value = await self.session.scalar(
+            self.scoped(
+                select(func.count())
+                .select_from(UserNotification)
+                .where(
+                    UserNotification.user_id == user_id,
+                    UserNotification.read_at.is_(None),
+                ),
+                UserNotification,
+            )
+        )
+        return int(value or 0)
+
+    async def get_for_user(
+        self, user_id: str, notification_id: uuid.UUID
+    ) -> UserNotification | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(UserNotification).where(
+                    UserNotification.id == notification_id,
+                    UserNotification.user_id == user_id,
+                ),
+                UserNotification,
+            )
+        )
+
+    async def mark_read(
+        self, user_id: str, notification_id: uuid.UUID
+    ) -> UserNotification | None:
+        row = await self.get_for_user(user_id, notification_id)
+        if row is None:
+            return None
+        if row.read_at is None:
+            row.read_at = datetime.now(UTC)
+            await self.session.flush()
+        return row
+
+    async def mark_all_read(self, user_id: str) -> int:
+        now = datetime.now(UTC)
+        result = await self.session.execute(
+            update(UserNotification)
+            .where(
+                UserNotification.tenant_id == self.context.tenant_id,
+                UserNotification.user_id == user_id,
+                UserNotification.read_at.is_(None),
+            )
+            .values(read_at=now, updated_at=now)
+        )
+        await self.session.flush()
+        return int(result.rowcount or 0)
+
+    async def list_sent_batches(self, *, limit: int = 40) -> list[dict[str, Any]]:
+        """Recent admin sends grouped by batch_id (newest first)."""
+        capped = max(1, min(limit, 100))
+        batch_agg = (
+            select(
+                UserNotification.batch_id.label("batch_id"),
+                func.max(UserNotification.created_at).label("sent_at"),
+                func.count().label("recipient_count"),
+                func.min(UserNotification.id).label("sample_id"),
+            )
+            .where(UserNotification.tenant_id == self.context.tenant_id)
+            .group_by(UserNotification.batch_id)
+            .subquery()
+        )
+        rows = (
+            await self.session.execute(
+                select(
+                    UserNotification,
+                    batch_agg.c.recipient_count,
+                    batch_agg.c.sent_at,
+                )
+                .join(batch_agg, UserNotification.id == batch_agg.c.sample_id)
+                .order_by(batch_agg.c.sent_at.desc())
+                .limit(capped)
+            )
+        ).all()
+        return [
+            {
+                "batch_id": row.batch_id,
+                "title": row.title,
+                "body": row.body,
+                "audience": row.audience,
+                "created_by": row.created_by,
+                "recipient_count": int(recipient_count),
+                "created_at": sent_at,
+            }
+            for row, recipient_count, sent_at in rows
+        ]
 
 
 class ServiceAccountRepository(TenantRepository):
@@ -2260,6 +3049,7 @@ class SessionRepository(TenantRepository):
         target_type: str | None = None,
         target_id: uuid.UUID | None = None,
         include_all_users: bool = False,
+        limit: int | None = None,
     ) -> Sequence[ConversationSession]:
         statement = select(ConversationSession)
         if not include_all_users or not self.context.can_administer():
@@ -2277,9 +3067,12 @@ class SessionRepository(TenantRepository):
                 )
             )
             statement = statement.where(column == target_id)
+        statement = statement.order_by(ConversationSession.updated_at.desc())
+        if limit is not None:
+            statement = statement.limit(max(1, min(limit, 500)))
         rows = await self.session.scalars(
             self.scoped(
-                statement.order_by(ConversationSession.updated_at.desc()),
+                statement,
                 ConversationSession,
             )
         )
@@ -2333,3 +3126,199 @@ class SessionRepository(TenantRepository):
             resource_id=str(row.id),
         )
         return True
+
+    async def bind_verified_end_user(
+        self,
+        *,
+        external_session_id: str,
+        end_user_id: uuid.UUID,
+        guest_user_id: str,
+    ) -> ConversationSession | None:
+        row = await self.get_by_external(external_session_id)
+        if row is None:
+            return None
+        if row.user_id != guest_user_id:
+            raise PermissionError("Session belongs to another guest")
+        row.verified_end_user_id = end_user_id
+        await self.session.flush()
+        return row
+
+
+class EndUserSessionBindRepository(TenantRepository):
+    async def upsert(
+        self,
+        *,
+        external_session_id: str,
+        guest_user_id: str,
+        end_user_id: uuid.UUID,
+    ) -> EndUserSessionBind:
+        existing = await self.session.scalar(
+            self.scoped(
+                select(EndUserSessionBind).where(
+                    EndUserSessionBind.external_session_id == external_session_id
+                ),
+                EndUserSessionBind,
+            )
+        )
+        if existing is not None:
+            if existing.guest_user_id != guest_user_id:
+                raise PermissionError("Session bind belongs to another guest")
+            existing.end_user_id = end_user_id
+            await self.session.flush()
+            return existing
+        row = EndUserSessionBind(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            external_session_id=external_session_id,
+            guest_user_id=guest_user_id,
+            end_user_id=end_user_id,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def get_for_session(
+        self, *, external_session_id: str, guest_user_id: str
+    ) -> EndUserSessionBind | None:
+        row = await self.session.scalar(
+            self.scoped(
+                select(EndUserSessionBind).where(
+                    EndUserSessionBind.external_session_id == external_session_id
+                ),
+                EndUserSessionBind,
+            )
+        )
+        if row is None:
+            return None
+        if row.guest_user_id != guest_user_id:
+            return None
+        return row
+
+
+class EndUserRepository(TenantRepository):
+    async def get(self, end_user_id: uuid.UUID) -> EndUser | None:
+        return await self.session.scalar(
+            self.scoped(select(EndUser).where(EndUser.id == end_user_id), EndUser)
+        )
+
+    async def get_by_email(self, email: str) -> EndUser | None:
+        normalized = email.strip().lower()
+        return await self.session.scalar(
+            self.scoped(select(EndUser).where(EndUser.email == normalized), EndUser)
+        )
+
+    async def list(self, *, limit: int = 100) -> Sequence[EndUser]:
+        return (
+            await self.session.scalars(
+                self.scoped(
+                    select(EndUser).order_by(EndUser.created_at.desc()).limit(limit),
+                    EndUser,
+                )
+            )
+        ).all()
+
+    async def get_or_create(
+        self,
+        *,
+        email: str,
+        display_name: str = "",
+        mark_verified: bool = False,
+    ) -> EndUser:
+        normalized = email.strip().lower()
+        existing = await self.get_by_email(normalized)
+        if existing is not None:
+            if mark_verified and existing.email_verified_at is None:
+                existing.email_verified_at = datetime.now(UTC)
+            if display_name and not existing.display_name:
+                existing.display_name = display_name.strip()
+            return existing
+        row = EndUser(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            email=normalized,
+            display_name=display_name.strip(),
+            email_verified_at=datetime.now(UTC) if mark_verified else None,
+            is_active=True,
+            user_metadata={},
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def update_profile(
+        self,
+        end_user_id: uuid.UUID,
+        *,
+        display_name: str | None = None,
+        metadata_patch: dict[str, Any] | None = None,
+        is_active: bool | None = None,
+        allow_inactive: bool = False,
+    ) -> EndUser | None:
+        row = await self.get(end_user_id)
+        if row is None:
+            return None
+        if not row.is_active and not allow_inactive and is_active is not True:
+            return None
+        if display_name is not None:
+            row.display_name = display_name.strip()[:255]
+        if metadata_patch is not None:
+            merged = dict(row.user_metadata or {})
+            merged.update(metadata_patch)
+            row.user_metadata = merged
+        if is_active is not None:
+            row.is_active = is_active
+        await self.session.flush()
+        return row
+
+
+class VerificationChallengeRepository(TenantRepository):
+    async def create_challenge(
+        self,
+        *,
+        email: str,
+        code_hash: str,
+        external_session_id: str,
+        guest_user_id: str,
+        ttl_minutes: int = 15,
+    ) -> VerificationChallenge:
+        # Invalidate prior open challenges for this session+email.
+        await self.session.execute(
+            update(VerificationChallenge)
+            .where(
+                VerificationChallenge.tenant_id == self.context.tenant_id,
+                VerificationChallenge.external_session_id == external_session_id,
+                VerificationChallenge.email == email.strip().lower(),
+                VerificationChallenge.consumed_at.is_(None),
+            )
+            .values(consumed_at=datetime.now(UTC))
+        )
+        row = VerificationChallenge(
+            id=new_id(),
+            tenant_id=self.context.tenant_id,
+            email=email.strip().lower(),
+            code_hash=code_hash,
+            purpose="bind_session",
+            external_session_id=external_session_id,
+            guest_user_id=guest_user_id,
+            attempt_count=0,
+            expires_at=datetime.now(UTC) + timedelta(minutes=ttl_minutes),
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def get_open(
+        self, *, email: str, external_session_id: str
+    ) -> VerificationChallenge | None:
+        return await self.session.scalar(
+            self.scoped(
+                select(VerificationChallenge)
+                .where(
+                    VerificationChallenge.email == email.strip().lower(),
+                    VerificationChallenge.external_session_id == external_session_id,
+                    VerificationChallenge.consumed_at.is_(None),
+                )
+                .order_by(VerificationChallenge.created_at.desc()),
+                VerificationChallenge,
+            )
+        )

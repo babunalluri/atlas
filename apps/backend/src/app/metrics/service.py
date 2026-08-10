@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -141,6 +141,15 @@ class MetricsService:
             date = _day(trace.started_at)
             grouped[(date, trace.target_type, trace.target_id)].append(trace)
             by_day[date].append(trace)
+
+        # Serialize refresh per tenant so concurrent dashboard GETs cannot
+        # race delete+insert into a unique-constraint 500.
+        if self.session.bind and self.session.bind.dialect.name == "postgresql":
+            lock_key = int(self.context.tenant_id.int % (2**63 - 1))
+            await self.session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": lock_key},
+            )
 
         await self.session.execute(
             delete(MetricDailyAggregate).where(

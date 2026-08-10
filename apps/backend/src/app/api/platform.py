@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,11 @@ from app.auth.dependencies import require_roles
 from app.db.models import PlatformAuditEvent, Role, Tenant
 from app.db.repositories import PlatformPythonPackageRepository
 from app.db.session import SessionFactory
+from app.platform.tenant_import import (
+    collect_import_bundle,
+    list_tenant_catalog,
+    materialize_import_bundle,
+)
 from app.tenancy.context import TenantContext
 from app.tenancy.ids import new_id, validate_slug
 from app.api.schemas import (
@@ -70,8 +75,61 @@ class PlatformAuditOut(BaseModel):
     created_at: datetime
 
 
+class TenantCatalogItemOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    slug: str
+    kind: str
+    status: str
+
+
+class TenantImportIn(BaseModel):
+    source_tenant_id: uuid.UUID
+    destination_tenant_id: uuid.UUID
+    team_ids: list[uuid.UUID] = Field(default_factory=list)
+    workflow_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_selection(self) -> "TenantImportIn":
+        if not self.team_ids and not self.workflow_ids:
+            raise ValueError("Select at least one team or workflow to import")
+        if self.source_tenant_id == self.destination_tenant_id:
+            raise ValueError("Source and destination tenants must differ")
+        return self
+
+
+class TenantImportOut(BaseModel):
+    agents: dict[str, str]
+    teams: dict[str, str]
+    workflows: dict[str, str]
+    tools: dict[str, str]
+    knowledge_bases: dict[str, str]
+    warnings: list[str]
+    counts: dict[str, int]
+
+
 def tenant_out(tenant: Tenant) -> TenantOut:
     return TenantOut.model_validate(tenant, from_attributes=True)
+
+
+def _scoped_context(actor: TenantContext, tenant: Tenant) -> TenantContext:
+    return TenantContext(
+        tenant_id=tenant.id,
+        user_id=actor.user_id,
+        role=Role.platform_admin,
+        clerk_org_id=tenant.clerk_org_id,
+    )
+
+
+async def _tenant_rls_session(tenant_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
+    async with SessionFactory() as session, session.begin():
+        if session.bind and session.bind.dialect.name == "postgresql":
+            await session.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": str(tenant_id)},
+            )
+        session.info["tenant_id"] = tenant_id
+        yield session
 
 
 async def audit(
@@ -138,6 +196,53 @@ async def create_tenant(
     return tenant_out(tenant)
 
 
+@router.post("/tenants/import", response_model=TenantImportOut)
+async def import_tenant_resources(
+    payload: TenantImportIn,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> TenantImportOut:
+    source = await session.get(Tenant, payload.source_tenant_id)
+    destination = await session.get(Tenant, payload.destination_tenant_id)
+    if source is None or not source.is_active:
+        raise HTTPException(status_code=404, detail="Active source tenant not found")
+    if destination is None or not destination.is_active:
+        raise HTTPException(
+            status_code=404, detail="Active destination tenant not found"
+        )
+
+    source_context = _scoped_context(context, source)
+    dest_context = _scoped_context(context, destination)
+
+    try:
+        async for source_session in _tenant_rls_session(source.id):
+            bundle = await collect_import_bundle(
+                source_session,
+                source_context,
+                team_ids=payload.team_ids,
+                workflow_ids=payload.workflow_ids,
+            )
+        async for dest_session in _tenant_rls_session(destination.id):
+            result = await materialize_import_bundle(
+                dest_session, dest_context, bundle
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    details = {
+        "source_tenant_id": str(source.id),
+        "destination_tenant_id": str(destination.id),
+        "team_ids": [str(item) for item in payload.team_ids],
+        "workflow_ids": [str(item) for item in payload.workflow_ids],
+        "counts": result.as_dict()["counts"],
+        "warnings": result.warnings,
+    }
+    await audit(session, context, "tenant.import", destination.id, details)
+    return TenantImportOut.model_validate(result.as_dict())
+
+
 @router.patch("/tenants/{tenant_id}", response_model=TenantOut)
 async def update_tenant(
     tenant_id: uuid.UUID,
@@ -191,6 +296,34 @@ async def enter_tenant_workspace(
         {"slug": tenant.slug},
     )
     return tenant_out(tenant)
+
+
+@router.get(
+    "/tenants/{tenant_id}/catalog",
+    response_model=list[TenantCatalogItemOut],
+)
+async def get_tenant_catalog(
+    tenant_id: uuid.UUID,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> list[TenantCatalogItemOut]:
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None or not tenant.is_active:
+        raise HTTPException(status_code=404, detail="Active tenant not found")
+    scoped = _scoped_context(context, tenant)
+    async for tenant_session in _tenant_rls_session(tenant.id):
+        items = await list_tenant_catalog(tenant_session, scoped)
+        return [
+            TenantCatalogItemOut(
+                id=item.id,
+                name=item.name,
+                slug=item.slug,
+                kind=item.kind,
+                status=item.status,
+            )
+            for item in items
+        ]
+    return []
 
 
 @router.get("/audit", response_model=list[PlatformAuditOut])

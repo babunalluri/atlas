@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { TrashIcon } from "@/components/ui/icons";
+import { PencilIcon, TrashIcon } from "@/components/ui/icons";
 import { deleteTenantUser } from "@/lib/api/admin";
 import type { TenantUser } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -20,7 +20,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
   const { getAccessToken } = useAgentOsToken();
   const [users, setUsers] = useState(initialUsers);
   const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
@@ -57,7 +57,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
     ) {
       return;
     }
-    setDeletingId(user.id);
+    setDeletingIds((current) => new Set(current).add(user.id));
     setError(null);
     try {
       await deleteTenantUser(await getAccessToken(), user.id);
@@ -67,7 +67,11 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
         reason instanceof Error ? reason.message : "Failed to delete user",
       );
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(user.id);
+        return next;
+      });
     }
   }
 
@@ -164,10 +168,10 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
           <div className="grid min-w-0 flex-1 grid-cols-[1.4fr_0.7fr_0.6fr_0.6fr] gap-3">
             <span className="th-label">User</span>
             <span className="th-label">Role</span>
-            <span className="th-label">Workflows</span>
+            <span className="th-label">Access</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label w-9 shrink-0 text-right"> </span>
+          <span className="th-label w-auto shrink-0 text-right">Actions</span>
         </div>
         <ul>
           {pageItems.map((user) => (
@@ -194,23 +198,38 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
                     {!user.isActive ? (
                       <Badge tone="warning">Inactive</Badge>
                     ) : null}
+                    {user.invitePending ? (
+                      <Badge tone="warning">Invite pending</Badge>
+                    ) : null}
                   </div>
                   <p className="text-sm text-slate-muted">
-                    {user.workflowIds.length}
+                    {user.workflowIds.length + user.teamIds.length}
                   </p>
                   <p className="mono-cell text-right text-slate-muted">
                     {formatRelative(user.updatedAt)}
                   </p>
                 </Link>
-                <div className="flex w-9 shrink-0 items-center justify-end">
+                <div className="flex shrink-0 items-center justify-end gap-0.5">
+                  <Link
+                    href={`/admin/users/${user.id}`}
+                    className={buttonClassName({
+                      variant: "ghost",
+                      size: "icon",
+                    })}
+                    aria-label={`Edit ${user.displayName}`}
+                    title="Edit"
+                  >
+                    <PencilIcon />
+                  </Link>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${user.displayName}`}
-                    disabled={deletingId === user.id}
+                    title="Delete"
+                    disabled={deletingIds.has(user.id)}
                     onClick={() => void onDelete(user)}
                   >
-                    {deletingId === user.id ? "…" : <TrashIcon />}
+                    {deletingIds.has(user.id) ? "…" : <TrashIcon />}
                   </Button>
                 </div>
               </div>

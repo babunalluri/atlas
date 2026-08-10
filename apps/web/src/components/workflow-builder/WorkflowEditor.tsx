@@ -182,7 +182,7 @@ export function WorkflowEditor({
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5">
             <BackLink href="/admin/workflows" label="Back to workflows" />
-            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+            <h1 className="min-w-0 truncate py-0.5 font-display text-2xl font-semibold leading-snug tracking-tight">
               {form.name || "Untitled workflow"}
             </h1>
           </div>
@@ -295,53 +295,71 @@ export function WorkflowEditor({
             {form.steps.map((step, index) => (
               <li
                 key={`${step.targetConfigId}-${index}`}
-                className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/40 px-2.5 py-2"
+                className="space-y-2 rounded-md border border-line bg-canvas/40 px-2.5 py-2"
               >
-                <span className="w-5 shrink-0 text-center text-xs text-slate-muted">
-                  {index + 1}
-                </span>
-                <Input
-                  aria-label={`Step ${index + 1} name`}
-                  value={step.name}
-                  onChange={(event) =>
-                    updateStep(index, { name: event.target.value })
-                  }
-                  className="min-w-0 max-w-xs flex-1 py-1.5"
-                />
-                <span className="hidden min-w-0 truncate text-xs text-slate-muted sm:inline">
-                  {step.targetName || step.targetSlug}
-                </span>
-                <Badge>{step.targetType}</Badge>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => move(index, -1)}
-                  disabled={index === 0}
-                >
-                  ↑
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => move(index, 1)}
-                  disabled={index === form.steps.length - 1}
-                >
-                  ↓
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() =>
-                    setForm((previous) => ({
-                      ...previous,
-                      steps: previous.steps.filter(
-                        (_, position) => position !== index,
-                      ),
-                    }))
-                  }
-                >
-                  Remove
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="w-5 shrink-0 text-center text-xs text-slate-muted">
+                    {index + 1}
+                  </span>
+                  <Input
+                    aria-label={`Step ${index + 1} name`}
+                    value={step.name}
+                    onChange={(event) =>
+                      updateStep(index, { name: event.target.value })
+                    }
+                    className="min-w-0 max-w-xs flex-1 py-1.5"
+                  />
+                  <span className="hidden min-w-0 truncate text-xs text-slate-muted sm:inline">
+                    {step.targetName || step.targetSlug}
+                  </span>
+                  <Badge>{step.targetType}</Badge>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => move(index, -1)}
+                    disabled={index === 0}
+                  >
+                    ↑
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => move(index, 1)}
+                    disabled={index === form.steps.length - 1}
+                  >
+                    ↓
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      setForm((previous) => ({
+                        ...previous,
+                        steps: previous.steps.filter(
+                          (_, position) => position !== index,
+                        ),
+                      }))
+                    }
+                  >
+                    Remove
+                  </Button>
+                </div>
+                <div>
+                  <Label htmlFor={`workflow-step-${index}-condition`}>
+                    Condition expression
+                  </Label>
+                  <Input
+                    id={`workflow-step-${index}-condition`}
+                    value={step.conditionExpression ?? ""}
+                    onChange={(event) =>
+                      updateStep(index, {
+                        conditionExpression: event.target.value || null,
+                      })
+                    }
+                    placeholder="Optional CEL, e.g. input.priority == 'high'"
+                    className="py-1.5 font-mono text-xs"
+                  />
+                </div>
               </li>
             ))}
           </ol>

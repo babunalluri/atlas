@@ -60,6 +60,23 @@ export function classifyActivityChannel(
   return "live_chat";
 }
 
+/** Prefer server user_label; fall back to readable guest/API shortcuts. */
+export function activityUserLabel(session: Pick<AdminSession, "userId" | "userLabel">): string {
+  const labeled = session.userLabel?.trim();
+  if (labeled) return labeled;
+  const userId = session.userId;
+  if (userId.startsWith("guest:")) {
+    const rest = userId.slice("guest:".length);
+    if (rest.startsWith("ip:")) return "Guest (anonymous)";
+    return `Guest · ${rest.slice(0, 8)}`;
+  }
+  if (userId.startsWith("sa:")) return `API · ${userId.slice(3, 11)}`;
+  if (userId.startsWith("user_") && userId.length > 16) {
+    return `User · ${userId.slice(5, 13)}…`;
+  }
+  return userId;
+}
+
 export function buildActivityRows(input: {
   sessions: AdminSession[];
   schedules: AgentSchedule[];
@@ -88,6 +105,7 @@ export function buildActivityRows(input: {
         id: session.id,
         title: session.title?.trim() || "Untitled session",
         userId: session.userId,
+        userLabel: activityUserLabel(session),
         personaName,
         personaType: session.targetType,
         taskName,
@@ -135,20 +153,23 @@ export function activityTargetTypeLabel(
   return "Workflow";
 }
 
+/** Fixed IANA zone for traces/activities — never use browser default (SSR hydration). */
+export const ACTIVITY_DISPLAY_TIMEZONE = "Asia/Kolkata";
+/** Short label shown in UI column headers / absolute time suffixes. */
+export const ACTIVITY_DISPLAY_ZONE_LABEL = "IST";
+
+/** Stable for SSR/client — avoid default locale/timezone (hydration mismatch). */
 export function formatActivityTime(iso: string): {
   absolute: string;
   zone: string;
 } {
   const date = new Date(iso);
-  const absolute = new Intl.DateTimeFormat(undefined, {
+  const absolute = new Intl.DateTimeFormat("en-US", {
     dateStyle: "medium",
     timeStyle: "medium",
+    timeZone: ACTIVITY_DISPLAY_TIMEZONE,
   }).format(date);
-  const zone =
-    new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
-      .formatToParts(date)
-      .find((part) => part.type === "timeZoneName")?.value ?? "local";
-  return { absolute, zone };
+  return { absolute, zone: ACTIVITY_DISPLAY_ZONE_LABEL };
 }
 
 export function formatDurationMs(value: number | null | undefined): string {

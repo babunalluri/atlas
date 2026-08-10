@@ -12,17 +12,47 @@ import {
   type ToolKind,
 } from "@/lib/api/types";
 
+function capabilityNames(definition: ToolDefinition): string[] {
+  const caps = definition.config.capabilities;
+  if (!Array.isArray(caps)) return [];
+  return caps
+    .map((item) =>
+      item && typeof item === "object" && "name" in item
+        ? String((item as { name: unknown }).name)
+        : "",
+    )
+    .filter(Boolean);
+}
+
 function reusableSummary(definition: ToolDefinition): string {
   if (definition.kind === "http") {
     return `${definition.httpMethod ?? "HTTP"} ${definition.baseUrl ?? ""}${
       definition.path ?? ""
     }`;
   }
+  const kindLabel = definition.kind.replaceAll("_", " ");
+  // tenant_python: agent attach uses all published methods — no per-binding picker.
+  if (definition.kind === "tenant_python") {
+    const names = capabilityNames(definition);
+    if (names.length > 0) {
+      return `${kindLabel} · ${names.length} capabilities (${names.join(", ")})`;
+    }
+    // Empty list is still valid: runtime AST-discovers async methods from source.
+    return `${kindLabel} · all source capabilities`;
+  }
   const selected =
     (definition.config.allowed_operations as string[] | undefined) ??
     (definition.config.include_tools as string[] | undefined) ??
     [];
-  return `${definition.kind.replace("_", " ")} · ${selected.length} selected capabilities`;
+  // Toolkit / custom_python: empty include_tools means all capabilities at runtime.
+  if (
+    (definition.kind === "python_toolkit" ||
+      definition.kind === "custom_python") &&
+    selected.length === 0
+  ) {
+    return `${kindLabel} · all capabilities`;
+  }
+  return `${kindLabel} · ${selected.length} selected capabilities`;
 }
 
 export function ToolAttachmentSection({
@@ -84,6 +114,13 @@ export function ToolAttachmentSection({
     if (scope === "builtin") return [];
     return toolDefinitions.filter((definition) => {
       if (!definition.active) return false;
+      // Editable Python tools are only runnable after Publish pins a version.
+      if (
+        definition.kind === "tenant_python" &&
+        !definition.publishedVersionId
+      ) {
+        return false;
+      }
       if (enabledDefinitionIds.has(definition.id)) return false;
       if (!q) return true;
       const haystack = [
@@ -209,6 +246,7 @@ export function ToolAttachmentSection({
             const definition = tool.definitionId
               ? definitionById.get(tool.definitionId)
               : undefined;
+            const displayLabel = definition?.name ?? tool.label;
             const summary = definition
               ? reusableSummary(definition)
               : TOOL_CATALOG.find((item) => item.kind === tool.kind)
@@ -229,7 +267,7 @@ export function ToolAttachmentSection({
                 <div className="flex items-center gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="truncate text-sm font-medium">{tool.label}</p>
+                      <p className="truncate text-sm font-medium">{displayLabel}</p>
                       <span className="text-[10px] uppercase tracking-wide text-slate-muted">
                         {tool.definitionId ? "tenant" : "built-in"}
                       </span>

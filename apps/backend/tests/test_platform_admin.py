@@ -95,3 +95,56 @@ async def test_platform_admin_cannot_suspend_home_tenant(session, platform_admin
             session,
         )
     assert error.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_header_switches_tenant_context(tenant_a, tenant_b):
+    from starlette.requests import Request
+
+    from app.auth.dependencies import require_tenant
+    from app.core.settings import Settings
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    settings = Settings(
+        auth_disabled=True,
+        database_url="sqlite+aiosqlite:///:memory:",
+        credential_encryption_key="dev-only-change-me-please-32b",
+    )
+
+    def make_scope() -> dict:
+        return {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/admin/agents",
+            "raw_path": b"/admin/agents",
+            "query_string": b"",
+            "headers": [
+                (b"x-dev-tenant-id", str(tenant_a.tenant_id).encode()),
+                (b"x-dev-user-id", b"platform-owner"),
+                (b"x-dev-role", b"platform_admin"),
+            ],
+            "client": ("127.0.0.1", 123),
+            "server": ("test", 80),
+        }
+
+    home = await require_tenant(
+        Request(make_scope(), receive),
+        authorization=None,
+        x_platform_tenant_id=None,
+        settings=settings,
+    )
+    assert home.tenant_id == tenant_a.tenant_id
+
+    switched = await require_tenant(
+        Request(make_scope(), receive),
+        authorization=None,
+        x_platform_tenant_id=str(tenant_b.tenant_id),
+        settings=settings,
+    )
+    assert switched.tenant_id == tenant_b.tenant_id
+    assert switched.role == Role.platform_admin

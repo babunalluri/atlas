@@ -12,8 +12,13 @@ const nextConfig: NextConfig = {
         permanent: false,
       },
       {
+        source: "/admin/activities/:id",
+        destination: "/admin/traces/:id",
+        permanent: false,
+      },
+      {
         source: "/admin/activities/:path*",
-        destination: "/admin/traces/:path*",
+        destination: "/admin/traces",
         permanent: false,
       },
       {
@@ -22,8 +27,13 @@ const nextConfig: NextConfig = {
         permanent: false,
       },
       {
+        source: "/admin/sessions/:id",
+        destination: "/admin/traces/:id",
+        permanent: false,
+      },
+      {
         source: "/admin/sessions/:path*",
-        destination: "/admin/traces/:path*",
+        destination: "/admin/traces",
         permanent: false,
       },
     ];

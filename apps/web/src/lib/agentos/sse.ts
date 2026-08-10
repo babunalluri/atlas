@@ -24,6 +24,17 @@ function isAbortError(err: unknown): boolean {
   );
 }
 
+function abortError(err?: unknown): DOMException {
+  if (
+    typeof DOMException !== "undefined" &&
+    err instanceof DOMException &&
+    err.name === "AbortError"
+  ) {
+    return err;
+  }
+  return new DOMException("Aborted", "AbortError");
+}
+
 /**
  * Parse a complete SSE buffer chunk into frames.
  * Handles multi-line `data:` fields and ignores comments.
@@ -145,7 +156,7 @@ export async function streamAgentRun(
     ("tenant_id" in body || "tenantId" in body)
   ) {
     throw new SseError(
-      "tenant_id must not be supplied by the client; it is derived from Clerk claims",
+      "tenant_id must not be supplied by the client; it is derived from auth claims",
     );
   }
 
@@ -182,7 +193,7 @@ export async function streamAgentRun(
     });
   } catch (err) {
     if (signal?.aborted || isAbortError(err)) {
-      return { lastEventId };
+      throw abortError(err);
     }
     throw err;
   }
@@ -242,7 +253,7 @@ export async function streamAgentRun(
     }
   } catch (err) {
     if (signal?.aborted || isAbortError(err)) {
-      return { lastEventId: seenEventId };
+      throw abortError(err);
     }
     throw err;
   } finally {
@@ -288,7 +299,7 @@ export async function streamPublicRun(
     });
   } catch (err) {
     if (signal?.aborted || isAbortError(err)) {
-      return { lastEventId };
+      throw abortError(err);
     }
     throw err;
   }
@@ -348,7 +359,7 @@ export async function streamPublicRun(
     }
   } catch (err) {
     if (signal?.aborted || isAbortError(err)) {
-      return { lastEventId: seenEventId };
+      throw abortError(err);
     }
     throw err;
   } finally {

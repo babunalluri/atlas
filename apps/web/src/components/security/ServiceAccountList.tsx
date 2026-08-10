@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { TrashIcon } from "@/components/ui/icons";
+import { PencilIcon, TrashIcon } from "@/components/ui/icons";
 import {
   revokeServiceAccount,
   type ServiceAccountSummary,
@@ -28,7 +28,7 @@ export function ServiceAccountList({
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
-  const [revokingId, setRevokingId] = useState<string | null>(null);
+  const [revokingIds, setRevokingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
@@ -60,7 +60,7 @@ export function ServiceAccountList({
     ) {
       return;
     }
-    setRevokingId(account.id);
+    setRevokingIds((current) => new Set(current).add(account.id));
     setError(null);
     try {
       await revokeServiceAccount(await getAccessToken(), account.id);
@@ -73,7 +73,11 @@ export function ServiceAccountList({
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Revoke failed");
     } finally {
-      setRevokingId(null);
+      setRevokingIds((current) => {
+        const next = new Set(current);
+        next.delete(account.id);
+        return next;
+      });
     }
   }
 
@@ -166,14 +170,14 @@ export function ServiceAccountList({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 border-b border-line px-4 py-2">
-          <div className="hidden min-w-0 flex-1 grid-cols-[1.3fr_1.2fr_0.8fr_0.6fr] gap-3 md:grid">
+        <div className="hidden items-center gap-3 border-b border-line px-4 py-2 md:flex">
+          <div className="grid min-w-0 flex-1 grid-cols-[1.3fr_1.2fr_0.8fr_0.6fr] gap-3">
             <span className="th-label">Account</span>
             <span className="th-label">Scopes</span>
             <span className="th-label">Activity</span>
             <span className="th-label text-right">Status</span>
           </div>
-          <span className="th-label w-9 shrink-0 text-right"> </span>
+          <span className="th-label w-auto shrink-0 text-right">Actions</span>
         </div>
         <ul>
           {pageItems.map((account) => (
@@ -209,16 +213,28 @@ export function ServiceAccountList({
                     </Badge>
                   </div>
                 </Link>
-                <div className="flex w-9 shrink-0 items-center justify-end">
+                <div className="flex shrink-0 items-center justify-end gap-0.5">
+                  <Link
+                    href={`/admin/service-accounts/${account.id}`}
+                    className={buttonClassName({
+                      variant: "ghost",
+                      size: "icon",
+                    })}
+                    aria-label={`Edit ${account.name}`}
+                    title="Edit"
+                  >
+                    <PencilIcon />
+                  </Link>
                   {!account.revokedAt ? (
                     <Button
                       size="icon"
                       variant="danger"
                       aria-label={`Revoke ${account.name}`}
-                      disabled={revokingId === account.id}
+                      title="Revoke"
+                      disabled={revokingIds.has(account.id)}
                       onClick={() => void onRevoke(account)}
                     >
-                      {revokingId === account.id ? "…" : <TrashIcon />}
+                      {revokingIds.has(account.id) ? "…" : <TrashIcon />}
                     </Button>
                   ) : null}
                 </div>

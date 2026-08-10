@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -11,9 +12,15 @@ import {
 } from "react";
 
 import { ApprovalBanner } from "@/components/chat/ApprovalBanner";
+import { ChatAccountBar } from "@/components/chat/ChatAccountBar";
 import { MessageComposer } from "@/components/chat/MessageComposer";
 import { ChatMessageList } from "@/components/chat/MessageList";
 import { SessionPicker } from "@/components/chat/SessionPicker";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
+import {
+  ThemeToggle,
+  useSurfaceTheme,
+} from "@/components/layout/ThemeToggle";
 import {
   extractTextContent,
   isPausedRunEvent,
@@ -21,18 +28,19 @@ import {
   type RunEventBase,
 } from "@/lib/agentos/sse";
 import {
-  getOrCreateGuestId,
-  streamPublicAgent,
-  streamPublicTeam,
-  streamPublicWorkflow,
+  cancelConfiguredRun,
+  resumeConfiguredRun,
+  streamConfiguredTeam,
+  streamConfiguredWorkflow,
 } from "@/lib/agentos/client";
+import { getWorkspaceInfo } from "@/lib/api/admin";
 import type {
   ChatMessage,
   ConversationSession,
-  PublicAgentSurface,
   PublicTeamSurface,
   PublicWorkflowSurface,
 } from "@/lib/api/types";
+import { useAgentOsToken } from "@/lib/auth/token";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -61,7 +69,7 @@ export function CustomerChat({
   surface,
   embedded = false,
 }: {
-  surface: PublicAgentSurface | PublicTeamSurface | PublicWorkflowSurface;
+  surface: PublicTeamSurface | PublicWorkflowSurface;
   /** Compact layout for iframe embeds (no session sidebar). */
   embedded?: boolean;
 }) {
@@ -77,13 +85,8 @@ export function CustomerChat({
     workflowTeams.find((team) => team.id === selectedTeamId) ?? null;
 
   const target =
-    "workflow" in surface
-      ? surface.workflow
-      : "team" in surface
-        ? surface.team
-        : surface.agent;
-  const baseTargetType =
-    "workflow" in surface ? "workflow" : "team" in surface ? "team" : "agent";
+    "workflow" in surface ? surface.workflow : surface.team;
+  const baseTargetType = "workflow" in surface ? "workflow" : "team";
   const activeTargetType =
     baseTargetType === "workflow" && runMode === "team" && selectedTeam
       ? "team"
@@ -97,7 +100,13 @@ export function CustomerChat({
       ? selectedTeam.slug
       : target.slug;
 
-  const guestId = useMemo(() => getOrCreateGuestId(), []);
+  const router = useRouter();
+  const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
+  const { theme, dark, changeTheme } = useSurfaceTheme("workspace");
+  const [canAdminister, setCanAdminister] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+  // Org-only product: hosted and embed chat require Clerk sign-in.
+  const useStaffAuth = isLoaded && isSignedIn;
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string>();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -105,6 +114,37 @@ export function CustomerChat({
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
+  const lastEventIdRef = useRef<string | undefined>(undefined);
+  const cancelRequestedRef = useRef(false);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (!isSignedIn) {
+      const next =
+        typeof window !== "undefined"
+          ? `${window.location.pathname}${window.location.search}`
+          : `/t/${surface.tenant.slug}/chat`;
+      router.replace(`/sign-in?redirect_url=${encodeURIComponent(next)}`);
+      return;
+    }
+    setAuthReady(true);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await getAccessToken();
+        const workspace = await getWorkspaceInfo(token);
+        if (!cancelled) {
+          setCanAdminister(workspace.can_administer === true);
+        }
+      } catch {
+        if (!cancelled) setCanAdminister(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getAccessToken, isLoaded, isSignedIn, router, surface.tenant.slug]);
 
   const welcomeMessages = useCallback(
     (): ChatMessage[] => [
@@ -131,7 +171,67 @@ export function CustomerChat({
     [surface.tenant.accentColor, surface.tenant.primaryColor],
   );
 
+  function abortActiveStream() {
+    cancelRequestedRef.current = true;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+  }
+
+  function resolveStaffTeamConfigId(): string | null {
+    if (activeTargetType !== "team") return null;
+    if ("workflow" in surface && selectedTeam && runMode === "team") {
+      return selectedTeam.id;
+    }
+    if ("team" in surface) return surface.team.id;
+    return null;
+  }
+
+  async function cancelActiveRun() {
+    cancelRequestedRef.current = true;
+    const runId = runIdRef.current;
+    const sessionId = activeSessionId;
+    if (runId && sessionId && useStaffAuth) {
+      try {
+        const accessToken = await getAccessToken();
+        if (activeTargetType === "team") {
+          const configId = resolveStaffTeamConfigId();
+          if (configId) {
+            await cancelConfiguredRun({
+              accessToken,
+              kind: "team",
+              runId,
+              sessionId,
+              configId,
+            });
+          }
+        } else if ("workflow" in surface) {
+          await cancelConfiguredRun({
+            accessToken,
+            kind: "workflow",
+            runId,
+            sessionId,
+            configId: surface.workflow.id,
+          });
+        }
+      } catch {
+        // Best-effort: still abort the local stream.
+      }
+    }
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+  }
+
   useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    abortActiveStream();
     const session: ConversationSession = {
       id: crypto.randomUUID(),
       title: "New conversation",
@@ -151,6 +251,7 @@ export function CustomerChat({
   }, [activeTargetSlug, activeTargetType]);
 
   function createSession() {
+    abortActiveStream();
     const session: ConversationSession = {
       id: crypto.randomUUID(),
       title: "New conversation",
@@ -168,6 +269,7 @@ export function CustomerChat({
   }
 
   function selectSession(sessionId: string) {
+    abortActiveStream();
     setActiveSessionId(sessionId);
     setError(null);
     setPaused(false);
@@ -190,7 +292,7 @@ export function CustomerChat({
   }
 
   async function send(text: string) {
-    if (!activeSessionId) return;
+    if (!activeSessionId || !useStaffAuth) return;
     setError(null);
     setPaused(false);
 
@@ -230,124 +332,257 @@ export function CustomerChat({
 
     const controller = new AbortController();
     abortRef.current = controller;
+    cancelRequestedRef.current = false;
+    runIdRef.current = null;
+    lastEventIdRef.current = undefined;
     setStreaming(true);
 
+    const trackEvent = (event: RunEventBase, frame?: { id?: string }) => {
+      if (typeof event.run_id === "string") {
+        runIdRef.current = event.run_id;
+      }
+      if (frame?.id) {
+        lastEventIdRef.current = frame.id;
+      }
+    };
+
     try {
-      const runOptions = {
-        tenantSlug: surface.tenant.slug,
-        message: text,
-        sessionId: activeSessionId,
-        guestId,
-        signal: controller.signal,
-        onEvent: (event: RunEventBase) => {
-          if (
-            event.event === "RunContent" ||
-            event.event === "TeamRunContent"
-          ) {
-            const chunk = extractTextContent(event.content);
-            if (chunk) {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId
-                    ? { ...m, content: `${m.content}${chunk}` }
-                    : m,
-                ),
-              );
-            }
-          }
-          if (isPausedRunEvent(event)) {
-            setPaused(true);
-            setSessions((prev) =>
-              prev.map((s) =>
-                s.id === activeSessionId
-                  ? {
-                      ...s,
-                      pausedForApproval: true,
-                      status: "paused",
-                      lastRunId:
-                        typeof event.run_id === "string"
-                          ? event.run_id
-                          : s.lastRunId,
-                    }
-                  : s,
-              ),
-            );
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, status: "paused" } : m,
-              ),
-            );
-          }
-          if (event.event === "RunError") {
-            setError(String(event.error ?? "Something went wrong"));
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, status: "error" } : m,
-              ),
-            );
-            setSessions((prev) =>
-              prev.map((s) =>
-                s.id === activeSessionId ? { ...s, status: "error" } : s,
-              ),
-            );
-          }
-          if (isTerminalRunEvent(event) && event.event === "RunCompleted") {
-            const sources = sourceLabels(event.references ?? event.citations);
+      const onEvent = (event: RunEventBase, frame?: { id?: string }) => {
+        trackEvent(event, frame);
+        if (
+          event.event === "RunContent" ||
+          event.event === "TeamRunContent"
+        ) {
+          const chunk = extractTextContent(event.content);
+          if (chunk) {
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
-                  ? {
-                      ...m,
-                      content:
-                        sources.length > 0
-                          ? `${m.content}\n\nSources: ${sources.join(", ")}`
-                          : m.content,
-                      status: "complete",
-                    }
+                  ? { ...m, content: `${m.content}${chunk}` }
                   : m,
               ),
             );
-            setSessions((prev) =>
-              prev.map((s) =>
-                s.id === activeSessionId
-                  ? {
-                      ...s,
-                      pausedForApproval: false,
-                      status: "completed",
-                      lastRunId:
-                        typeof event.run_id === "string"
-                          ? event.run_id
-                          : s.lastRunId,
-                    }
-                  : s,
-              ),
-            );
           }
-        },
+        }
+        if (isPausedRunEvent(event)) {
+          setPaused(true);
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === activeSessionId
+                ? {
+                    ...s,
+                    pausedForApproval: true,
+                    status: "paused",
+                    lastRunId:
+                      typeof event.run_id === "string"
+                        ? event.run_id
+                        : s.lastRunId,
+                  }
+                : s,
+            ),
+          );
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, status: "paused" } : m,
+            ),
+          );
+        }
+        if (event.event === "RunError") {
+          setError(String(event.error ?? "Something went wrong"));
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, status: "error" } : m,
+            ),
+          );
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === activeSessionId ? { ...s, status: "error" } : s,
+            ),
+          );
+        }
+        if (isTerminalRunEvent(event) && event.event === "RunCompleted") {
+          const sources = sourceLabels(event.references ?? event.citations);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    content:
+                      sources.length > 0
+                        ? `${m.content}\n\nSources: ${sources.join(", ")}`
+                        : m.content,
+                    status: "complete",
+                  }
+                : m,
+            ),
+          );
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === activeSessionId
+                ? {
+                    ...s,
+                    pausedForApproval: false,
+                    status: "completed",
+                    lastRunId:
+                      typeof event.run_id === "string"
+                        ? event.run_id
+                        : s.lastRunId,
+                  }
+                : s,
+            ),
+          );
+        }
       };
+
+      const streamOpts = {
+        message: text,
+        sessionId: activeSessionId,
+        signal: controller.signal,
+        onEvent,
+      };
+
+      let streamResult: { lastEventId?: string };
+      const accessToken = await getAccessToken();
       if (activeTargetType === "team") {
-        await streamPublicTeam({
-          ...runOptions,
-          teamSlug: activeTargetSlug,
+        const configId = resolveStaffTeamConfigId();
+        if (!configId) {
+          throw new Error("Team id is missing for authenticated run");
+        }
+        streamResult = await streamConfiguredTeam({
+          ...streamOpts,
+          accessToken,
+          teamConfigId: configId,
+          preview: false,
         });
-      } else if (activeTargetType === "workflow") {
-        await streamPublicWorkflow({
-          ...runOptions,
-          workflowSlug: activeTargetSlug,
+      } else if ("workflow" in surface) {
+        streamResult = await streamConfiguredWorkflow({
+          ...streamOpts,
+          accessToken,
+          workflowConfigId: surface.workflow.id,
+          preview: false,
         });
       } else {
-        await streamPublicAgent({
-          ...runOptions,
-          agentSlug: activeTargetSlug,
-        });
+        throw new Error("Workflow id is missing for authenticated run");
       }
-    } catch (err) {
-      if (controller.signal.aborted) {
+      if (streamResult.lastEventId) {
+        lastEventIdRef.current = streamResult.lastEventId;
+      }
+
+      if (controller.signal.aborted || cancelRequestedRef.current) {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId ? { ...m, status: "cancelled" } : m,
           ),
         );
+      }
+    } catch (err) {
+      if (controller.signal.aborted || cancelRequestedRef.current) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, status: "cancelled" } : m,
+          ),
+        );
+      } else if (
+        runIdRef.current &&
+        activeSessionId &&
+        !cancelRequestedRef.current
+      ) {
+        // Network/disconnect: one resume attempt with Last-Event-ID catch-up.
+        try {
+          const resumeController = new AbortController();
+          abortRef.current = resumeController;
+          const resumeOnEvent = (event: RunEventBase, frame?: { id?: string }) => {
+            trackEvent(event, frame);
+            if (
+              event.event === "RunContent" ||
+              event.event === "TeamRunContent"
+            ) {
+              const chunk = extractTextContent(event.content);
+              if (chunk) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, content: `${m.content}${chunk}` }
+                      : m,
+                  ),
+                );
+              }
+            }
+            if (isTerminalRunEvent(event) && event.event === "RunCompleted") {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, status: "complete" } : m,
+                ),
+              );
+            }
+            if (event.event === "RunError") {
+              setError(String(event.error ?? "Something went wrong"));
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, status: "error" } : m,
+                ),
+              );
+            }
+          };
+          const accessToken = await getAccessToken();
+          if (activeTargetType === "team") {
+            const configId = resolveStaffTeamConfigId();
+            if (!configId) throw err;
+            await resumeConfiguredRun({
+              accessToken,
+              kind: "team",
+              runId: runIdRef.current,
+              sessionId: activeSessionId,
+              configId,
+              lastEventId: lastEventIdRef.current,
+              signal: resumeController.signal,
+              onEvent: resumeOnEvent,
+            });
+          } else if ("workflow" in surface) {
+            await resumeConfiguredRun({
+              accessToken,
+              kind: "workflow",
+              runId: runIdRef.current,
+              sessionId: activeSessionId,
+              configId: surface.workflow.id,
+              lastEventId: lastEventIdRef.current,
+              signal: resumeController.signal,
+              onEvent: resumeOnEvent,
+            });
+          } else {
+            throw err;
+          }
+        } catch (resumeErr) {
+          if (
+            resumeErr instanceof Error &&
+            (resumeErr.name === "AbortError" || cancelRequestedRef.current)
+          ) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, status: "cancelled" } : m,
+              ),
+            );
+          } else {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      content: m.content || "The run could not be completed.",
+                      status: "error",
+                    }
+                  : m,
+              ),
+            );
+            setError(
+              resumeErr instanceof Error
+                ? resumeErr.message
+                : err instanceof Error
+                  ? err.message
+                  : "Stream failed",
+            );
+          }
+        }
       } else {
         setMessages((prev) =>
           prev.map((m) =>
@@ -369,39 +604,71 @@ export function CustomerChat({
   }
 
   const shellClass = embedded
-    ? "min-h-[100dvh] text-white"
-    : "min-h-screen text-white";
+    ? "min-h-[100dvh] text-ink"
+    : "min-h-screen text-ink";
+
+  if (!authReady) {
+    return (
+      <div
+        style={cssVars}
+        data-theme={dark ? "dark" : undefined}
+        className={`app-canvas ${shellClass}`}
+      >
+        <div className="flex min-h-[40vh] items-center justify-center px-6">
+          <p className="text-sm text-slate-muted">
+            {!isLoaded || !isSignedIn
+              ? "Redirecting to sign in…"
+              : "Loading workspace…"}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div style={cssVars} data-theme="dark" className={shellClass}>
+    <div
+      style={cssVars}
+      data-theme={dark ? "dark" : undefined}
+      className={`app-canvas ${shellClass}`}
+    >
       <div
-        className={`relative overflow-hidden ${embedded ? "min-h-[100dvh]" : "min-h-screen"}`}
-        style={{
-          background: `
+        className={`relative ${embedded ? "min-h-[100dvh]" : "min-h-screen"}`}
+        style={
+          dark
+            ? {
+                background: `
             radial-gradient(1000px 500px at 15% 0%, color-mix(in oklab, var(--tenant-accent) 35%, transparent), transparent 55%),
             linear-gradient(160deg, var(--tenant-primary) 0%, #04110c 55%, #020807 100%)
           `,
-        }}
+              }
+            : undefined
+        }
       >
-        <div className="pointer-events-none absolute inset-0 opacity-[0.18] grid-noise" />
+        <div className="pointer-events-none absolute inset-0 opacity-[0.14] grid-noise" />
         <div
-          className={`relative mx-auto grid gap-0 ${
+          className={`relative mx-auto grid ${
             embedded
               ? "min-h-[100dvh] max-w-none"
-              : "min-h-screen max-w-6xl lg:grid-cols-[240px_minmax(0,1fr)]"
+              : "h-screen max-w-6xl lg:grid-cols-[220px_minmax(0,1fr)]"
           }`}
         >
           {!embedded ? (
-            <aside className="border-b border-white/10 p-5 lg:border-b-0 lg:border-r">
-              <p className="font-display text-3xl font-semibold tracking-tight">
-                {surface.tenant.name}
-              </p>
-              {surface.tenant.tagline ? (
-                <p className="mt-2 text-sm text-white/65">
-                  {surface.tenant.tagline}
+            <aside className="flex flex-col border-b border-line p-5 lg:border-b-0 lg:border-r">
+              <div>
+                <p className="font-display text-2xl font-semibold tracking-tight text-ink">
+                  {surface.tenant.name}
                 </p>
-              ) : null}
-              <div className="mt-8">
+                {surface.tenant.tagline ? (
+                  <p className="mt-1.5 text-sm text-slate-muted">
+                    {surface.tenant.tagline}
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-xs uppercase tracking-[0.14em] text-slate-muted">
+                    Workspace chat
+                  </p>
+                )}
+              </div>
+              <div className="mt-8 flex min-h-0 flex-1 flex-col">
                 <SessionPicker
                   sessions={sessions}
                   activeId={activeSessionId}
@@ -410,40 +677,67 @@ export function CustomerChat({
                   onDelete={(id) => removeSession(id)}
                 />
               </div>
+              <Link
+                href={`/t/${surface.tenant.slug}/chat`}
+                className="mt-4 text-xs font-medium text-slate-muted transition hover:text-[var(--tenant-accent)]"
+              >
+                ← All workflows & teams
+              </Link>
             </aside>
           ) : null}
 
           <section
-            className={`flex flex-col ${embedded ? "min-h-[100dvh]" : "min-h-[70vh]"}`}
+            className={`flex min-h-0 flex-col ${embedded ? "min-h-[100dvh]" : "h-screen"}`}
           >
-            <header className="border-b border-white/10 px-5 py-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--tenant-accent)]">
-                  {embedded ? surface.tenant.name : target.slug}
-                </p>
-                {!embedded && baseTargetType === "workflow" ? (
-                  <Link
-                    href={`/t/${surface.tenant.slug}/chat`}
-                    className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-white/70 transition hover:border-[var(--tenant-accent)]/60 hover:text-white"
+            <header className="shrink-0 border-b border-line px-5 py-3.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--tenant-accent)]">
+                    {baseTargetType === "workflow" ? "Workflow" : "Team"}
+                    {!embedded ? ` · ${target.slug}` : ""}
+                  </p>
+                  <h1
+                    className={`mt-1 truncate font-display font-semibold tracking-tight text-ink ${
+                      embedded ? "text-xl" : "text-2xl"
+                    }`}
                   >
-                    Switch workflow
-                  </Link>
-                ) : null}
+                    {activeTargetName}
+                  </h1>
+                  {!embedded && target.description ? (
+                    <p className="mt-1 line-clamp-2 max-w-2xl text-sm text-slate-muted">
+                      {target.description}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <NotificationBell />
+                  <ThemeToggle theme={theme} onChange={changeTheme} />
+                  {!embedded ? (
+                    <Link
+                      href={`/t/${surface.tenant.slug}/chat`}
+                      className="rounded-lg border border-line bg-raised/70 px-3 py-1.5 text-xs font-medium text-slate-muted transition hover:border-[var(--tenant-accent)]/60 hover:text-ink"
+                    >
+                      Back to workspace
+                    </Link>
+                  ) : null}
+                  {canAdminister ? (
+                    <Link
+                      href="/admin/agents"
+                      className="rounded-lg border border-line bg-raised/70 px-3 py-1.5 text-xs font-medium text-slate-muted transition hover:border-[var(--tenant-accent)]/60 hover:text-ink"
+                    >
+                      Admin
+                    </Link>
+                  ) : null}
+                  {!embedded ? (
+                    <ChatAccountBar
+                      tenantSlug={surface.tenant.slug}
+                      signInRedirect={`/t/${surface.tenant.slug}/chat`}
+                    />
+                  ) : null}
+                </div>
               </div>
-              <h1
-                className={`mt-1 font-display font-semibold tracking-tight ${
-                  embedded ? "text-xl" : "text-3xl"
-                }`}
-              >
-                {activeTargetName}
-              </h1>
-              {!embedded ? (
-                <p className="mt-1 max-w-2xl text-sm text-white/65">
-                  {target.description}
-                </p>
-              ) : null}
               {baseTargetType === "workflow" && workflowTeams.length > 0 ? (
-                <div className="mt-4 flex flex-wrap gap-2">
+                <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={() => {
@@ -451,8 +745,8 @@ export function CustomerChat({
                     }}
                     className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
                       runMode === "workflow"
-                        ? "border-[var(--tenant-accent)] bg-white/10 text-white"
-                        : "border-white/15 text-white/65 hover:border-white/30 hover:text-white"
+                        ? "border-[var(--tenant-accent)] bg-[var(--tenant-accent)]/10 text-ink"
+                        : "border-line text-slate-muted hover:border-line-strong hover:text-ink"
                     }`}
                   >
                     Full workflow
@@ -467,8 +761,8 @@ export function CustomerChat({
                       }}
                       className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
                         runMode === "team" && selectedTeamId === team.id
-                          ? "border-[var(--tenant-accent)] bg-white/10 text-white"
-                          : "border-white/15 text-white/65 hover:border-white/30 hover:text-white"
+                          ? "border-[var(--tenant-accent)] bg-[var(--tenant-accent)]/10 text-ink"
+                          : "border-line text-slate-muted hover:border-line-strong hover:text-ink"
                       }`}
                     >
                       {team.stepName || team.name}
@@ -478,16 +772,30 @@ export function CustomerChat({
               ) : null}
             </header>
             <ApprovalBanner visible={paused} />
-            <ChatMessageList messages={messages} dark />
+            <ChatMessageList
+              messages={messages}
+              dark={dark}
+              targetName={activeTargetName}
+              starters={[
+                "What can you help me with?",
+                "Walk me through the next steps.",
+                "Summarize what this workflow is for.",
+              ]}
+              onStarter={(text) => {
+                void send(text);
+              }}
+            />
             {error ? (
-              <p className="px-5 py-2 text-xs text-amber">{error}</p>
+              <p className="shrink-0 px-5 py-2 text-xs text-amber">{error}</p>
             ) : null}
             <MessageComposer
-              dark
+              dark={dark}
               disabled={streaming || paused || !activeSessionId}
               streaming={streaming}
               onSend={send}
-              onCancel={() => abortRef.current?.abort()}
+              onCancel={() => {
+                void cancelActiveRun();
+              }}
               placeholder={`Message ${activeTargetName}…`}
             />
           </section>

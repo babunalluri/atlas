@@ -6,19 +6,34 @@ from app.metrics.service import MetricsService
 from app.observability.repository import TraceRepository
 
 
-async def _agent_and_conversation(session, context, suffix: str):
+async def _team_and_conversation(session, context, suffix: str):
+    from app.db.repositories import TeamRepository
+
     agents = AgentRepository(session, context)
-    config = await agents.create_config(slug=f"quality-{suffix}", name=f"Quality {suffix}")
-    version = await agents.create_draft(
-        config_id=config.id,
+    member = await agents.create_config(slug=f"quality-member-{suffix}", name=f"Member {suffix}")
+    member_version = await agents.create_draft(
+        config_id=member.id,
         instructions="Return concise, correct answers.",
         model_id="openai:gpt-4.1-mini",
         temperature=0,
     )
-    conversation = await SessionRepository(session, context).pin(
+    await agents.publish(member_version.id)
+
+    teams = TeamRepository(session, context)
+    config = await teams.create_config(slug=f"quality-{suffix}", name=f"Quality {suffix}")
+    version = await teams.create_draft(
+        config_id=config.id,
+        instructions="Coordinate carefully.",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0,
+        member_config_ids=[member.id],
+    )
+    await teams.publish(version.id)
+    conversation = await SessionRepository(session, context).pin_team(
         external_session_id=f"quality-session-{suffix}",
-        agent_config_id=config.id,
-        agent_version_id=version.id,
+        team_config_id=config.id,
+        team_version_id=version.id,
         runtime_session_id=f"runtime-{suffix}",
         runtime_user_id=f"user-{suffix}",
     )
@@ -28,7 +43,7 @@ async def _agent_and_conversation(session, context, suffix: str):
 @pytest.mark.asyncio
 async def test_eval_crud_run_results_and_tenant_isolation(session, tenant_a, tenant_b):
     session.info["tenant_id"] = tenant_a.tenant_id
-    config, version, _ = await _agent_and_conversation(session, tenant_a, "a")
+    config, version, _ = await _team_and_conversation(session, tenant_a, "a")
     repo = EvalRepository(session, tenant_a)
     definition = await repo.create_definition(
         {
@@ -36,7 +51,7 @@ async def test_eval_crud_run_results_and_tenant_isolation(session, tenant_a, ten
             "slug": "smoke-correctness",
             "description": "Deterministic mocked-model test",
             "suite": "smoke",
-            "target_type": "agent",
+            "target_type": "team",
             "target_id": config.id,
             "version_id": version.id,
             "cases": [
@@ -75,6 +90,36 @@ async def test_eval_crud_run_results_and_tenant_isolation(session, tenant_a, ten
     assert results[0].passed is True
     assert results[0].details == {"mocked": True}
 
+    exact = await repo.create_definition(
+        {
+            "name": "Exact match",
+            "slug": "exact-match",
+            "description": None,
+            "suite": "smoke",
+            "target_type": "team",
+            "target_id": config.id,
+            "version_id": version.id,
+            "cases": [
+                {
+                    "key": "exact",
+                    "name": "Exact",
+                    "input": "Say Paris",
+                    "expected_output": "Paris",
+                    "evaluator": "exact",
+                }
+            ],
+            "pass_threshold": 1,
+            "active": True,
+            "run_on_publish": False,
+        }
+    )
+
+    async def exact_runner(_definition, prompt):
+        return {"content": "Paris", "mocked": True}
+
+    exact_run = await EvalService(session, tenant_a, runner=exact_runner).run(exact.id)
+    assert exact_run.passed is True
+
     session.info["tenant_id"] = tenant_b.tenant_id
     other_repo = EvalRepository(session, tenant_b)
     assert await other_repo.list_definitions() == []
@@ -84,12 +129,13 @@ async def test_eval_crud_run_results_and_tenant_isolation(session, tenant_a, ten
     session.info["tenant_id"] = tenant_a.tenant_id
     assert await repo.delete_definition(definition.id) is True
     assert await repo.get_definition(definition.id) is None
+    assert await repo.delete_definition(exact.id) is True
 
 
 @pytest.mark.asyncio
 async def test_metric_aggregates_are_durable_and_tenant_isolated(session, tenant_a, tenant_b):
     session.info["tenant_id"] = tenant_a.tenant_id
-    config, version, conversation = await _agent_and_conversation(session, tenant_a, "metrics-a")
+    config, version, conversation = await _team_and_conversation(session, tenant_a, "metrics-a")
     traces = TraceRepository(session, tenant_a)
     trace = await traces.start(
         conversation=conversation,

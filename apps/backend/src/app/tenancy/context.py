@@ -13,6 +13,8 @@ class TenantContext:
     clerk_org_id: str
     scopes: tuple[str, ...] = field(default_factory=tuple)
     principal_type: str = "user"
+    verified_end_user_id: uuid.UUID | None = None
+    verified_email: str | None = None
 
     def can_administer(self) -> bool:
         return self.role in {Role.platform_admin, Role.tenant_admin} or self.has_scope(
@@ -24,6 +26,10 @@ class TenantContext:
 
     def has_scope(self, required: str) -> bool:
         return "agent_os:admin" in self.scopes or "*" in self.scopes or required in self.scopes
+
+    @property
+    def is_verified_end_user(self) -> bool:
+        return self.verified_end_user_id is not None
 
 
 _tenant_context: ContextVar[TenantContext | None] = ContextVar("tenant_context", default=None)

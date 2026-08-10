@@ -1,9 +1,15 @@
 "use client";
 
-import Editor, { type OnMount } from "@monaco-editor/react";
+import type { OnMount } from "@monaco-editor/react";
+import dynamic from "next/dynamic";
 import { useEffect, useId, useState } from "react";
 
 import { cn } from "@/lib/utils";
+
+const MonacoEditor = dynamic(
+  () => import("@monaco-editor/react").then((module) => module.default),
+  { ssr: false },
+);
 
 type PythonCodeEditorProps = {
   value: string;
@@ -81,7 +87,7 @@ function disableSpellcheck(domNode: HTMLElement | null) {
 
 /**
  * Monaco-based Python source editor for tenant_python tools.
- * Client-only; follows AdminShell light/dark via data-theme.
+ * Client-only; follows AdminShell light/dark via data-theme on .app-canvas.
  */
 export function PythonCodeEditor({
   value,
@@ -103,11 +109,14 @@ export function PythonCodeEditor({
     const sync = () =>
       setTheme(isAdminDark() ? ATLAS_DARK : ATLAS_LIGHT);
     sync();
+    // Theme lives on `.app-canvas` only — do not observe body with subtree
+    // (Monaco/DOM churn would re-fire on every keystroke).
+    const root = document.querySelector(".app-canvas");
+    if (!root) return;
     const observer = new MutationObserver(sync);
-    observer.observe(document.body, {
+    observer.observe(root, {
       attributes: true,
-      subtree: true,
-      attributeFilter: ["data-theme", "class"],
+      attributeFilter: ["data-theme"],
     });
     return () => observer.disconnect();
   }, []);
@@ -136,7 +145,7 @@ export function PythonCodeEditor({
       )}
       style={{ minHeight: typeof height === "number" ? height : undefined }}
     >
-      <Editor
+      <MonacoEditor
         height={height}
         language="python"
         theme={theme}

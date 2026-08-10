@@ -62,8 +62,8 @@ export function TeamList({
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [cloningIds, setCloningIds] = useState<Set<string>>(() => new Set());
   const skipInitialFetch = useRef(true);
 
   const [versionsTeam, setVersionsTeam] = useState<TeamSummary | null>(null);
@@ -239,7 +239,7 @@ export function TeamList({
   }
 
   async function onClone(team: TeamSummary) {
-    setCloningId(team.id);
+    setCloningIds((current) => new Set(current).add(team.id));
     setError(null);
     try {
       const cloned = await cloneTeam(await getAccessToken(), team.id);
@@ -248,7 +248,11 @@ export function TeamList({
       setError(
         reason instanceof Error ? reason.message : "Failed to clone team",
       );
-      setCloningId(null);
+      setCloningIds((current) => {
+        const next = new Set(current);
+        next.delete(team.id);
+        return next;
+      });
     }
   }
 
@@ -258,7 +262,7 @@ export function TeamList({
     ) {
       return;
     }
-    setDeletingId(team.id);
+    setDeletingIds((current) => new Set(current).add(team.id));
     setError(null);
     try {
       await deleteTeam(await getAccessToken(), team.id);
@@ -275,7 +279,11 @@ export function TeamList({
         reason instanceof Error ? reason.message : "Failed to delete team",
       );
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(team.id);
+        return next;
+      });
     }
   }
 
@@ -314,7 +322,9 @@ export function TeamList({
             <span className="th-label">Status</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label w-auto shrink-0 text-right">Actions</span>
+          <span className="th-label hidden w-auto shrink-0 text-right md:block">
+            Actions
+          </span>
         </div>
         <ul>
           {pageData.items.map((team) => (
@@ -326,8 +336,8 @@ export function TeamList({
                 >
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{team.name}</p>
-                    <p className="mono-cell truncate text-slate-muted">
-                      /{team.slug} · {team.memberCount} agents
+                    <p className="truncate text-xs text-slate-muted">
+                      {team.memberCount} agent{team.memberCount === 1 ? "" : "s"}
                     </p>
                   </div>
                   <p className="text-sm capitalize text-ink-soft">{team.mode}</p>
@@ -374,20 +384,20 @@ export function TeamList({
                     variant="ghost"
                     aria-label={`Clone ${team.name}`}
                     title="Clone"
-                    disabled={cloningId === team.id}
+                    disabled={cloningIds.has(team.id)}
                     onClick={() => void onClone(team)}
                   >
-                    {cloningId === team.id ? "…" : <CloneIcon />}
+                    {cloningIds.has(team.id) ? "…" : <CloneIcon />}
                   </Button>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${team.name}`}
                     title="Delete"
-                    disabled={deletingId === team.id}
+                    disabled={deletingIds.has(team.id)}
                     onClick={() => void onDelete(team)}
                   >
-                    {deletingId === team.id ? "…" : <TrashIcon />}
+                    {deletingIds.has(team.id) ? "…" : <TrashIcon />}
                   </Button>
                 </div>
               </div>

@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_tenant
-from app.db.models import Tenant
+from app.db.models import Role, Tenant
 from app.db.session import tenant_session
 from app.tenancy.context import TenantContext
 
@@ -23,6 +23,10 @@ class WorkspaceInfoOut(BaseModel):
     name: str
     slug: str
     branding: dict[str, Any]
+    email_inbound_domain: str | None = None
+    user_id: str
+    role: Role
+    can_administer: bool
 
 
 @router.get("", response_model=WorkspaceInfoOut)
@@ -36,9 +40,16 @@ async def get_workspace(
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="Workspace not found")
+    from app.core.settings import get_settings
+
+    domain = get_settings().email_inbound_domain.strip() or None
     return WorkspaceInfoOut(
         id=tenant.id,
         name=tenant.name,
         slug=tenant.slug,
         branding=tenant.branding or {},
+        email_inbound_domain=domain,
+        user_id=context.user_id,
+        role=context.role,
+        can_administer=context.can_administer(),
     )

@@ -5,8 +5,11 @@ Isolation model (shared runtime + shared Postgres with RLS):
 - Cons: larger blast radius for runtime bugs / noisy neighbors.
 - Alternative: DB+runtime per tenant for stronger compliance cells later.
 
-This module prefers Agno's AgentFactory registration when available and falls
-back to a custom FastAPI run endpoint that still uses the same factory service.
+Product runs go through Atlas `/v1/...` and `/public/...` routes. Native AgentOS
+factory routes (`/agents/tenant-agent`, `/teams/tenant-team`,
+`/workflows/tenant-workflow`) and global Agno surfaces (`/schedules`,
+`/approvals`, …) are blocked in middleware; Agno factories remain registered so
+AgentOS can boot and share PostgresDb persistence.
 """
 
 from __future__ import annotations
@@ -35,26 +38,37 @@ from app.agent_runtime.factory import (
 from app.agent_runtime.persistence import get_agno_db, runtime_session_id, runtime_user_id
 from app.api import agents as agents_api
 from app.api import approvals as approvals_api
+from app.api import channels as channels_api
 from app.api import credentials as credentials_api
+from app.api import admin_vault as admin_vault_api
+from app.api import user_vault as user_vault_api
 from app.api import evals as evals_api
 from app.api import health as health_api
+from app.api import interfaces as interfaces_api
 from app.api import knowledge as knowledge_api
+from app.api import learnings as learnings_api
 from app.api import mcp as mcp_api
 from app.api import metrics as metrics_api
+from app.api import notifications as notifications_api
 from app.api import platform as platform_api
 from app.api import onboarding as onboarding_api
 from app.api import public as public_api
+from app.api import public_channels as public_channels_api
 from app.api import public_chat as public_chat_api
+from app.api import public_email as public_email_api
+from app.api import public_identity as public_identity_api
 from app.api import sandbox_internal as sandbox_internal_api
 from app.api import workspace as workspace_api
 from app.api import schedules as schedules_api
 from app.api import service_accounts as service_accounts_api
 from app.api import sessions as sessions_api
 from app.api import teams as teams_api
+from app.api import team_access as team_access_api
 from app.api import tools as tools_api
 from app.api import traces as traces_api
 from app.api import workflows as workflows_api
 from app.api import workflow_access as workflow_access_api
+from app.api import customers as customers_api
 from app.api import users as users_api
 from app.auth.dependencies import require_tenant
 from app.auth.middleware import TenantAuthMiddleware
@@ -77,6 +91,40 @@ from app.scheduler.service import SchedulerWorker
 from app.tenancy.context import current_tenant, set_tenant_context
 
 logger = get_logger(__name__)
+
+
+async def _configure_redis_run_cancellation() -> None:
+    """Use Agno's Redis cancellation manager when REDIS_URL is configured."""
+    from app.core.redis_client import get_redis, redis_enabled
+
+    if not redis_enabled():
+        return
+    async_client = await get_redis()
+    if async_client is None:
+        return
+    try:
+        from redis import Redis as SyncRedis
+        from agno.run.cancel import set_cancellation_manager
+        from agno.run.cancellation_management.redis_cancellation_manager import (
+            RedisRunCancellationManager,
+        )
+
+        settings = get_settings()
+        sync_client = SyncRedis.from_url(
+            settings.redis_url.strip(),
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        set_cancellation_manager(
+            RedisRunCancellationManager(
+                redis_client=sync_client,
+                async_redis_client=async_client,
+            )
+        )
+        logger.info("agno_redis_run_cancellation_enabled")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agno_redis_run_cancellation_unavailable", error=str(exc))
 
 
 class FactoryInput(BaseModel):
@@ -289,70 +337,24 @@ async def _sse_from_agent(
     session_id: str,
     event_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     wall_seconds: int | None = None,
+    background: bool = False,
+    run_id: str | None = None,
+    session_state: dict[str, Any] | None = None,
 ) -> AsyncIterator[bytes]:
-    run_kwargs = {
-        "stream": True,
-        "user_id": user_id,
-        "session_id": session_id,
-    }
-    limit = wall_seconds if wall_seconds is not None else get_settings().agent_run_wall_seconds
-    # Prefer async streaming APIs when present.
-    if hasattr(agent, "arun"):
-        result = agent.arun(message, **run_kwargs)
-        if hasattr(result, "__aiter__"):
-            terminal = False
-            try:
-                async with asyncio.timeout(limit):
-                    async for event in result:
-                        payload = _event_payload(event)
-                        terminal = terminal or payload.get("event") in {
-                            "RunCompleted",
-                            "RunError",
-                            "RunCancelled",
-                            "RunPaused",
-                        }
-                        if event_handler:
-                            payload = await event_handler(payload)
-                        yield f"data: {json.dumps(payload)}\n\n".encode()
-            except TimeoutError:
-                payload = {
-                    "event": "RunError",
-                    "error": f"Agent run exceeded {limit}s wall clock",
-                }
-                if event_handler:
-                    payload = await event_handler(payload)
-                yield f"data: {json.dumps(payload)}\n\n".encode()
-                return
-            if not terminal:
-                payload = {"event": "RunCompleted"}
-                if event_handler:
-                    payload = await event_handler(payload)
-                yield f"data: {json.dumps(payload)}\n\n".encode()
-            return
-        if hasattr(result, "__await__"):
-            output = await result
-            payload = _event_payload(output)
-            if event_handler:
-                payload = await event_handler(payload)
-            yield f"data: {json.dumps(payload)}\n\n".encode()
-            return
+    from app.agent_runtime.run_control import iter_component_sse
 
-    if hasattr(agent, "run"):
-        output = agent.run(message, **run_kwargs)
-        if hasattr(output, "__iter__") and not isinstance(output, (str, bytes, dict)):
-            for event in output:
-                payload = _event_payload(event)
-                if event_handler:
-                    payload = await event_handler(payload)
-                yield f"data: {json.dumps(payload)}\n\n".encode()
-            return
-        payload = _event_payload(output)
-        if event_handler:
-            payload = await event_handler(payload)
-        yield f"data: {json.dumps(payload)}\n\n".encode()
-        return
-
-    raise RuntimeError("Agent runtime does not expose run/arun")
+    async for frame in iter_component_sse(
+        agent,
+        message,
+        user_id=user_id,
+        session_id=session_id,
+        background=background,
+        run_id=run_id,
+        event_handler=event_handler,
+        wall_seconds=wall_seconds,
+        session_state=session_state,
+    ):
+        yield frame
 
 
 def _event_payload(event: Any) -> dict[str, Any]:
@@ -381,10 +383,28 @@ def _event_payload(event: Any) -> dict[str, Any]:
     return {"event": "RunContent", "content": text}
 
 
+def _flatten_workflow_requirements(step_requirements: list[Any]) -> list[dict[str, Any]]:
+    """Expand workflow step (+ nested executor) requirements for approval bindings."""
+    flattened: list[dict[str, Any]] = []
+    for step in step_requirements:
+        if hasattr(step, "to_dict"):
+            step = step.to_dict()
+        if not isinstance(step, dict):
+            continue
+        flattened.append(step)
+        for nested in step.get("executor_requirements") or []:
+            if hasattr(nested, "to_dict"):
+                nested = nested.to_dict()
+            if isinstance(nested, dict):
+                flattened.append(nested)
+    return flattened
+
+
 def _normalize_event_name(payload: dict[str, Any]) -> dict[str, Any]:
     """Map Agno team/workflow event names onto the chat UI's expected set."""
     name = str(payload.get("event") or payload.get("type") or "RunContent")
     normalized = {
+        "WorkflowStarted": "RunStarted",
         "WorkflowCompleted": "RunCompleted",
         "WorkflowError": "RunError",
         "WorkflowCancelled": "RunCancelled",
@@ -443,6 +463,10 @@ async def _persist_runtime_event(
             conversation = await sessions.get_by_external(external_session_id)
             if conversation is not None:
                 raw_requirements = payload.get("requirements") or []
+                if not raw_requirements and payload.get("step_requirements"):
+                    raw_requirements = _flatten_workflow_requirements(
+                        payload.get("step_requirements") or []
+                    )
                 if not raw_requirements and payload.get("tools"):
                     raw_requirements = [
                         {
@@ -524,6 +548,13 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        from app.core.redis_client import close_redis, get_redis
+        from app.db.roles import assert_runtime_db_role_safe
+        from app.db.session import engine
+
+        await assert_runtime_db_role_safe(engine, settings)
+        await get_redis()
+        await _configure_redis_run_cancellation()
         worker = SchedulerWorker()
         if settings.scheduler_enabled and settings.environment.lower() != "test":
             worker.start()
@@ -531,6 +562,7 @@ def create_app() -> FastAPI:
             yield
         finally:
             await worker.stop()
+            await close_redis()
 
     base_app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
     register_exception_handlers(base_app)
@@ -549,12 +581,20 @@ def create_app() -> FastAPI:
     base_app.include_router(knowledge_api.router)
     base_app.include_router(approvals_api.router)
     base_app.include_router(credentials_api.router)
+    base_app.include_router(user_vault_api.router)
+    base_app.include_router(admin_vault_api.router)
+    base_app.include_router(channels_api.router)
     base_app.include_router(evals_api.router)
+    base_app.include_router(learnings_api.router)
     base_app.include_router(teams_api.router)
     base_app.include_router(tools_api.router)
     base_app.include_router(sandbox_internal_api.router)
     base_app.include_router(public_api.router)
     base_app.include_router(public_chat_api.router)
+    base_app.include_router(public_channels_api.router)
+    base_app.include_router(public_email_api.router)
+    base_app.include_router(public_identity_api.router)
+    base_app.include_router(interfaces_api.router)
     base_app.include_router(onboarding_api.router)
     base_app.include_router(workspace_api.router)
     base_app.include_router(schedules_api.router)
@@ -566,7 +606,11 @@ def create_app() -> FastAPI:
     base_app.include_router(traces_api.router)
     base_app.include_router(workflows_api.router)
     base_app.include_router(workflow_access_api.router)
+    base_app.include_router(team_access_api.router)
     base_app.include_router(users_api.router)
+    base_app.include_router(notifications_api.admin_router)
+    base_app.include_router(notifications_api.me_router)
+    base_app.include_router(customers_api.router)
 
     @base_app.post("/v1/agents/tenant-agent/runs")
     async def run_tenant_agent(
@@ -577,16 +621,23 @@ def create_app() -> FastAPI:
         session_id: str = Form(...),
         preview: bool = Form(False),
         stream: bool = Form(True),
+        background: bool = Form(False),
         authorization: str | None = Header(default=None),
     ) -> StreamingResponse:
-        """Custom streaming run endpoint with explicit tenant scoping.
+        """Tenant-scoped streaming run endpoint.
 
-        Prefer AgentOS `/agents/tenant-agent/runs` when the installed Agno
-        version exposes AgentFactory; this path remains for local/dev parity.
+        Product traffic uses this `/v1/...` path (and public chat), not native
+        AgentOS `/agents/tenant-agent/runs`, which middleware returns 404 for
+        because native AgentOS storage is not tenant-keyed.
         """
         context = getattr(request.state, "tenant", None)
         if context is None:
-            context = await require_tenant(request, authorization=authorization, settings=settings)
+            context = await require_tenant(
+                request,
+                authorization=authorization,
+                x_platform_tenant_id=request.headers.get("x-platform-tenant-id"),
+                settings=settings,
+            )
             set_tenant_context(context)
 
         if preview and not context.can_administer():
@@ -669,6 +720,7 @@ def create_app() -> FastAPI:
                     message,
                     user_id=durable_user_id,
                     session_id=durable_session_id,
+                    session_state=getattr(agent, "_saas_session_state", None),
                     event_handler=lambda payload: _persist_runtime_event(
                         payload,
                         context=context,
@@ -699,6 +751,9 @@ def create_app() -> FastAPI:
                         message,
                         user_id=durable_user_id,
                         session_id=durable_session_id,
+                        session_state=getattr(agent, "_saas_session_state", None),
+                        background=background,
+                        run_id=new_run_id() if background else None,
                         event_handler=lambda payload: _persist_runtime_event(
                             payload,
                             context=context,
@@ -724,11 +779,17 @@ def create_app() -> FastAPI:
         session_id: str = Form(...),
         preview: bool = Form(False),
         stream: bool = Form(True),
+        background: bool = Form(False),
         authorization: str | None = Header(default=None),
     ) -> StreamingResponse:
         context = getattr(request.state, "tenant", None)
         if context is None:
-            context = await require_tenant(request, authorization=authorization, settings=settings)
+            context = await require_tenant(
+                request,
+                authorization=authorization,
+                x_platform_tenant_id=request.headers.get("x-platform-tenant-id"),
+                settings=settings,
+            )
             set_tenant_context(context)
         if preview and not context.can_administer():
             raise HTTPException(status_code=403, detail="Preview runs require admin role")
@@ -772,6 +833,19 @@ def create_app() -> FastAPI:
                 if resolved_version_id is None:
                     raise ValueError("team_version_id or team_config_id is required")
                 version_uuid = uuid.UUID(resolved_version_id)
+                version = await repo.get_version(version_uuid, allow_draft=preview)
+                if version is None:
+                    raise LookupError("Team version not found")
+                if not context.can_administer():
+                    membership = await MembershipRepository(
+                        session, context
+                    ).get_by_user_id(context.user_id)
+                    if membership is not None and not membership.is_active:
+                        raise PermissionError("User account is inactive")
+                    if not await repo.is_assigned(
+                        version.team_config_id, context.user_id
+                    ):
+                        raise PermissionError("Team is not assigned to this user")
                 team = await TeamFactoryService(AgentFactoryService(session, context)).create(
                     TeamRuntimeRequest(
                         version_id=version_uuid,
@@ -807,6 +881,9 @@ def create_app() -> FastAPI:
                         message,
                         user_id=durable_user_id,
                         session_id=durable_session_id,
+                        session_state=getattr(team, "_saas_session_state", None),
+                        background=background,
+                        run_id=new_run_id() if background else None,
                         event_handler=lambda payload: _persist_runtime_event(
                             payload,
                             context=context,
@@ -832,11 +909,17 @@ def create_app() -> FastAPI:
         session_id: str = Form(...),
         preview: bool = Form(False),
         stream: bool = Form(True),
+        background: bool = Form(False),
         authorization: str | None = Header(default=None),
     ) -> StreamingResponse:
         context = getattr(request.state, "tenant", None)
         if context is None:
-            context = await require_tenant(request, authorization=authorization, settings=settings)
+            context = await require_tenant(
+                request,
+                authorization=authorization,
+                x_platform_tenant_id=request.headers.get("x-platform-tenant-id"),
+                settings=settings,
+            )
             set_tenant_context(context)
         if preview and not context.can_administer():
             raise HTTPException(status_code=403, detail="Preview runs require admin role")
@@ -935,6 +1018,9 @@ def create_app() -> FastAPI:
                         message,
                         user_id=durable_user_id,
                         session_id=durable_session_id,
+                        session_state=getattr(workflow, "_saas_session_state", None),
+                        background=background,
+                        run_id=new_run_id() if background else None,
                         event_handler=lambda payload: _persist_runtime_event(
                             payload,
                             context=context,
@@ -962,6 +1048,7 @@ def create_app() -> FastAPI:
         session_id: str | None = Form(None),
         new_session: bool = Form(False),
         stream: bool = Form(True),
+        background: bool = Form(False),
         authorization: str | None = Header(default=None),
     ) -> StreamingResponse:
         """Run a team that is a published step of a workflow, keyed by org secret.
@@ -976,7 +1063,10 @@ def create_app() -> FastAPI:
         context = getattr(request.state, "tenant", None)
         if context is None:
             context = await require_tenant(
-                request, authorization=authorization, settings=settings
+                request,
+                authorization=authorization,
+                x_platform_tenant_id=request.headers.get("x-platform-tenant-id"),
+                settings=settings,
             )
             set_tenant_context(context)
 
@@ -1081,6 +1171,9 @@ def create_app() -> FastAPI:
                         message,
                         user_id=durable_user_id,
                         session_id=durable_session_id,
+                        session_state=getattr(team, "_saas_session_state", None),
+                        background=background,
+                        run_id=new_run_id() if background else None,
                         event_handler=lambda payload: _persist_runtime_event(
                             payload,
                             context=context,
@@ -1112,6 +1205,222 @@ def create_app() -> FastAPI:
                     "X-Session-Id": external_session_id,
                 },
             )
+
+    async def _resolve_tenant_for_run(
+        request: Request, authorization: str | None
+    ) -> Any:
+        context = getattr(request.state, "tenant", None)
+        if context is None:
+            context = await require_tenant(
+                request,
+                authorization=authorization,
+                x_platform_tenant_id=request.headers.get("x-platform-tenant-id"),
+                settings=settings,
+            )
+            set_tenant_context(context)
+        return context
+
+    @base_app.post("/v1/agents/tenant-agent/runs/{run_id}/resume")
+    @base_app.post("/v1/teams/tenant-team/runs/{run_id}/resume")
+    @base_app.post("/v1/workflows/tenant-workflow/runs/{run_id}/resume")
+    async def resume_tenant_run(
+        request: Request,
+        run_id: str,
+        session_id: str = Form(...),
+        last_event_index: int | None = Form(None),
+        agent_config_id: str | None = Form(None),
+        team_config_id: str | None = Form(None),
+        workflow_config_id: str | None = Form(None),
+        version_id: str | None = Form(None),
+        preview: bool = Form(False),
+        authorization: str | None = Header(default=None),
+    ) -> StreamingResponse:
+        context = await _resolve_tenant_for_run(request, authorization)
+        path = request.url.path
+        durable_user_id = runtime_user_id(context)
+        durable_session_id = runtime_session_id(context, session_id)
+        async with SessionFactory() as session:
+            if session.bind and session.bind.dialect.name == "postgresql":
+                from sqlalchemy import text
+
+                await session.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(context.tenant_id)},
+                )
+            session.info["tenant_id"] = context.tenant_id
+            try:
+                if "/agents/" in path:
+                    if not agent_config_id and not version_id:
+                        raise ValueError("agent_config_id or version_id is required")
+                    repo = AgentRepository(session, context)
+                    resolved = version_id
+                    if resolved is None and agent_config_id:
+                        config = await repo.get_config(uuid.UUID(agent_config_id))
+                        if config is None or config.published_version_id is None:
+                            raise LookupError("Agent configuration not found")
+                        resolved = str(config.published_version_id)
+                    component = await AgentFactoryService(session, context).create(
+                        RuntimeRequest(
+                            version_id=uuid.UUID(resolved),
+                            session_id=session_id,
+                            preview=preview,
+                        )
+                    )
+                elif "/teams/" in path:
+                    if not team_config_id and not version_id:
+                        raise ValueError("team_config_id or version_id is required")
+                    repo = TeamRepository(session, context)
+                    resolved = version_id
+                    if resolved is None and team_config_id:
+                        config = await repo.get_config(uuid.UUID(team_config_id))
+                        if config is None or config.published_version_id is None:
+                            raise LookupError("Team configuration not found")
+                        resolved = str(config.published_version_id)
+                    component = await TeamFactoryService(
+                        AgentFactoryService(session, context)
+                    ).create(
+                        TeamRuntimeRequest(
+                            version_id=uuid.UUID(resolved),
+                            session_id=session_id,
+                            preview=preview,
+                        )
+                    )
+                else:
+                    if not workflow_config_id and not version_id:
+                        raise ValueError("workflow_config_id or version_id is required")
+                    repo = WorkflowRepository(session, context)
+                    resolved = version_id
+                    if resolved is None and workflow_config_id:
+                        config = await repo.get_config(uuid.UUID(workflow_config_id))
+                        if config is None or config.published_version_id is None:
+                            raise LookupError("Workflow configuration not found")
+                        resolved = str(config.published_version_id)
+                    component = await WorkflowFactoryService(
+                        AgentFactoryService(session, context),
+                        TeamFactoryService(AgentFactoryService(session, context)),
+                    ).create(
+                        WorkflowRuntimeRequest(
+                            version_id=uuid.UUID(resolved),
+                            session_id=session_id,
+                            preview=preview,
+                        )
+                    )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await session.commit()
+
+            async def event_stream() -> AsyncIterator[bytes]:
+                async for item in iter_resume_sse(
+                    component,
+                    run_id=run_id,
+                    session_id=durable_session_id,
+                    user_id=durable_user_id,
+                    last_event_index=last_event_index,
+                ):
+                    yield item
+
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @base_app.post("/v1/agents/tenant-agent/runs/{run_id}/cancel")
+    @base_app.post("/v1/teams/tenant-team/runs/{run_id}/cancel")
+    @base_app.post("/v1/workflows/tenant-workflow/runs/{run_id}/cancel")
+    async def cancel_tenant_run(
+        request: Request,
+        run_id: str,
+        session_id: str = Form(...),
+        agent_config_id: str | None = Form(None),
+        team_config_id: str | None = Form(None),
+        workflow_config_id: str | None = Form(None),
+        version_id: str | None = Form(None),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        context = await _resolve_tenant_for_run(request, authorization)
+        path = request.url.path
+        async with SessionFactory() as session:
+            if session.bind and session.bind.dialect.name == "postgresql":
+                from sqlalchemy import text
+
+                await session.execute(
+                    text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                    {"tenant_id": str(context.tenant_id)},
+                )
+            session.info["tenant_id"] = context.tenant_id
+            try:
+                if "/agents/" in path:
+                    resolved = version_id
+                    if resolved is None and agent_config_id:
+                        config = await AgentRepository(session, context).get_config(
+                            uuid.UUID(agent_config_id)
+                        )
+                        if config is None or config.published_version_id is None:
+                            raise LookupError("Agent configuration not found")
+                        resolved = str(config.published_version_id)
+                    if resolved is None:
+                        raise ValueError("version_id or agent_config_id is required")
+                    component = await AgentFactoryService(session, context).create(
+                        RuntimeRequest(
+                            version_id=uuid.UUID(resolved),
+                            session_id=session_id,
+                            preview=False,
+                        )
+                    )
+                elif "/teams/" in path:
+                    resolved = version_id
+                    if resolved is None and team_config_id:
+                        config = await TeamRepository(session, context).get_config(
+                            uuid.UUID(team_config_id)
+                        )
+                        if config is None or config.published_version_id is None:
+                            raise LookupError("Team configuration not found")
+                        resolved = str(config.published_version_id)
+                    if resolved is None:
+                        raise ValueError("version_id or team_config_id is required")
+                    component = await TeamFactoryService(
+                        AgentFactoryService(session, context)
+                    ).create(
+                        TeamRuntimeRequest(
+                            version_id=uuid.UUID(resolved),
+                            session_id=session_id,
+                            preview=False,
+                        )
+                    )
+                else:
+                    resolved = version_id
+                    if resolved is None and workflow_config_id:
+                        config = await WorkflowRepository(session, context).get_config(
+                            uuid.UUID(workflow_config_id)
+                        )
+                        if config is None or config.published_version_id is None:
+                            raise LookupError("Workflow configuration not found")
+                        resolved = str(config.published_version_id)
+                    if resolved is None:
+                        raise ValueError("version_id or workflow_config_id is required")
+                    component = await WorkflowFactoryService(
+                        AgentFactoryService(session, context),
+                        TeamFactoryService(AgentFactoryService(session, context)),
+                    ).create(
+                        WorkflowRuntimeRequest(
+                            version_id=uuid.UUID(resolved),
+                            session_id=session_id,
+                            preview=False,
+                        )
+                    )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            cancelled = await cancel_component_run(component, run_id)
+            await SessionRepository(session, context).touch_run(
+                session_id, run_id=run_id, status="cancelled"
+            )
+            await session.commit()
+            if not cancelled:
+                raise HTTPException(
+                    status_code=404, detail="Run not found or already finished"
+                )
+            return {"ok": True, "run_id": run_id, "status": "cancelled"}
 
     agent_os = _try_build_agent_os(base_app)
     if agent_os is not None:

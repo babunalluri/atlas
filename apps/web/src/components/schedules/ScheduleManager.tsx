@@ -49,6 +49,10 @@ export function ScheduleManager({
 }) {
   const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
+  const runnableTargets = targets.filter(
+    (target) =>
+      target.target_type === "team" || target.target_type === "workflow",
+  );
   const [editing, setEditing] = useState<AgentSchedule | null>(null);
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 9 * * 1-5");
@@ -69,7 +73,7 @@ export function ScheduleManager({
   }
 
   function edit(schedule: AgentSchedule) {
-    const index = targets.findIndex(
+    const index = runnableTargets.findIndex(
       (target) =>
         target.target_type === schedule.target_type &&
         target.version_id === schedule.version_id,
@@ -79,13 +83,22 @@ export function ScheduleManager({
     setCron(schedule.cron_expression);
     setTimezone(schedule.timezone);
     setMessage(schedule.message);
-    setTargetIndex(Math.max(0, index));
-    setError(null);
+    if (index === -1) {
+      setTargetIndex(-1);
+      setError("Pinned target is missing from published targets.");
+    } else {
+      setTargetIndex(index);
+      setError(null);
+    }
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function save() {
-    const target = targets[targetIndex];
+    if (targetIndex < 0) {
+      setError("Pinned target is missing from published targets.");
+      return;
+    }
+    const target = runnableTargets[targetIndex];
     if (!target || !name.trim() || !cron.trim() || !message.trim()) {
       setError("Name, target, cron, and message are required.");
       return;
@@ -145,8 +158,10 @@ export function ScheduleManager({
               Put reliable agent work on a clock.
             </h1>
             <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-muted">
-              Run a pinned, published agent, team, or workflow on a tenant-isolated
-              cron schedule. Every attempt creates a durable session and run record.
+              Run a pinned, published team or workflow on a tenant-isolated cron
+              schedule. Agents belong inside teams and workflows — they are not
+              scheduled directly. Every attempt creates a durable session and run
+              record.
             </p>
           </div>
           <div className="grid gap-3 rounded-xl border border-line bg-raised/90 p-4">
@@ -177,7 +192,12 @@ export function ScheduleManager({
                   value={targetIndex}
                   onChange={(event) => setTargetIndex(Number(event.target.value))}
                 >
-                  {targets.map((target, index) => (
+                  {targetIndex < 0 ? (
+                    <option value={-1} disabled>
+                      Pinned target missing
+                    </option>
+                  ) : null}
+                  {runnableTargets.map((target, index) => (
                     <option
                       key={`${target.target_type}:${target.version_id}`}
                       value={index}

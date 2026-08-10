@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { UserEditor } from "@/components/users/UserEditor";
-import { getTenantUser, listWorkflows } from "@/lib/api/admin";
+import { getTenantUser, listTeams, listWorkflows } from "@/lib/api/admin";
 import { getServerAgentOsToken } from "@/lib/auth/server-token";
 
 export const dynamic = "force-dynamic";
@@ -14,11 +14,14 @@ export default async function UserDetailPage({
   const { userId } = await params;
   const token = await getServerAgentOsToken();
   try {
-    const [user, workflows] = await Promise.all([
+    const [user, workflows, teams] = await Promise.all([
       getTenantUser(token, userId),
       listWorkflows(token),
+      listTeams(token),
     ]);
-    return <UserEditor mode="edit" initial={user} workflows={workflows} />;
+    return (
+      <UserEditor mode="edit" initial={user} workflows={workflows} teams={teams} />
+    );
   } catch {
     notFound();
   }

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
 from app.db.models import Role, Schedule, ScheduleRun
-from app.db.repositories import AgentRepository, TeamRepository, WorkflowRepository
+from app.db.repositories import TeamRepository, WorkflowRepository
 from app.db.session import tenant_session
 from app.scheduler.service import ScheduleRepository, SchedulerService
 from app.tenancy.context import TenantContext
@@ -25,7 +25,7 @@ class ScheduleCreateIn(BaseModel):
     cron_expression: str = Field(min_length=1, max_length=255)
     timezone: str = Field(default="UTC", min_length=1, max_length=100)
     enabled: bool = True
-    target_type: Literal["agent", "team", "workflow"]
+    target_type: Literal["team", "workflow"]
     target_id: uuid.UUID
     version_id: uuid.UUID
     message: str = Field(min_length=1, max_length=100_000)
@@ -37,7 +37,7 @@ class ScheduleUpdateIn(BaseModel):
     cron_expression: str | None = Field(default=None, min_length=1, max_length=255)
     timezone: str | None = Field(default=None, min_length=1, max_length=100)
     enabled: bool | None = None
-    target_type: Literal["agent", "team", "workflow"] | None = None
+    target_type: Literal["team", "workflow"] | None = None
     target_id: uuid.UUID | None = None
     version_id: uuid.UUID | None = None
     message: str | None = Field(default=None, min_length=1, max_length=100_000)
@@ -99,9 +99,9 @@ async def list_schedules(
 async def list_schedule_targets(
     context: AdminContext, session: TenantSession
 ) -> list[dict[str, Any]]:
+    """Published teams and workflows only — agents are not directly schedulable."""
     output: list[dict[str, Any]] = []
     repositories: list[tuple[str, Any]] = [
-        ("agent", AgentRepository(session, context)),
         ("team", TeamRepository(session, context)),
         ("workflow", WorkflowRepository(session, context)),
     ]

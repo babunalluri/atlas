@@ -9,6 +9,7 @@ import {
   createSelfServeWorkspace,
   getOnboardingStatus,
 } from "@/lib/api/admin";
+import { clearPlatformTenantSelection } from "@/lib/auth/access-context";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { slugifyName } from "@/lib/validation/agent-form";
 
@@ -66,6 +67,7 @@ export function OnboardingPanel() {
         name: name.trim(),
         slug: slug.trim(),
       });
+      clearPlatformTenantSelection();
       router.replace("/admin/agents");
       router.refresh();
     } catch (reason) {
@@ -86,7 +88,7 @@ export function OnboardingPanel() {
   if (!isSignedIn) {
     return (
       <p className="text-sm text-slate-muted">
-        Sign in with Clerk to create or request a workspace.
+        Sign in to create or request a workspace.
       </p>
     );
   }
@@ -98,14 +100,14 @@ export function OnboardingPanel() {
           Create your workspace
         </h1>
         <p className="mt-1 text-sm text-slate-muted">
-          Your Clerk organization is signed in but not linked to an Atlas
+          Your organization is signed in but not linked to an Atlas
           tenant yet. As the first org admin you can create a workspace with
-          sensible defaults, then publish agents and share a customer chat
-          widget.
+          sensible defaults, then publish teams or workflows and share a
+          customer chat widget.
         </p>
         {orgId ? (
           <p className="mt-2 mono-cell text-xs text-slate-muted">
-            Clerk org: {orgId}
+            Organization: {orgId}
           </p>
         ) : null}
       </header>
@@ -141,7 +143,8 @@ export function OnboardingPanel() {
               placeholder="acme"
             />
             <p className="mt-1 text-xs text-slate-muted">
-              Customer chat will live at /t/{slug || "your-slug"}/chat/…
+              Customer chat will live at /t/{slug || "your-slug"}/teams/… or
+              /workflows/…
             </p>
           </div>
           <Button

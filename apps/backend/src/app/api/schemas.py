@@ -298,6 +298,11 @@ class ToolValidationOut(BaseModel):
     capabilities: list[ToolCapabilityOut] = Field(default_factory=list)
 
 
+FrameworkAdapter = Literal[
+    "agno", "langgraph", "dspy", "claude_agent_sdk", "antigravity"
+]
+
+
 class AgentCreateIn(BaseModel):
     slug: str
     name: str
@@ -308,6 +313,8 @@ class AgentCreateIn(BaseModel):
     memory_mode: Literal["none", "session", "persistent_user"] = "session"
     tools: list[ToolBindingIn] = Field(default_factory=list)
     knowledge_base_id: uuid.UUID | None = None
+    framework_adapter: FrameworkAdapter = "agno"
+    guardrails: dict[str, bool] | None = None
 
 
 class AgentUpdateIn(BaseModel):
@@ -319,6 +326,8 @@ class AgentUpdateIn(BaseModel):
     memory_mode: Literal["none", "session", "persistent_user"] | None = None
     tools: list[ToolBindingIn] | None = None
     knowledge_base_id: uuid.UUID | None = None
+    framework_adapter: FrameworkAdapter | None = None
+    guardrails: dict[str, bool] | None = None
 
 
 class AgentVersionOut(BaseModel):
@@ -329,6 +338,7 @@ class AgentVersionOut(BaseModel):
     model_id: str
     temperature: float
     memory_mode: str
+    framework_adapter: FrameworkAdapter = "agno"
     created_at: datetime
 
 
@@ -360,8 +370,45 @@ class AgentConfigOut(BaseModel):
     updated_at: datetime
     tools: list[ToolBindingIn] = Field(default_factory=list)
     knowledge_base_id: uuid.UUID | None = None
+    framework_adapter: FrameworkAdapter = "agno"
+    guardrails: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "prompt_injection": False,
+            "pii_detection": False,
+            "openai_moderation": False,
+        }
+    )
     draft: AgentVersionOut | None = None
     published: AgentVersionOut | None = None
+
+
+class ChannelBindingIn(BaseModel):
+    provider: Literal["slack", "telegram", "whatsapp"]
+    credential_id: uuid.UUID
+    target_type: Literal["team", "workflow"]
+    target_config_id: uuid.UUID
+    external_config: dict[str, Any] = Field(default_factory=dict)
+    active: bool = True
+
+
+class ChannelBindingUpdateIn(BaseModel):
+    credential_id: uuid.UUID | None = None
+    target_type: Literal["team", "workflow"] | None = None
+    target_config_id: uuid.UUID | None = None
+    external_config: dict[str, Any] | None = None
+    active: bool | None = None
+
+
+class ChannelBindingOut(BaseModel):
+    id: uuid.UUID
+    provider: str
+    credential_id: uuid.UUID
+    target_type: str
+    target_config_id: uuid.UUID
+    external_config: dict[str, Any]
+    active: bool
+    created_at: datetime
+    updated_at: datetime
 
 
 class TeamCreateIn(BaseModel):
@@ -535,24 +582,48 @@ class WorkflowAssignmentsOut(BaseModel):
 
 
 class TenantUserCreateIn(BaseModel):
-    user_id: str = Field(min_length=1, max_length=255)
+    """Create by email; sign-in account + org mapping are provisioned automatically."""
+
+    email: str = Field(min_length=3, max_length=320)
     display_name: str = Field(min_length=1, max_length=255)
-    email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=40)
+    user_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Optional manual override (dev/auth-disabled only).",
+    )
     role: Literal["tenant_admin", "end_user"] = "end_user"
     is_active: bool = True
     workflow_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
+    team_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
 
-    @field_validator("user_id", "display_name")
+    @field_validator("display_name")
     @classmethod
-    def strip_required(cls, value: str) -> str:
+    def strip_display_name(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("Value is required")
         return cleaned
 
+    @field_validator("user_id")
+    @classmethod
+    def strip_user_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
     @field_validator("email")
     @classmethod
-    def normalize_email(cls, value: str | None) -> str | None:
+    def normalize_email(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if "@" not in cleaned:
+            raise ValueError("A valid email is required")
+        return cleaned
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
@@ -562,9 +633,11 @@ class TenantUserCreateIn(BaseModel):
 class TenantUserUpdateIn(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=40)
     role: Literal["tenant_admin", "end_user"] | None = None
     is_active: bool | None = None
     workflow_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+    team_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
 
     @field_validator("display_name")
     @classmethod
@@ -581,7 +654,15 @@ class TenantUserUpdateIn(BaseModel):
     def normalize_email(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return value.strip() or None
+        return value.strip().lower() or None
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class TenantUserOut(BaseModel):
@@ -589,11 +670,42 @@ class TenantUserOut(BaseModel):
     user_id: str
     display_name: str
     email: str | None
+    phone: str | None = None
     role: str
     is_active: bool
+    invite_pending: bool = False
+    temporary_password: str | None = None
+    sign_in_url: str | None = None
     workflow_ids: list[uuid.UUID] = Field(default_factory=list)
+    team_ids: list[uuid.UUID] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class EndCustomerOut(BaseModel):
+    """Verified public customer (OTP / inbound email), not Clerk staff."""
+
+    id: uuid.UUID
+    email: str
+    display_name: str
+    email_verified_at: datetime | None
+    is_active: bool
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class EndCustomerUpdateIn(BaseModel):
+    display_name: str | None = Field(default=None, max_length=255)
+    is_active: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def strip_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
 
 
 class KnowledgeBaseIn(BaseModel):
@@ -621,6 +733,21 @@ class KnowledgeSourceOut(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeIngestUrlIn(BaseModel):
+    url: str = Field(min_length=8, max_length=4000)
+
+
+class KnowledgeIngestS3In(BaseModel):
+    uri: str = Field(min_length=4, max_length=4000)
+
+
+class KnowledgeIngestGithubIn(BaseModel):
+    repo: str = Field(min_length=3, max_length=255, description="owner/name")
+    path: str = Field(min_length=1, max_length=1000)
+    ref: str = Field(default="main", min_length=1, max_length=255)
+    credential_id: uuid.UUID | None = None
 
 
 class ApprovalOut(BaseModel):
@@ -658,6 +785,9 @@ CREDENTIAL_PROVIDERS = {
     "openai",
     "anthropic",
     "groq",
+    "moonshot",
+    "nvidia",
+    "gemini",
     "rest_api",
 } | TOOLKIT_CREDENTIAL_PROVIDERS | CUSTOM_CREDENTIAL_PROVIDERS
 
@@ -685,7 +815,6 @@ class CredentialOut(BaseModel):
 
 SERVICE_ACCOUNT_SCOPES = {
     "agent_os:admin",
-    "agents:run",
     "teams:run",
     "workflows:run",
     "sessions:read",

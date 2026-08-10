@@ -1,7 +1,8 @@
-"""Anonymous / guest customer chat runs for published agents, teams, and workflows.
+"""Anonymous / guest customer chat runs for published teams and workflows.
 
 Security model:
 - Resolved only by tenant slug + published resource slug (never by draft).
+- Agents are not publicly callable; they only run as members of teams/workflows.
 - No Clerk org membership required; guest identity is a client-supplied opaque id.
 - Rate-limited per guest and per IP; never exposes admin APIs or secrets.
 """
@@ -19,7 +20,6 @@ from fastapi.responses import StreamingResponse
 
 from app.agent_runtime.factory import (
     AgentFactoryService,
-    RuntimeRequest,
     TeamFactoryService,
     TeamRuntimeRequest,
     WorkflowFactoryService,
@@ -31,7 +31,6 @@ from app.core.rate_limit import limiter
 from app.core.settings import get_settings
 from app.db.models import Role, Tenant
 from app.db.repositories import (
-    AgentRepository,
     SessionRepository,
     TeamRepository,
     TenantAdminRepository,
@@ -55,7 +54,42 @@ def _guest_user_id(raw: str | None, *, fallback_host: str) -> str:
     return f"guest:ip:{host}"
 
 
-def _rate_limit_public_chat(
+async def _with_verified_identity(
+    session: Any,
+    context: TenantContext,
+    *,
+    session_id: str,
+) -> TenantContext:
+    """Load OTP/email bind for this guest session into TenantContext."""
+    from app.identity.service import IdentityService
+
+    user = await IdentityService(session, context).resolve_for_session(
+        external_session_id=session_id,
+        guest_user_id=context.user_id,
+    )
+    if user is None:
+        return context
+    enriched = TenantContext(
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        role=context.role,
+        clerk_org_id=context.clerk_org_id,
+        scopes=context.scopes,
+        principal_type=context.principal_type,
+        verified_end_user_id=user.id,
+        verified_email=user.email,
+    )
+    set_tenant_context(enriched)
+    return enriched
+
+
+def _attach_identity(runtime: Any, session: Any, context: TenantContext) -> None:
+    from app.identity.tools import attach_identity_tools
+
+    attach_identity_tools(runtime, session, context)
+
+
+async def _rate_limit_public_chat(
     *,
     tenant_id: uuid.UUID,
     guest_user_id: str,
@@ -64,9 +98,9 @@ def _rate_limit_public_chat(
     settings = get_settings()
     per_guest = max(1, settings.public_chat_rate_limit_per_minute)
     per_ip = max(per_guest, settings.public_chat_rate_limit_per_minute * 3)
-    limiter.hit(f"public-chat:guest:{tenant_id}:{guest_user_id}", limit=per_guest)
-    limiter.hit(f"public-chat:ip:{client_host}", limit=per_ip)
-    limiter.acquire(
+    await limiter.async_hit(f"public-chat:guest:{tenant_id}:{guest_user_id}", limit=per_guest)
+    await limiter.async_hit(f"public-chat:ip:{client_host}", limit=per_ip)
+    await limiter.async_acquire(
         f"public-chat:concurrency:{tenant_id}",
         limit=settings.tenant_concurrency_limit,
     )
@@ -112,7 +146,7 @@ def _streaming_response(
             async for item in event_stream:
                 yield item
         finally:
-            limiter.release(f"public-chat:concurrency:{tenant_id}")
+            await limiter.async_release(f"public-chat:concurrency:{tenant_id}")
 
     return StreamingResponse(
         guarded(),
@@ -135,112 +169,12 @@ async def run_public_agent(
     stream: bool = Form(True),
     x_guest_id: str | None = Header(default=None),
 ) -> StreamingResponse:
-    """Stream a published agent run for anonymous / guest customers."""
-    del stream
-    from app.agent_runtime.agent_os import (
-        _fail_runtime_trace,
-        _persist_runtime_event,
-        _sse_from_agent,
-        _start_runtime_trace,
+    """Agents are not publicly callable — use team or workflow runs."""
+    del request, tenant_slug, agent_slug, message, session_id, stream, x_guest_id
+    raise HTTPException(
+        status_code=404,
+        detail="Public agent chat is not available. Use a published team or workflow.",
     )
-
-    message = message.strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="message must not be empty")
-    host = request.client.host if request.client else "anon"
-    guest_user_id = _guest_user_id(x_guest_id, fallback_host=host)
-    acquired = False
-
-    async with _public_run_context(tenant_slug, guest_user_id=guest_user_id) as (
-        session,
-        tenant,
-        context,
-    ):
-        try:
-            _rate_limit_public_chat(
-                tenant_id=tenant.id,
-                guest_user_id=guest_user_id,
-                client_host=host,
-            )
-            acquired = True
-            repo = AgentRepository(session, context)
-            session_repo = SessionRepository(session, context)
-            try:
-                config = await repo.get_config_by_slug(agent_slug)
-                if config is None or config.published_version_id is None:
-                    raise LookupError("Published agent not found")
-                existing = await session_repo.get_by_external(session_id)
-                if existing is not None:
-                    if existing.user_id != context.user_id:
-                        raise PermissionError("Session belongs to another user")
-                    if existing.target_type != "agent":
-                        raise ValueError("Session is pinned to another target")
-                    if existing.agent_config_id != config.id:
-                        raise ValueError("Session is pinned to another agent")
-                    resolved_version_id = existing.agent_version_id
-                    if resolved_version_id is None:
-                        raise ValueError("Session is missing a pinned agent version")
-                else:
-                    resolved_version_id = config.published_version_id
-                agent = await AgentFactoryService(session, context).create(
-                    RuntimeRequest(
-                        version_id=resolved_version_id,
-                        session_id=session_id,
-                        preview=False,
-                    )
-                )
-            except LookupError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            except PermissionError as exc:
-                raise HTTPException(status_code=403, detail=str(exc)) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            await session.commit()
-
-            durable_user_id = runtime_user_id(context)
-            durable_session_id = runtime_session_id(context, session_id)
-            metadata = dict(getattr(agent, "_saas_metadata", {}) or {})
-            metadata["public_chat"] = True
-            trace_id = await _start_runtime_trace(
-                context=context,
-                external_session_id=session_id,
-                target_id=uuid.UUID(str(metadata["agent_id"])),
-                version_id=resolved_version_id,
-                name="Public agent chat",
-                message=message,
-                metadata=metadata,
-            )
-
-            async def event_stream() -> AsyncIterator[bytes]:
-                try:
-                    async for item in _sse_from_agent(
-                        agent,
-                        message,
-                        user_id=durable_user_id,
-                        session_id=durable_session_id,
-                        event_handler=lambda payload: _persist_runtime_event(
-                            payload,
-                            context=context,
-                            trace_id=trace_id,
-                            external_session_id=session_id,
-                            initial_title=message[:255],
-                        ),
-                    ):
-                        yield item
-                except Exception as exc:
-                    logger.exception("public_agent_run_failed", error=str(exc))
-                    await _fail_runtime_trace(
-                        context, trace_id, "Public agent run failed"
-                    )
-                    yield b'data: {"event":"RunError","error":"Agent run failed"}\n\n'
-
-            return _streaming_response(
-                event_stream(), session_id=session_id, tenant_id=tenant.id
-            )
-        except Exception:
-            if acquired:
-                limiter.release(f"public-chat:concurrency:{tenant.id}")
-            raise
 
 
 @router.post("/t/{tenant_slug}/teams/{team_slug}/runs")
@@ -251,6 +185,7 @@ async def run_public_team(
     message: str = Form(...),
     session_id: str = Form(...),
     stream: bool = Form(True),
+    background: bool = Form(True),
     x_guest_id: str | None = Header(default=None),
 ) -> StreamingResponse:
     """Stream a published team run for anonymous / guest customers."""
@@ -261,6 +196,7 @@ async def run_public_team(
         _sse_from_agent,
         _start_runtime_trace,
     )
+    from app.agent_runtime.run_control import new_run_id
 
     message = message.strip()
     if not message:
@@ -275,7 +211,7 @@ async def run_public_team(
         context,
     ):
         try:
-            _rate_limit_public_chat(
+            await _rate_limit_public_chat(
                 tenant_id=tenant.id,
                 guest_user_id=guest_user_id,
                 client_host=host,
@@ -315,12 +251,20 @@ async def run_public_team(
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            context = await _with_verified_identity(
+                session, context, session_id=session_id
+            )
+            _attach_identity(team, session, context)
             await session.commit()
 
             durable_user_id = runtime_user_id(context)
             durable_session_id = runtime_session_id(context, session_id)
             metadata = dict(getattr(team, "_saas_metadata", {}) or {})
             metadata["public_chat"] = True
+            if context.verified_end_user_id is not None:
+                metadata["verified_end_user_id"] = str(context.verified_end_user_id)
+                metadata["verified_email"] = context.verified_email
             trace_id = await _start_runtime_trace(
                 context=context,
                 external_session_id=session_id,
@@ -338,6 +282,9 @@ async def run_public_team(
                         message,
                         user_id=durable_user_id,
                         session_id=durable_session_id,
+                        session_state=getattr(team, "_saas_session_state", None),
+                        background=background,
+                        run_id=new_run_id() if background else None,
                         event_handler=lambda payload: _persist_runtime_event(
                             payload,
                             context=context,
@@ -359,7 +306,7 @@ async def run_public_team(
             )
         except Exception:
             if acquired:
-                limiter.release(f"public-chat:concurrency:{tenant.id}")
+                await limiter.async_release(f"public-chat:concurrency:{tenant.id}")
             raise
 
 
@@ -371,6 +318,7 @@ async def run_public_workflow(
     message: str = Form(...),
     session_id: str = Form(...),
     stream: bool = Form(True),
+    background: bool = Form(True),
     x_guest_id: str | None = Header(default=None),
 ) -> StreamingResponse:
     """Stream a published workflow run for anonymous / guest customers."""
@@ -381,6 +329,7 @@ async def run_public_workflow(
         _sse_from_agent,
         _start_runtime_trace,
     )
+    from app.agent_runtime.run_control import new_run_id
 
     message = message.strip()
     if not message:
@@ -395,7 +344,7 @@ async def run_public_workflow(
         context,
     ):
         try:
-            _rate_limit_public_chat(
+            await _rate_limit_public_chat(
                 tenant_id=tenant.id,
                 guest_user_id=guest_user_id,
                 client_host=host,
@@ -435,12 +384,20 @@ async def run_public_workflow(
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            context = await _with_verified_identity(
+                session, context, session_id=session_id
+            )
+            _attach_identity(workflow, session, context)
             await session.commit()
 
             durable_user_id = runtime_user_id(context)
             durable_session_id = runtime_session_id(context, session_id)
             metadata = dict(getattr(workflow, "_saas_metadata", {}) or {})
             metadata["public_chat"] = True
+            if context.verified_end_user_id is not None:
+                metadata["verified_end_user_id"] = str(context.verified_end_user_id)
+                metadata["verified_email"] = context.verified_email
             trace_id = await _start_runtime_trace(
                 context=context,
                 external_session_id=session_id,
@@ -458,6 +415,9 @@ async def run_public_workflow(
                         message,
                         user_id=durable_user_id,
                         session_id=durable_session_id,
+                        session_state=getattr(workflow, "_saas_session_state", None),
+                        background=background,
+                        run_id=new_run_id() if background else None,
                         event_handler=lambda payload: _persist_runtime_event(
                             payload,
                             context=context,
@@ -479,5 +439,325 @@ async def run_public_workflow(
             )
         except Exception:
             if acquired:
-                limiter.release(f"public-chat:concurrency:{tenant.id}")
+                await limiter.async_release(f"public-chat:concurrency:{tenant.id}")
             raise
+
+
+def _parse_last_event_index(
+    last_event_index: int | None,
+    last_event_id: str | None,
+) -> int | None:
+    if last_event_index is not None:
+        return last_event_index
+    if last_event_id is None or not str(last_event_id).strip():
+        return None
+    try:
+        return int(str(last_event_id).strip())
+    except ValueError:
+        return None
+
+
+@router.post("/t/{tenant_slug}/teams/{team_slug}/runs/{run_id}/resume")
+async def resume_public_team(
+    request: Request,
+    tenant_slug: str,
+    team_slug: str,
+    run_id: str,
+    session_id: str = Form(...),
+    last_event_index: int | None = Form(None),
+    x_guest_id: str | None = Header(default=None),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Resume a background public team run after disconnect."""
+    from app.agent_runtime.run_control import iter_resume_sse
+
+    host = request.client.host if request.client else "anon"
+    guest_user_id = _guest_user_id(x_guest_id, fallback_host=host)
+    acquired = False
+    resolved_index = _parse_last_event_index(last_event_index, last_event_id)
+
+    async with _public_run_context(tenant_slug, guest_user_id=guest_user_id) as (
+        session,
+        tenant,
+        context,
+    ):
+        try:
+            await _rate_limit_public_chat(
+                tenant_id=tenant.id,
+                guest_user_id=guest_user_id,
+                client_host=host,
+            )
+            acquired = True
+            repo = TeamRepository(session, context)
+            session_repo = SessionRepository(session, context)
+            try:
+                config = await repo.get_config_by_slug(team_slug)
+                if config is None or config.published_version_id is None:
+                    raise LookupError("Published team not found")
+                existing = await session_repo.get_by_external(session_id)
+                if existing is None:
+                    raise LookupError("Session not found")
+                if existing.user_id != context.user_id:
+                    raise PermissionError("Session belongs to another user")
+                if existing.target_type != "team" or existing.team_config_id != config.id:
+                    raise ValueError("Session is pinned to another target")
+                resolved_version_id = existing.team_version_id or config.published_version_id
+                team = await TeamFactoryService(
+                    AgentFactoryService(session, context)
+                ).create(
+                    TeamRuntimeRequest(
+                        version_id=resolved_version_id,
+                        session_id=session_id,
+                        preview=False,
+                    )
+                )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            context = await _with_verified_identity(
+                session, context, session_id=session_id
+            )
+            await session.commit()
+            durable_user_id = runtime_user_id(context)
+            durable_session_id = runtime_session_id(context, session_id)
+
+            async def event_stream() -> AsyncIterator[bytes]:
+                async for item in iter_resume_sse(
+                    team,
+                    run_id=run_id,
+                    session_id=durable_session_id,
+                    user_id=durable_user_id,
+                    last_event_index=resolved_index,
+                ):
+                    yield item
+
+            return _streaming_response(
+                event_stream(), session_id=session_id, tenant_id=tenant.id
+            )
+        except Exception:
+            if acquired:
+                await limiter.async_release(f"public-chat:concurrency:{tenant.id}")
+            raise
+
+
+@router.post("/t/{tenant_slug}/workflows/{workflow_slug}/runs/{run_id}/resume")
+async def resume_public_workflow(
+    request: Request,
+    tenant_slug: str,
+    workflow_slug: str,
+    run_id: str,
+    session_id: str = Form(...),
+    last_event_index: int | None = Form(None),
+    x_guest_id: str | None = Header(default=None),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Resume a background public workflow run after disconnect."""
+    from app.agent_runtime.run_control import iter_resume_sse
+
+    host = request.client.host if request.client else "anon"
+    guest_user_id = _guest_user_id(x_guest_id, fallback_host=host)
+    acquired = False
+    resolved_index = _parse_last_event_index(last_event_index, last_event_id)
+
+    async with _public_run_context(tenant_slug, guest_user_id=guest_user_id) as (
+        session,
+        tenant,
+        context,
+    ):
+        try:
+            await _rate_limit_public_chat(
+                tenant_id=tenant.id,
+                guest_user_id=guest_user_id,
+                client_host=host,
+            )
+            acquired = True
+            repo = WorkflowRepository(session, context)
+            session_repo = SessionRepository(session, context)
+            try:
+                config = await repo.get_config_by_slug(workflow_slug)
+                if config is None or config.published_version_id is None:
+                    raise LookupError("Published workflow not found")
+                existing = await session_repo.get_by_external(session_id)
+                if existing is None:
+                    raise LookupError("Session not found")
+                if existing.user_id != context.user_id:
+                    raise PermissionError("Session belongs to another user")
+                if (
+                    existing.target_type != "workflow"
+                    or existing.workflow_config_id != config.id
+                ):
+                    raise ValueError("Session is pinned to another target")
+                resolved_version_id = (
+                    existing.workflow_version_id or config.published_version_id
+                )
+                workflow = await WorkflowFactoryService(
+                    AgentFactoryService(session, context),
+                    TeamFactoryService(AgentFactoryService(session, context)),
+                ).create(
+                    WorkflowRuntimeRequest(
+                        version_id=resolved_version_id,
+                        session_id=session_id,
+                        preview=False,
+                    )
+                )
+            except LookupError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            context = await _with_verified_identity(
+                session, context, session_id=session_id
+            )
+            await session.commit()
+            durable_user_id = runtime_user_id(context)
+            durable_session_id = runtime_session_id(context, session_id)
+
+            async def event_stream() -> AsyncIterator[bytes]:
+                async for item in iter_resume_sse(
+                    workflow,
+                    run_id=run_id,
+                    session_id=durable_session_id,
+                    user_id=durable_user_id,
+                    last_event_index=resolved_index,
+                ):
+                    yield item
+
+            return _streaming_response(
+                event_stream(), session_id=session_id, tenant_id=tenant.id
+            )
+        except Exception:
+            if acquired:
+                await limiter.async_release(f"public-chat:concurrency:{tenant.id}")
+            raise
+
+
+@router.post("/t/{tenant_slug}/teams/{team_slug}/runs/{run_id}/cancel")
+async def cancel_public_team(
+    request: Request,
+    tenant_slug: str,
+    team_slug: str,
+    run_id: str,
+    session_id: str = Form(...),
+    x_guest_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Cancel an in-flight public team run."""
+    from app.agent_runtime.run_control import cancel_component_run
+
+    host = request.client.host if request.client else "anon"
+    guest_user_id = _guest_user_id(x_guest_id, fallback_host=host)
+
+    async with _public_run_context(tenant_slug, guest_user_id=guest_user_id) as (
+        session,
+        _tenant,
+        context,
+    ):
+        repo = TeamRepository(session, context)
+        session_repo = SessionRepository(session, context)
+        try:
+            config = await repo.get_config_by_slug(team_slug)
+            if config is None or config.published_version_id is None:
+                raise LookupError("Published team not found")
+            existing = await session_repo.get_by_external(session_id)
+            if existing is None:
+                raise LookupError("Session not found")
+            if existing.user_id != context.user_id:
+                raise PermissionError("Session belongs to another user")
+            if existing.target_type != "team" or existing.team_config_id != config.id:
+                raise ValueError("Session is pinned to another target")
+            resolved_version_id = existing.team_version_id or config.published_version_id
+            team = await TeamFactoryService(
+                AgentFactoryService(session, context)
+            ).create(
+                TeamRuntimeRequest(
+                    version_id=resolved_version_id,
+                    session_id=session_id,
+                    preview=False,
+                )
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        cancelled = await cancel_component_run(team, run_id)
+        await session_repo.touch_run(session_id, run_id=run_id, status="cancelled")
+        await session.commit()
+        if not cancelled:
+            raise HTTPException(
+                status_code=404, detail="Run not found or already finished"
+            )
+        return {"ok": True, "run_id": run_id, "status": "cancelled"}
+
+
+@router.post("/t/{tenant_slug}/workflows/{workflow_slug}/runs/{run_id}/cancel")
+async def cancel_public_workflow(
+    request: Request,
+    tenant_slug: str,
+    workflow_slug: str,
+    run_id: str,
+    session_id: str = Form(...),
+    x_guest_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Cancel an in-flight public workflow run."""
+    from app.agent_runtime.run_control import cancel_component_run
+
+    host = request.client.host if request.client else "anon"
+    guest_user_id = _guest_user_id(x_guest_id, fallback_host=host)
+
+    async with _public_run_context(tenant_slug, guest_user_id=guest_user_id) as (
+        session,
+        _tenant,
+        context,
+    ):
+        repo = WorkflowRepository(session, context)
+        session_repo = SessionRepository(session, context)
+        try:
+            config = await repo.get_config_by_slug(workflow_slug)
+            if config is None or config.published_version_id is None:
+                raise LookupError("Published workflow not found")
+            existing = await session_repo.get_by_external(session_id)
+            if existing is None:
+                raise LookupError("Session not found")
+            if existing.user_id != context.user_id:
+                raise PermissionError("Session belongs to another user")
+            if (
+                existing.target_type != "workflow"
+                or existing.workflow_config_id != config.id
+            ):
+                raise ValueError("Session is pinned to another target")
+            resolved_version_id = (
+                existing.workflow_version_id or config.published_version_id
+            )
+            workflow = await WorkflowFactoryService(
+                AgentFactoryService(session, context),
+                TeamFactoryService(AgentFactoryService(session, context)),
+            ).create(
+                WorkflowRuntimeRequest(
+                    version_id=resolved_version_id,
+                    session_id=session_id,
+                    preview=False,
+                )
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        cancelled = await cancel_component_run(workflow, run_id)
+        await session_repo.touch_run(session_id, run_id=run_id, status="cancelled")
+        await session.commit()
+        if not cancelled:
+            raise HTTPException(
+                status_code=404, detail="Run not found or already finished"
+            )
+        return {"ok": True, "run_id": run_id, "status": "cancelled"}

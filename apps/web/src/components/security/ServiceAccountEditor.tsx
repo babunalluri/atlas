@@ -22,7 +22,6 @@ const SCOPE_GROUPS = [
   {
     label: "Run",
     scopes: [
-      ["agents:run", "Agents"],
       ["teams:run", "Teams"],
       ["workflows:run", "Workflows"],
     ],
@@ -49,7 +48,7 @@ const PRESETS: Array<{ id: string; label: string; scopes: string[] }> = [
   {
     id: "runner",
     label: "Runner",
-    scopes: ["agents:run", "teams:run", "workflows:run"],
+    scopes: ["teams:run", "workflows:run"],
   },
   {
     id: "mcp",
@@ -86,7 +85,7 @@ export function ServiceAccountEditor({
   const { getAccessToken } = useAgentOsToken();
   const [name, setName] = useState(initial?.name ?? "");
   const [scopes, setScopes] = useState<string[]>(
-    initial?.scopes ?? ["agents:run"],
+    initial?.scopes ?? ["teams:run", "workflows:run"],
   );
   const [expiresAt, setExpiresAt] = useState("");
   const [createdToken, setCreatedToken] = useState<string | null>(null);
@@ -306,7 +305,7 @@ export function ServiceAccountEditor({
               href="/admin/service-accounts"
               label="Back to service accounts"
             />
-            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+            <h1 className="min-w-0 truncate py-0.5 font-display text-2xl font-semibold leading-snug tracking-tight">
               {account.name}
             </h1>
           </div>

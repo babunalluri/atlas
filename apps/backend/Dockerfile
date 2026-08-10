@@ -29,4 +29,5 @@ RUN uv pip install . \
   && adduser --system --ingroup app app
 USER app
 EXPOSE 7777
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7777"]
+ENV WEB_CONCURRENCY=2
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:7777 app.main:app"]

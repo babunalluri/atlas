@@ -119,6 +119,46 @@ async def test_credential_toolkit_creation_is_tenant_and_provider_gated(
 
 
 @pytest.mark.asyncio
+async def test_sync_tenant_python_draft_discovers_empty_capabilities(session, tenant_a):
+    """Saving with capabilities=[] should AST-discover and persist method names."""
+    from app.api.tools import _sync_tenant_python_draft
+
+    session.info["tenant_id"] = tenant_a.tenant_id
+    tools = ToolDefinitionRepository(session, tenant_a)
+    versions = ToolDefinitionVersionRepository(session, tenant_a)
+    source = (
+        "async def get_ticket(ctx, ticket_id: int):\n"
+        "    return ticket_id\n"
+        "async def search_tickets(ctx, query: str = ''):\n"
+        "    return query\n"
+    )
+    tool = await tools.create(
+        tool_values(
+            kind="tenant_python",
+            http_method=None,
+            base_url=None,
+            path=None,
+            slug="freshdesk-caps",
+            name="Freshdesk Caps",
+            config={
+                "source_code": source,
+                "dependencies": [],
+                "capabilities": [],
+                "settings": {},
+                "version_status": "draft",
+            },
+        )
+    )
+    await _sync_tenant_python_draft(tool, tenant_a, session)
+    await session.refresh(tool)
+    names = {item["name"] for item in tool.config.get("capabilities") or []}
+    assert names == {"get_ticket", "search_tickets"}
+    draft = await versions.latest_draft(tool.id)
+    assert draft is not None
+    assert {item["name"] for item in draft.capabilities} == names
+
+
+@pytest.mark.asyncio
 async def test_tool_update_then_out_avoids_missing_greenlet(session, tenant_a):
     """Regression: flush+onupdate expires updated_at; sync _out must not lazy-load."""
     from app.api.tools import _serialize_tool, _sync_tenant_python_draft
@@ -313,3 +353,39 @@ async def test_runtime_never_resolves_foreign_definition(session, tenant_a, tena
         await AgentFactoryService(session, tenant_a, allowed_hosts={"api.example.com"})._build_tool(
             binding
         )
+
+
+@pytest.mark.asyncio
+async def test_credential_delete_removes_unused_secret(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = CredentialRepository(session, tenant_a)
+    credential = await repo.create(
+        name="Old Groq",
+        provider="groq",
+        encrypted_value="ciphertext",
+        key_version="local-v1",
+    )
+    await session.commit()
+
+    assert await repo.delete(credential.id) is True
+    assert await repo.get(credential.id) is None
+
+
+@pytest.mark.asyncio
+async def test_credential_delete_blocked_when_attached_to_tool(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    credentials = CredentialRepository(session, tenant_a)
+    credential = await credentials.create(
+        name="API token",
+        provider="rest_api",
+        encrypted_value="ciphertext",
+        key_version="local-v1",
+    )
+    await ToolDefinitionRepository(session, tenant_a).create(
+        tool_values(credential_id=credential.id)
+    )
+    await session.commit()
+
+    with pytest.raises(ValueError, match="attached to a tool"):
+        await credentials.delete(credential.id)
+    assert await credentials.get(credential.id) is not None

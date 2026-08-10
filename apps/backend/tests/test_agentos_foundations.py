@@ -269,7 +269,7 @@ async def test_service_account_token_is_hashed_scoped_and_revocable(
         name="CI runner",
         token_prefix=minted.token_prefix,
         token_hash=minted.token_hash,
-        scopes=["agents:run", "sessions:read"],
+        scopes=["teams:run", "sessions:read"],
         expires_at=None,
     )
     assert account.token_hash == hash_service_account_token(minted.token)
@@ -282,8 +282,8 @@ async def test_service_account_token_is_hashed_scoped_and_revocable(
     assert context is not None
     assert context.tenant_id == tenant_a.tenant_id
     assert context.user_id == f"sa:{account.id}"
-    assert context.has_scope("agents:run")
-    assert not context.has_scope("teams:run")
+    assert context.has_scope("teams:run")
+    assert not context.has_scope("workflows:run")
 
     session.info["tenant_id"] = tenant_b.tenant_id
     assert await ServiceAccountRepository(session, tenant_b).list_accounts() == []

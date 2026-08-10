@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
@@ -12,14 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime.factory import (
     AgentFactoryService,
-    RuntimeRequest,
     TeamFactoryService,
     TeamRuntimeRequest,
     WorkflowFactoryService,
     WorkflowRuntimeRequest,
 )
 from app.db.models import (
-    AgentVersion,
     EvalCaseResult,
     EvalDefinition,
     EvalRun,
@@ -30,6 +29,12 @@ from app.tenancy.context import TenantContext
 from app.tenancy.ids import validate_slug
 
 CaseRunner = Callable[[EvalDefinition, str], Awaitable[dict[str, Any]]]
+
+STRING_EVALUATORS = frozenset({"exact", "contains", "regex"})
+AGNO_EVALUATORS = frozenset(
+    {"accuracy", "agent_as_judge", "performance", "reliability"}
+)
+SUPPORTED_EVALUATORS = STRING_EVALUATORS | AGNO_EVALUATORS
 
 
 def _normalized(value: str) -> str:
@@ -76,6 +81,47 @@ def _metrics(output: Any) -> dict[str, Any]:
         "output_tokens": raw.get("output_tokens") or raw.get("completion_tokens"),
         "estimated_cost_usd": raw.get("cost") or raw.get("estimated_cost"),
     }
+
+
+def _parse_tool_names(expected: str) -> list[str]:
+    text = expected.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            pass
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _result_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "to_dict"):
+        data = value.to_dict()
+        return data if isinstance(data, dict) else {"value": data}
+    if isinstance(value, dict):
+        return value
+    data: dict[str, Any] = {}
+    for key in (
+        "avg_score",
+        "mean_score",
+        "pass_rate",
+        "avg_run_time",
+        "eval_status",
+        "failed_tool_calls",
+        "passed_tool_calls",
+        "missing_tool_calls",
+        "additional_tool_calls",
+    ):
+        if hasattr(value, key):
+            data[key] = getattr(value, key)
+    return data
 
 
 class EvalRepository:
@@ -189,16 +235,16 @@ class EvalRepository:
     async def _validate_target(
         self, target_type: str, target_id: uuid.UUID, version_id: uuid.UUID
     ) -> None:
-        model: type[AgentVersion] | type[TeamVersion] | type[WorkflowVersion]
+        model: type[TeamVersion] | type[WorkflowVersion]
         config_column: Any
-        if target_type == "agent":
-            model, config_column = AgentVersion, AgentVersion.agent_config_id
-        elif target_type == "team":
+        if target_type == "team":
             model, config_column = TeamVersion, TeamVersion.team_config_id
         elif target_type == "workflow":
             model, config_column = WorkflowVersion, WorkflowVersion.workflow_config_id
         else:
-            raise ValueError("Target type must be agent, team, or workflow")
+            raise ValueError(
+                "Target type must be team or workflow — agents are not directly evaluable"
+            )
         found = await self.session.scalar(
             select(model.id).where(
                 model.tenant_id == self.context.tenant_id,
@@ -222,9 +268,10 @@ class EvalRepository:
 class EvalService:
     """Product-owned eval runner.
 
-    Agno 2.7.4's AccuracyEval and PerformanceEval inform the case/result shape,
-    while Atlas persists its own tenant-keyed records because native AgentOS
-    eval routes are not tenant-aware enough for this shared-runtime deployment.
+    String graders (exact/contains/regex) stay local. Agno AccuracyEval,
+    AgentAsJudgeEval, PerformanceEval, and ReliabilityEval grade factory-built
+    team/workflow targets. Atlas persists tenant-keyed records because native
+    AgentOS eval routes are not used in this shared-runtime deployment.
     """
 
     def __init__(
@@ -270,16 +317,45 @@ class EvalService:
             error: str | None = None
             actual = ""
             metrics: dict[str, Any] = {}
+            details: dict[str, Any] = {}
+            evaluator = str(case.get("evaluator") or "contains")
+            if evaluator not in SUPPORTED_EVALUATORS:
+                evaluator = "contains"
             try:
-                result = await self.runner(definition, str(case["input"]))
-                actual = str(result.get("content") or "")
-                metrics = result
+                if evaluator in AGNO_EVALUATORS and self.runner is self._run_target:
+                    graded = await self._run_agno_case(definition, case, evaluator)
+                else:
+                    result = await self.runner(definition, str(case["input"]))
+                    actual = str(result.get("content") or "")
+                    metrics = result
+                    score, passed = _score(
+                        actual, str(case.get("expected_output") or ""), evaluator
+                    )
+                    details = {"mocked": bool(metrics.get("mocked", False))}
+                    graded = {
+                        "content": actual,
+                        "score": score,
+                        "passed": passed,
+                        "details": details,
+                        **{
+                            key: metrics.get(key)
+                            for key in (
+                                "input_tokens",
+                                "output_tokens",
+                                "estimated_cost_usd",
+                            )
+                        },
+                    }
+                actual = str(graded.get("content") or "")
+                details = dict(graded.get("details") or {})
+                score = float(graded.get("score") or 0.0)
+                passed = bool(graded.get("passed"))
+                metrics = graded
             except Exception as exc:
                 error = str(exc)[:2000]
                 errors.append(error)
+                score, passed = 0.0, False
             latency = int((time.perf_counter() - started) * 1000)
-            evaluator = str(case.get("evaluator") or "contains")
-            score, passed = _score(actual, str(case["expected_output"]), evaluator)
             if error:
                 score, passed = 0.0, False
             case_input_tokens = int(metrics.get("input_tokens") or 0)
@@ -298,7 +374,7 @@ class EvalService:
                     case_key=str(case.get("key") or f"case-{index + 1}"),
                     name=str(case.get("name") or f"Case {index + 1}"),
                     input=str(case["input"]),
-                    expected_output=str(case["expected_output"]),
+                    expected_output=str(case.get("expected_output") or ""),
                     actual_output=actual or None,
                     evaluator=evaluator,
                     score=score,
@@ -308,7 +384,7 @@ class EvalService:
                     output_tokens=case_output_tokens or None,
                     estimated_cost_usd=case_cost or None,
                     error=error,
-                    details={"mocked": bool(metrics.get("mocked", False))},
+                    details=details,
                 )
             )
 
@@ -324,35 +400,231 @@ class EvalService:
         await self.session.flush()
         return run
 
-    async def _run_target(self, definition: EvalDefinition, prompt: str) -> dict[str, Any]:
+    async def _run_agno_case(
+        self, definition: EvalDefinition, case: dict[str, Any], evaluator: str
+    ) -> dict[str, Any]:
+        prompt = str(case["input"])
+        expected = str(case.get("expected_output") or "")
+        target = await self._build_target(definition)
+        if evaluator == "accuracy":
+            return await self._grade_accuracy(definition, target, prompt, expected)
+        if evaluator == "agent_as_judge":
+            return await self._grade_agent_as_judge(target, prompt, expected)
+        if evaluator == "performance":
+            return await self._grade_performance(target, prompt, expected)
+        return await self._grade_reliability(target, prompt, expected)
+
+    async def _grade_accuracy(
+        self, definition: EvalDefinition, target: Any, prompt: str, expected: str
+    ) -> dict[str, Any]:
+        from agno.eval.accuracy import AccuracyEval
+
+        kwargs: dict[str, Any] = {
+            "input": prompt,
+            "expected_output": expected,
+            "name": f"atlas-{definition.slug}",
+            "num_iterations": 1,
+            "show_spinner": False,
+            "print_summary": False,
+            "print_results": False,
+            "telemetry": False,
+        }
+        if definition.target_type == "team":
+            kwargs["team"] = target
+        else:
+            # AccuracyEval only accepts agent|team; grade workflow output post-hoc.
+            output = await self._invoke(target, prompt)
+            content = _content(output)
+            metrics = _metrics(output)
+            accuracy = AccuracyEval(**kwargs)
+            evaluation = await accuracy.aevaluate_answer(
+                input=prompt,
+                evaluator_agent=accuracy.get_evaluator_agent(),
+                evaluation_input=(
+                    f"Compare the actual answer to the expected answer.\n"
+                    f"Input: {prompt}\nExpected: {expected}\nActual: {content}"
+                ),
+                evaluator_expected_output=expected,
+                agent_output=content,
+            )
+            score = float(getattr(evaluation, "score", 0) or 0) / 10.0
+            return {
+                "content": content,
+                "score": score,
+                "passed": score >= 0.7,
+                "details": {"evaluator": "accuracy", "result": _result_dict(evaluation)},
+                **metrics,
+            }
+
+        accuracy = AccuracyEval(**kwargs)
+        result = await accuracy.arun(print_summary=False, print_results=False)
+        avg = float(getattr(result, "avg_score", None) or getattr(result, "mean_score", 0) or 0)
+        score = avg / 10.0
+        content = ""
+        if result and getattr(result, "results", None):
+            content = str(getattr(result.results[-1], "output", "") or "")
+        return {
+            "content": content,
+            "score": score,
+            "passed": score >= 0.7,
+            "details": {"evaluator": "accuracy", "result": _result_dict(result)},
+        }
+
+    async def _grade_agent_as_judge(
+        self, target: Any, prompt: str, expected: str
+    ) -> dict[str, Any]:
+        from agno.eval.agent_as_judge import AgentAsJudgeEval
+
+        output = await self._invoke(target, prompt)
+        content = _content(output)
+        metrics = _metrics(output)
+        judge = AgentAsJudgeEval(
+            criteria=expected or "The answer is correct, helpful, and safe.",
+            scoring_strategy="binary",
+            show_spinner=False,
+            print_summary=False,
+            print_results=False,
+            telemetry=False,
+        )
+        result = await judge.arun(
+            input=prompt,
+            output=content,
+            print_summary=False,
+            print_results=False,
+        )
+        passed = False
+        score = 0.0
+        if result is not None:
+            if getattr(result, "results", None):
+                passed = bool(result.results[0].passed)
+                raw_score = result.results[0].score
+                score = (
+                    float(raw_score) / 10.0
+                    if raw_score is not None
+                    else (1.0 if passed else 0.0)
+                )
+            else:
+                score = float(getattr(result, "pass_rate", 0.0) or 0.0)
+                passed = score >= 1.0
+        return {
+            "content": content,
+            "score": score,
+            "passed": passed,
+            "details": {"evaluator": "agent_as_judge", "result": _result_dict(result)},
+            **metrics,
+        }
+
+    async def _grade_performance(
+        self, target: Any, prompt: str, expected: str
+    ) -> dict[str, Any]:
+        from agno.eval.performance import PerformanceEval
+
+        async def _func() -> Any:
+            return await self._invoke(target, prompt)
+
+        # Keep iterations low for product smoke runs; expected_output is max seconds.
+        perf = PerformanceEval(
+            func=_func,
+            measure_runtime=True,
+            measure_memory=False,
+            warmup_runs=0,
+            num_iterations=1,
+            show_spinner=False,
+            print_summary=False,
+            print_results=False,
+            telemetry=False,
+        )
+        result = await perf.arun(print_summary=False, print_results=False)
+        avg = float(getattr(result, "avg_run_time", 0.0) or 0.0)
+        try:
+            limit = float(expected) if expected.strip() else None
+        except ValueError:
+            limit = None
+        passed = True if limit is None else avg <= limit
+        score = 1.0 if passed else 0.0
+        return {
+            "content": f"avg_run_time={avg:.4f}s",
+            "score": score,
+            "passed": passed,
+            "details": {
+                "evaluator": "performance",
+                "max_seconds": limit,
+                "result": _result_dict(result),
+            },
+        }
+
+    async def _grade_reliability(
+        self, target: Any, prompt: str, expected: str
+    ) -> dict[str, Any]:
+        from agno.eval.reliability import ReliabilityEval
+
+        output = await self._invoke(target, prompt)
+        content = _content(output)
+        metrics = _metrics(output)
+        expected_tools = _parse_tool_names(expected)
+        kwargs: dict[str, Any] = {
+            "expected_tool_calls": expected_tools or None,
+            "show_spinner": False,
+            "print_results": False,
+            "telemetry": False,
+        }
+        # Team and workflow/agent run outputs expose messages for tool checks.
+        if hasattr(output, "member_responses"):
+            kwargs["team_response"] = output
+        else:
+            kwargs["agent_response"] = output
+        reliability = ReliabilityEval(**kwargs)
+        result = await reliability.arun(print_results=False)
+        status = str(getattr(result, "eval_status", "") or "").lower()
+        missing = list(getattr(result, "missing_tool_calls", None) or [])
+        failed = list(getattr(result, "failed_tool_calls", None) or [])
+        passed = status in {"pass", "passed", "success"} or (
+            not missing and not failed and bool(expected_tools)
+        )
+        if not expected_tools:
+            # No expected tools configured — treat as informational pass.
+            passed = True
+        return {
+            "content": content,
+            "score": 1.0 if passed else 0.0,
+            "passed": passed,
+            "details": {
+                "evaluator": "reliability",
+                "expected_tool_calls": expected_tools,
+                "result": _result_dict(result),
+            },
+            **metrics,
+        }
+
+    async def _build_target(self, definition: EvalDefinition) -> Any:
         session_id = f"eval-{definition.id}-{uuid.uuid4()}"
         factory = AgentFactoryService(self.session, self.context)
-        if definition.target_type == "agent":
-            target = await factory.create(
-                RuntimeRequest(
-                    version_id=definition.version_id,
-                    session_id=session_id,
-                    preview=True,
-                )
-            )
-        elif definition.target_type == "team":
-            target = await TeamFactoryService(factory).create(
+        if definition.target_type == "team":
+            return await TeamFactoryService(factory).create(
                 TeamRuntimeRequest(
                     version_id=definition.version_id,
                     session_id=session_id,
                     preview=True,
                 )
             )
-        else:
-            target = await WorkflowFactoryService(factory).create(
+        if definition.target_type == "workflow":
+            return await WorkflowFactoryService(factory).create(
                 WorkflowRuntimeRequest(
                     version_id=definition.version_id,
                     session_id=session_id,
                     preview=True,
                 )
             )
+        raise ValueError(
+            "Target type must be team or workflow — agents are not directly evaluable"
+        )
+
+    async def _invoke(self, target: Any, prompt: str) -> Any:
         if hasattr(target, "arun"):
-            output = await target.arun(prompt, stream=False)
-        else:
-            output = target.run(prompt, stream=False)
+            return await target.arun(prompt, stream=False)
+        return target.run(prompt, stream=False)
+
+    async def _run_target(self, definition: EvalDefinition, prompt: str) -> dict[str, Any]:
+        target = await self._build_target(definition)
+        output = await self._invoke(target, prompt)
         return {"content": _content(output), **_metrics(output)}

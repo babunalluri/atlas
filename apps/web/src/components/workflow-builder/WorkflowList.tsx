@@ -63,8 +63,8 @@ export function WorkflowList({
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [cloningIds, setCloningIds] = useState<Set<string>>(() => new Set());
   const skipInitialFetch = useRef(true);
 
   const [versionsWorkflow, setVersionsWorkflow] =
@@ -254,7 +254,7 @@ export function WorkflowList({
   }
 
   async function onClone(workflow: WorkflowSummary) {
-    setCloningId(workflow.id);
+    setCloningIds((current) => new Set(current).add(workflow.id));
     setError(null);
     try {
       const cloned = await cloneWorkflow(await getAccessToken(), workflow.id);
@@ -263,7 +263,11 @@ export function WorkflowList({
       setError(
         reason instanceof Error ? reason.message : "Failed to clone workflow",
       );
-      setCloningId(null);
+      setCloningIds((current) => {
+        const next = new Set(current);
+        next.delete(workflow.id);
+        return next;
+      });
     }
   }
 
@@ -275,7 +279,7 @@ export function WorkflowList({
     ) {
       return;
     }
-    setDeletingId(workflow.id);
+    setDeletingIds((current) => new Set(current).add(workflow.id));
     setError(null);
     try {
       await deleteWorkflow(await getAccessToken(), workflow.id);
@@ -292,7 +296,11 @@ export function WorkflowList({
         reason instanceof Error ? reason.message : "Failed to delete workflow",
       );
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(workflow.id);
+        return next;
+      });
     }
   }
 
@@ -331,7 +339,9 @@ export function WorkflowList({
             <span className="th-label">Status</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label w-auto shrink-0 text-right">Actions</span>
+          <span className="th-label hidden w-auto shrink-0 text-right md:block">
+            Actions
+          </span>
         </div>
         <ul>
           {pageData.items.map((workflow) => (
@@ -349,10 +359,8 @@ export function WorkflowList({
                       {workflow.name}
                     </p>
                     <p className="mono-cell truncate text-slate-muted">
-                      /{workflow.slug} · {workflow.stepCount} steps
-                      {workflow.publishedVersion
-                        ? ` · v${workflow.publishedVersion}`
-                        : ""}
+                      {workflow.stepCount} step
+                      {workflow.stepCount === 1 ? "" : "s"}
                     </p>
                   </div>
                   <p className="text-sm capitalize text-ink-soft">
@@ -396,20 +404,20 @@ export function WorkflowList({
                     variant="ghost"
                     aria-label={`Clone ${workflow.name}`}
                     title="Clone"
-                    disabled={cloningId === workflow.id}
+                    disabled={cloningIds.has(workflow.id)}
                     onClick={() => void onClone(workflow)}
                   >
-                    {cloningId === workflow.id ? "…" : <CloneIcon />}
+                    {cloningIds.has(workflow.id) ? "…" : <CloneIcon />}
                   </Button>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${workflow.name}`}
                     title="Delete"
-                    disabled={deletingId === workflow.id}
+                    disabled={deletingIds.has(workflow.id)}
                     onClick={() => void onDelete(workflow)}
                   >
-                    {deletingId === workflow.id ? "…" : <TrashIcon />}
+                    {deletingIds.has(workflow.id) ? "…" : <TrashIcon />}
                   </Button>
                 </div>
               </div>

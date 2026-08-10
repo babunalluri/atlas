@@ -2,6 +2,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.copy_helpers import copy_name, unique_copy_slug
@@ -18,7 +19,7 @@ from app.api.schemas import (
     WorkflowVersionOut,
     WorkflowVersionSummaryOut,
 )
-from app.auth.dependencies import require_roles, require_tenant
+from app.auth.dependencies import require_roles
 from app.db.models import Role, WorkflowConfig, WorkflowVersion
 from app.db.repositories import AgentRepository, TeamRepository, WorkflowRepository
 from app.db.session import tenant_session
@@ -110,7 +111,9 @@ async def workflow_config_out(
 
 @router.get("/catalog", response_model=WorkflowCatalogPageOut)
 async def list_workflow_catalog(
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
     q: str | None = None,
     status: str = "all",
@@ -156,7 +159,9 @@ async def list_workflow_catalog(
 
 @router.get("", response_model=list[WorkflowConfigOut])
 async def list_workflows(
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> list[WorkflowConfigOut]:
     repo = WorkflowRepository(session, context)
@@ -230,7 +235,9 @@ async def create_workflow(
 @router.get("/{workflow_id}", response_model=WorkflowConfigOut)
 async def get_workflow(
     workflow_id: uuid.UUID,
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> WorkflowConfigOut:
     repo = WorkflowRepository(session, context)
@@ -372,7 +379,9 @@ async def publish_workflow(
 @router.get("/{workflow_id}/versions", response_model=list[WorkflowVersionSummaryOut])
 async def list_workflow_versions(
     workflow_id: uuid.UUID,
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> list[WorkflowVersionSummaryOut]:
     repo = WorkflowRepository(session, context)
@@ -400,7 +409,9 @@ async def list_workflow_versions(
 async def get_workflow_version(
     workflow_id: uuid.UUID,
     version_id: uuid.UUID,
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> WorkflowVersionOut:
     repo = WorkflowRepository(session, context)
@@ -452,3 +463,8 @@ async def delete_workflow(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow is referenced by sessions or schedules and cannot be deleted",
+        ) from exc

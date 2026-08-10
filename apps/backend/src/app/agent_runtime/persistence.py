@@ -19,6 +19,7 @@ def get_agno_db() -> Any:
         db_url=settings.agno_database_url,
         session_table="agno_sessions",
         memory_table="agno_memories",
+        learnings_table="agno_learnings",
         traces_table="agno_traces",
         spans_table="agno_spans",
         approvals_table="agno_approvals",

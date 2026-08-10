@@ -104,6 +104,75 @@ async def test_agent_list_versions_and_restore_published_pointer(session, tenant
 
 
 @pytest.mark.asyncio
+async def test_agent_create_draft_archives_prior_drafts(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = AgentRepository(session, tenant_a)
+    config = await repo.create_config(slug="archive-drafts", name="Archive Drafts")
+    v1 = await repo.create_draft(
+        config_id=config.id,
+        instructions="first save",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        tools=[{"tool_key": "rest_mutate", "config": {}}],
+    )
+    v2 = await repo.create_draft(
+        config_id=config.id,
+        instructions="second save",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        tools=[
+            {"tool_key": "rest_mutate", "config": {}},
+            {"tool_key": "web_search", "config": {}},
+        ],
+    )
+    refreshed_v1 = await repo.get_version(v1.id, allow_draft=True)
+    assert refreshed_v1 is not None
+    assert refreshed_v1.status == AgentStatus.archived
+    latest = await repo.get_latest_draft(config.id)
+    assert latest is not None and latest.id == v2.id
+
+
+@pytest.mark.asyncio
+async def test_agent_stale_draft_ignored_after_publish(session, tenant_a):
+    """Older leftover drafts must not reopen as the editor source after publish.
+
+    Regression: draft vN-1 stayed ``draft`` after publishing vN, so the agent
+    editor showed stale tool bindings (e.g. Freshdesk missing) while live used vN.
+    """
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = AgentRepository(session, tenant_a)
+    config = await repo.create_config(slug="stale-draft", name="Stale Draft")
+    v1 = await repo.create_draft(
+        config_id=config.id,
+        instructions="first save",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        tools=[{"tool_key": "rest_mutate", "config": {}}],
+    )
+    v2 = await repo.create_draft(
+        config_id=config.id,
+        instructions="second save with more tools",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        tools=[
+            {"tool_key": "rest_mutate", "config": {}},
+            {"tool_key": "web_search", "config": {}},
+        ],
+    )
+    await repo.publish(v2.id)
+
+    # Simulate legacy data: resurrect an older draft that was never archived.
+    stale = await repo.get_version(v1.id, allow_draft=True)
+    assert stale is not None
+    stale.status = AgentStatus.draft
+    await session.flush()
+
+    assert await repo.get_latest_draft(config.id) is None
+    bindings = list(await repo.bindings(v2.id))
+    assert {b.tool_key for b in bindings} == {"rest_mutate", "web_search"}
+
+
+@pytest.mark.asyncio
 async def test_agent_restore_as_draft_clones_tools(session, tenant_a):
     session.info["tenant_id"] = tenant_a.tenant_id
     repo = AgentRepository(session, tenant_a)

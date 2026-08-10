@@ -11,7 +11,7 @@ export default function SignUpPage() {
       <main className="flex min-h-screen items-center justify-center px-4">
         <section className="surface-panel max-w-md rounded-2xl p-8 text-center">
           <h1 className="font-display text-3xl font-semibold">
-            Clerk is not configured
+            Authentication is not configured
           </h1>
           <p className="mt-3 text-sm text-slate-muted">
             Account creation is disabled in local development mode.

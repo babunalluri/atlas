@@ -179,7 +179,7 @@ export function TeamEditor({
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5">
             <BackLink href="/admin/teams" label="Back to teams" />
-            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+            <h1 className="min-w-0 truncate py-0.5 font-display text-2xl font-semibold leading-snug tracking-tight">
               {form.name || "Untitled team"}
             </h1>
           </div>

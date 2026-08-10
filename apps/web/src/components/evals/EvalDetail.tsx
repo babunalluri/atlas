@@ -115,7 +115,7 @@ export function EvalDetail({ definition }: { definition: EvalDefinition }) {
                 <div>
                   <Badge tone={item.passed ? "success" : "danger"}>{item.name}</Badge>
                   <p className="mt-2 text-slate-muted">
-                    {duration(item.latency_ms)}
+                    {item.evaluator} · {duration(item.latency_ms)}
                     {item.details.mocked ? " · mocked grader" : ""}
                   </p>
                 </div>

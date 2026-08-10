@@ -1,5 +1,5 @@
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,8 @@ from app.agent_runtime.factory import (
     RuntimeRequest,
     TeamFactoryService,
     TeamRuntimeRequest,
+    WorkflowFactoryService,
+    WorkflowRuntimeRequest,
 )
 from app.api.schemas import ApprovalOut, ApprovalResolveIn
 from app.auth.dependencies import require_roles
@@ -35,6 +37,20 @@ def _out(row: object, external_session_id: str | None = None) -> ApprovalOut:
         expires_at=row.expires_at,  # type: ignore[attr-defined]
         created_at=row.created_at,  # type: ignore[attr-defined]
     )
+
+
+def _find_requirement(run_output: Any, requirement_id: str) -> tuple[Any | None, str]:
+    """Locate an agent/team requirement or workflow step/executor requirement."""
+    for item in list(getattr(run_output, "requirements", None) or []):
+        if str(getattr(item, "id", "")) == requirement_id:
+            return item, "agent"
+    for step in list(getattr(run_output, "step_requirements", None) or []):
+        if str(getattr(step, "id", "")) == requirement_id:
+            return step, "workflow"
+        for nested in list(getattr(step, "executor_requirements", None) or []):
+            if str(getattr(nested, "id", "")) == requirement_id:
+                return nested, "workflow"
+    return None, ""
 
 
 @router.get("", response_model=list[ApprovalOut])
@@ -94,6 +110,15 @@ async def resolve_approval(
                 session_id=conversation.external_session_id,
             )
         )
+    elif conversation.target_type == "workflow":
+        if conversation.workflow_version_id is None:
+            raise HTTPException(status_code=409, detail="Pinned workflow version is missing")
+        component = await WorkflowFactoryService(agent_factory).create(
+            WorkflowRuntimeRequest(
+                version_id=conversation.workflow_version_id,
+                session_id=conversation.external_session_id,
+            )
+        )
     else:
         if conversation.agent_version_id is None:
             raise HTTPException(status_code=409, detail="Pinned agent version is missing")
@@ -112,11 +137,7 @@ async def resolve_approval(
     )
     if run_output is None:
         raise HTTPException(status_code=409, detail="Paused run was not found or expired")
-    requirements = list(getattr(run_output, "requirements", None) or [])
-    requirement = next(
-        (item for item in requirements if str(getattr(item, "id", "")) == row.requirement_id),
-        None,
-    )
+    requirement, kind = _find_requirement(run_output, row.requirement_id)
     if requirement is None:
         raise HTTPException(status_code=409, detail="Approval requirement is stale")
     try:
@@ -128,16 +149,26 @@ async def resolve_approval(
     row = resolved
     try:
         if body.approved:
-            requirement.confirm()
+            if hasattr(requirement, "confirm"):
+                requirement.confirm()
         else:
-            requirement.reject(body.reason or "Rejected by tenant administrator")
-        await component.acontinue_run(
-            run_response=run_output,
-            requirements=requirements,
-            stream=False,
-            session_id=conversation.runtime_session_id,
-            user_id=conversation.runtime_user_id,
-        )
+            if hasattr(requirement, "reject"):
+                requirement.reject(body.reason or "Rejected by tenant administrator")
+        if kind == "workflow" or conversation.target_type == "workflow":
+            await component.acontinue_run(
+                run_response=run_output,
+                step_requirements=list(getattr(run_output, "step_requirements", None) or []),
+                stream=False,
+                session_id=conversation.runtime_session_id,
+            )
+        else:
+            await component.acontinue_run(
+                run_response=run_output,
+                requirements=list(getattr(run_output, "requirements", None) or []),
+                stream=False,
+                session_id=conversation.runtime_session_id,
+                user_id=conversation.runtime_user_id,
+            )
         await repo.mark_continued(approval_id)
         conversation.status = "completed"
     except Exception:

@@ -37,6 +37,33 @@ export function browserSelectedTenantId(): string | null {
   return value ? decodeURIComponent(value) : null;
 }
 
+/** Clear Platform → Open workspace override (home org should win again). */
+export function clearPlatformTenantSelection(): void {
+  if (typeof document === "undefined") return;
+  document.cookie = `${PLATFORM_TENANT_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
+  document.cookie = `${PLATFORM_TENANT_NAME_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
+}
+
+/**
+ * Platform tenant override is only valid for platform admins.
+ * Stale cookies after switching Clerk orgs must not be sent.
+ */
+export function effectivePlatformTenantId(
+  token: string,
+  selectedTenantId?: string | null,
+): string | null {
+  const selected =
+    selectedTenantId === undefined
+      ? browserSelectedTenantId()
+      : selectedTenantId;
+  if (!selected) return null;
+  if (!tokenIsPlatformAdmin(token)) {
+    clearPlatformTenantSelection();
+    return null;
+  }
+  return selected;
+}
+
 export function tokenIsPlatformAdmin(value: string): boolean {
   const { token } = unpackAccessContext(value);
   if (
@@ -48,9 +75,7 @@ export function tokenIsPlatformAdmin(value: string): boolean {
   try {
     const segment = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     const padded = segment.padEnd(Math.ceil(segment.length / 4) * 4, "=");
-    const payload = JSON.parse(
-      atob(padded),
-    ) as {
+    const payload = JSON.parse(atob(padded)) as {
       platform_admin?: boolean | string;
       metadata?: { platform_admin?: boolean | string };
     };

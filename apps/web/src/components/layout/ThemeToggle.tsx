@@ -1,42 +1,94 @@
 "use client";
 
-export type AdminTheme = "light" | "dark";
+import { useEffect, useState } from "react";
 
-export const THEME_STORAGE_KEY = "atlas-admin-theme";
+export type SurfaceTheme = "light" | "dark";
+export type ThemeSurface = "admin" | "workspace";
 
-export function readStoredTheme(): AdminTheme {
-  if (typeof window === "undefined") return "light";
-  return window.localStorage.getItem(THEME_STORAGE_KEY) === "dark"
-    ? "dark"
-    : "light";
+const STORAGE_KEYS: Record<ThemeSurface, string> = {
+  admin: "atlas-admin-theme",
+  workspace: "atlas-workspace-theme",
+};
+
+const DEFAULTS: Record<ThemeSurface, SurfaceTheme> = {
+  admin: "light",
+  workspace: "light",
+};
+
+export function readSurfaceTheme(surface: ThemeSurface): SurfaceTheme {
+  if (typeof window === "undefined") return DEFAULTS[surface];
+  const raw = window.localStorage.getItem(STORAGE_KEYS[surface]);
+  if (raw === "light" || raw === "dark") return raw;
+  return DEFAULTS[surface];
+}
+
+export function writeSurfaceTheme(surface: ThemeSurface, theme: SurfaceTheme) {
+  try {
+    window.localStorage.setItem(STORAGE_KEYS[surface], theme);
+  } catch {
+    // private mode / blocked storage
+  }
+}
+
+/** Persistable light/dark preference for admin or workspace. */
+export function useSurfaceTheme(surface: ThemeSurface) {
+  const [theme, setTheme] = useState<SurfaceTheme>(DEFAULTS[surface]);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    setTheme(readSurfaceTheme(surface));
+    setReady(true);
+  }, [surface]);
+
+  function changeTheme(next: SurfaceTheme) {
+    setTheme(next);
+    writeSurfaceTheme(surface, next);
+  }
+
+  return {
+    theme,
+    ready,
+    dark: theme === "dark",
+    changeTheme,
+    toggleTheme: () => changeTheme(theme === "dark" ? "light" : "dark"),
+  };
 }
 
 export function ThemeToggle({
   theme,
   onChange,
+  className,
 }: {
-  theme: AdminTheme;
-  onChange: (theme: AdminTheme) => void;
+  theme: SurfaceTheme;
+  onChange: (theme: SurfaceTheme) => void;
+  className?: string;
 }) {
   const dark = theme === "dark";
+  // Label the destination theme so the control reads as an action
+  // ("click for Light" while on dark, and vice versa).
+  const nextTheme = dark ? "light" : "dark";
+  const nextLabel = dark ? "Light" : "Dark";
   return (
     <button
       type="button"
       role="switch"
       aria-checked={dark}
-      aria-label="Toggle dark command-center theme"
-      title={dark ? "Switch to light theme" : "Switch to dark theme"}
-      onClick={() => onChange(dark ? "light" : "dark")}
-      className="inline-flex h-7 items-center gap-1.5 rounded-full border border-line bg-raised/70 px-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-muted transition hover:border-line-strong hover:text-ink"
+      aria-label={`Switch to ${nextLabel.toLowerCase()} theme`}
+      title={`Switch to ${nextLabel.toLowerCase()} theme`}
+      onClick={() => onChange(nextTheme)}
+      className={
+        className ??
+        "inline-flex h-7 items-center gap-1.5 rounded-full border border-line bg-raised/70 px-2.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-muted transition hover:border-line-strong hover:text-ink"
+      }
     >
       <span
         className={
-          dark
+          nextTheme === "dark"
             ? "size-1.5 rounded-full bg-teal-bright"
             : "size-1.5 rounded-full bg-amber"
         }
       />
-      {dark ? "Ops" : "Day"}
+      {nextLabel}
     </button>
   );
 }

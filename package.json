@@ -10,5 +10,8 @@
     "test:web": "npm run test --workspace @agent-saas/web",
     "typecheck:web": "npm run typecheck --workspace @agent-saas/web",
     "generate:contracts": "bash scripts/generate-contracts.sh"
+  },
+  "overrides": {
+    "vite": "^6.4.3"
   }
 }

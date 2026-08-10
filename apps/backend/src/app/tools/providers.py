@@ -329,6 +329,8 @@ class ProviderBuildContext:
     approval_required: bool
     credential_provider: str | None = None
     credential_value: str | None = None
+    tenant_id: str | None = None
+    user_vault: dict[str, str] | None = None
 
 
 class ToolProvider(Protocol):
@@ -701,15 +703,33 @@ class CustomPythonProvider(BaseProvider):
 CC_PBX_BODY_TOKEN_KEYS = frozenset({"pbx_token_id", "ccpl_token_id", "ccpl_unique_token"})
 
 
+def merge_user_vault_into_settings(
+    settings: Mapping[str, Any],
+    user_vault: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    """Overlay per-user vault keys onto sandbox settings (user wins)."""
+    merged = dict(settings)
+    if not user_vault:
+        return merged
+    for key, value in user_vault.items():
+        if value is None:
+            continue
+        merged[str(key)] = value
+    return merged
+
+
 def merge_tenant_python_settings(
     settings: Mapping[str, Any],
     credential_value: str | None,
 ) -> tuple[dict[str, Any], bool]:
-    """Merge credential JSON into sandbox settings.
+    """Merge a narrow set of credential fields into sandbox settings.
 
-    Returns ``(merged_settings, use_bearer_auth)``. Body-token credentials
-    (``pbx_token_id``, ``ccpl_token_id``, ``ccpl_unique_token``) skip Bearer
-    injection because CC PBX APIs expect ``token_id`` in POST bodies.
+    Returns ``(merged_settings, use_bearer_auth)``.
+
+    Full credential JSON is never dumped into guest-visible settings (it can be
+    echoed back via RunResult). Only known body-token keys are copied; opaque
+    string credentials stay out of settings and are injected as Bearer auth on
+    the host-side HttpProxy instead.
     """
     merged = dict(settings)
     use_bearer = True
@@ -718,12 +738,14 @@ def merge_tenant_python_settings(
     try:
         parsed = json.loads(credential_value)
     except json.JSONDecodeError:
+        # Opaque bearer / API key string — never place it in guest settings.
         return merged, use_bearer
     if not isinstance(parsed, dict):
         return merged, use_bearer
-    merged.update(parsed)
-    if CC_PBX_BODY_TOKEN_KEYS & parsed.keys():
-        use_bearer = False
+    for key in CC_PBX_BODY_TOKEN_KEYS:
+        if key in parsed and parsed[key] is not None:
+            merged[key] = parsed[key]
+            use_bearer = False
     return merged, use_bearer
 
 
@@ -781,9 +803,13 @@ class TenantPythonProvider(BaseProvider):
             callback_base_url=settings.sandbox_callback_base_url,
             concurrency_limit=settings.sandbox_tenant_concurrency,
             image=settings.sandbox_python_image,
+            tenant_key=str(context.tenant_id or "default"),
         )
         merged_settings, use_bearer = merge_tenant_python_settings(
             parsed.settings, context.credential_value
+        )
+        merged_settings = merge_user_vault_into_settings(
+            merged_settings, context.user_vault
         )
         proxy_headers = dict(context.headers)
         if (
@@ -832,6 +858,7 @@ class TenantPythonProvider(BaseProvider):
                     arguments=dict(kwargs),
                     headers=headers,
                     timeout_seconds=wall_seconds,
+                    mutating=bool(force_approval or capability.mutating),
                 )
             )
             if not result.ok:

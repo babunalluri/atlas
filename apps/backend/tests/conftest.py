@@ -11,6 +11,8 @@ os.environ.setdefault("AUTH_DISABLED", "true")
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", "dev-only-change-me-please-32b")
+os.environ.setdefault("REDIS_URL", "memory://")
+os.environ.setdefault("DOCUMENT_BUCKET", "")
 
 from app.core.settings import get_settings
 from app.db.models import Base, Role, Tenant

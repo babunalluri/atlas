@@ -11,7 +11,6 @@ import {
   createCredential,
   createToolDefinition,
   type CredentialSummary,
-  type CustomPythonCatalogEntry,
   type ToolkitCatalogEntry,
 } from "@/lib/api/admin";
 import type { ToolDefinition } from "@/lib/api/types";
@@ -67,12 +66,10 @@ export function ToolkitIntegrations({
   catalog,
   initialCredentials,
   initialTools,
-  customPythonCatalog,
 }: {
   catalog: ToolkitCatalogEntry[];
   initialCredentials: CredentialSummary[];
   initialTools: ToolDefinition[];
-  customPythonCatalog: CustomPythonCatalogEntry[];
 }) {
   const visible = useMemo(() => catalog.filter((item) => item.exposed), [catalog]);
   const [credentials, setCredentials] = useState(initialCredentials);
@@ -211,41 +208,21 @@ export function ToolkitIntegrations({
     <div className="space-y-6">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-teal">
-          Integrations
+          Tools
         </p>
         <h1 className="font-display text-4xl font-semibold tracking-tight">
-          Toolkit setup
+          Toolkit catalog
         </h1>
         <p className="mt-2 max-w-3xl text-sm text-slate-muted">
-          Review server packages, tenant credentials, supported options, and tool
-          definitions for every allowlisted Agno toolkit.
+          Built-in toolkits (Gmail, Slack, and more). Enabling one creates a
+          normal Tool you can attach to agents and teams — same as API or Python
+          tools. Manage enabled ones under{" "}
+          <Link href="/admin/tools" className="font-medium text-teal underline">
+            Tools → Toolkits
+          </Link>
+          .
         </p>
       </header>
-
-      <section className="surface-panel rounded-xl p-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold">Custom Python registry</h2>
-              <Badge tone="success">{customPythonCatalog.length} reviewed</Badge>
-            </div>
-            <p className="mt-1 text-xs text-slate-muted">
-              Source-controlled implementations only; no uploaded code or
-              database-controlled imports.
-            </p>
-            <p className="mt-2 text-sm text-ink-soft">
-              {customPythonCatalog.map((item) => item.label).join(", ") ||
-                "No custom implementations registered."}
-            </p>
-          </div>
-          <Link
-            href="/admin/tools/new"
-            className="rounded-md bg-ink px-3 py-2 text-sm font-medium text-canvas"
-          >
-            Create custom Python tool
-          </Link>
-        </div>
-      </section>
 
       <section className="grid min-h-[620px] gap-4 lg:grid-cols-[minmax(300px,0.8fr)_minmax(0,1.2fr)]">
         <div className="table-shell flex min-h-0 flex-col rounded-xl">
@@ -371,7 +348,7 @@ export function ToolkitIntegrations({
                         {selected.label}
                       </h2>
                       <p className="mono-cell mt-1 text-slate-muted">
-                        agno.tools.{selected.module}.{selected.class_name}
+                        tools.{selected.module}.{selected.class_name}
                       </p>
                     </div>
                   </div>

@@ -193,7 +193,7 @@ describe("streamAgentRun", () => {
         signal: controller.signal,
         onEvent: () => undefined,
       }),
-    ).resolves.toBeTruthy();
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("surfaces non-OK HTTP responses", async () => {

@@ -41,51 +41,16 @@ async def _public_tenant_context(tenant_slug: str):  # type: ignore[no-untyped-d
     return session, tenant, context
 
 
+_PUBLIC_AGENT_DISABLED = (
+    "Public agent chat is not available. Use a published team or workflow."
+)
+
+
 @router.get("/t/{tenant_slug}/agents/{agent_slug}")
 async def get_chat_surface(tenant_slug: str, agent_slug: str) -> dict[str, object]:
-    """Return non-sensitive branding and published agent metadata."""
-    async with SessionFactory() as session:
-        tenant = await TenantAdminRepository(session).get_by_slug(tenant_slug)
-        if tenant is None or not tenant.is_active:
-            raise HTTPException(status_code=404, detail="Tenant not found")
-        if session.bind and session.bind.dialect.name == "postgresql":
-            from sqlalchemy import text
-
-            await session.execute(
-                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
-                {"tenant_id": str(tenant.id)},
-            )
-        session.info["tenant_id"] = tenant.id
-        context = TenantContext(
-            tenant_id=tenant.id,
-            user_id="public-surface",
-            role=Role.end_user,
-            clerk_org_id=tenant.clerk_org_id,
-        )
-        config = await AgentRepository(session, context).get_config_by_slug(agent_slug)
-        if config is None or config.published_version_id is None:
-            raise HTTPException(status_code=404, detail="Published agent not found")
-        branding = tenant.branding or {}
-        return {
-            "tenant": {
-                "name": tenant.name,
-                "slug": tenant.slug,
-                "primaryColor": branding.get("primaryColor", "#0f766e"),
-                "accentColor": branding.get("accentColor", "#5eead4"),
-                "logoUrl": branding.get("logoUrl"),
-                "tagline": branding.get("tagline"),
-            },
-            "agent": {
-                "id": str(config.id),
-                "name": config.name,
-                "slug": config.slug,
-                "description": config.description or "",
-                "welcomeMessage": branding.get(
-                    "welcomeMessage",
-                    f"Hi, I'm {config.name}. How can I help?",
-                ),
-            },
-        }
+    """Agents are not publicly callable — use team or workflow surfaces."""
+    del tenant_slug, agent_slug
+    raise HTTPException(status_code=404, detail=_PUBLIC_AGENT_DISABLED)
 
 
 @router.get("/t/{tenant_slug}/teams/{team_slug}")

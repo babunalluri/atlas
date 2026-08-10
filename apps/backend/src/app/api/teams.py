@@ -2,6 +2,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.copy_helpers import copy_name, unique_copy_slug
@@ -17,7 +18,7 @@ from app.api.schemas import (
     TeamVersionSummaryOut,
     ToolBindingIn,
 )
-from app.auth.dependencies import require_roles, require_tenant
+from app.auth.dependencies import require_roles
 from app.db.models import Role, TeamConfig, TeamVersion
 from app.db.repositories import AgentRepository, TeamRepository
 from app.db.session import tenant_session
@@ -90,7 +91,9 @@ async def team_config_out(repo: TeamRepository, config: TeamConfig) -> TeamConfi
 
 @router.get("/catalog", response_model=TeamCatalogPageOut)
 async def list_team_catalog(
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
     q: str | None = None,
     status: str = "all",
@@ -136,7 +139,9 @@ async def list_team_catalog(
 
 @router.get("", response_model=list[TeamConfigOut])
 async def list_teams(
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> list[TeamConfigOut]:
     repo = TeamRepository(session, context)
@@ -171,7 +176,9 @@ async def create_team(
 @router.get("/{team_id}", response_model=TeamConfigOut)
 async def get_team(
     team_id: uuid.UUID,
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> TeamConfigOut:
     repo = TeamRepository(session, context)
@@ -336,7 +343,9 @@ async def publish_team(
 @router.get("/{team_id}/versions", response_model=list[TeamVersionSummaryOut])
 async def list_team_versions(
     team_id: uuid.UUID,
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> list[TeamVersionSummaryOut]:
     repo = TeamRepository(session, context)
@@ -364,7 +373,9 @@ async def list_team_versions(
 async def get_team_version(
     team_id: uuid.UUID,
     version_id: uuid.UUID,
-    context: Annotated[TenantContext, Depends(require_tenant)],
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> TeamVersionOut:
     repo = TeamRepository(session, context)
@@ -415,3 +426,8 @@ async def delete_team(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Team is referenced by sessions or schedules and cannot be deleted",
+        ) from exc

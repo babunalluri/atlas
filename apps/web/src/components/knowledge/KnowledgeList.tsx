@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { TrashIcon } from "@/components/ui/icons";
+import { PencilIcon, TrashIcon } from "@/components/ui/icons";
 import { deleteKnowledgeBase } from "@/lib/api/admin";
 import type { KnowledgeSource } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -37,7 +37,7 @@ export function KnowledgeList({
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
 
   const rows = useMemo<KnowledgeBaseRow[]>(() => {
@@ -102,7 +102,7 @@ export function KnowledgeList({
     ) {
       return;
     }
-    setDeletingId(row.id);
+    setDeletingIds((current) => new Set(current).add(row.id));
     setError(null);
     try {
       await deleteKnowledgeBase(await getAccessToken(), row.id);
@@ -117,7 +117,11 @@ export function KnowledgeList({
           : "Failed to delete knowledge base",
       );
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(row.id);
+        return next;
+      });
     }
   }
 
@@ -211,14 +215,14 @@ export function KnowledgeList({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 border-b border-line px-4 py-2">
-          <div className="hidden min-w-0 flex-1 grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] gap-3 md:grid">
+        <div className="hidden items-center gap-3 border-b border-line px-4 py-2 md:flex">
+          <div className="grid min-w-0 flex-1 grid-cols-[1.5fr_0.7fr_0.7fr_0.6fr] gap-3">
             <span className="th-label">Name</span>
             <span className="th-label">Sources</span>
             <span className="th-label">Ready</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label w-9 shrink-0 text-right"> </span>
+          <span className="th-label w-auto shrink-0 text-right">Actions</span>
         </div>
         <ul>
           {pageItems.map((row) => (
@@ -252,15 +256,27 @@ export function KnowledgeList({
                       : "—"}
                   </p>
                 </Link>
-                <div className="flex w-9 shrink-0 items-center justify-end">
+                <div className="flex shrink-0 items-center justify-end gap-0.5">
+                  <Link
+                    href={`/admin/knowledge/${row.id}`}
+                    className={buttonClassName({
+                      variant: "ghost",
+                      size: "icon",
+                    })}
+                    aria-label={`Edit ${row.name}`}
+                    title="Edit"
+                  >
+                    <PencilIcon />
+                  </Link>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${row.name}`}
-                    disabled={deletingId === row.id}
+                    title="Delete"
+                    disabled={deletingIds.has(row.id)}
                     onClick={() => void onDelete(row)}
                   >
-                    {deletingId === row.id ? "…" : <TrashIcon />}
+                    {deletingIds.has(row.id) ? "…" : <TrashIcon />}
                   </Button>
                 </div>
               </div>

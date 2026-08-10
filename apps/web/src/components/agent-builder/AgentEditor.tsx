@@ -26,6 +26,7 @@ import {
 import {
   type AgentConfig,
   type AgentDraftInput,
+  type FrameworkAdapter,
   type MemoryMode,
   type ToolDefinition,
 } from "@/lib/api/types";
@@ -54,6 +55,12 @@ function applyAgentToForm(agent: AgentConfig): AgentDraftInput {
     memoryMode: agent.memoryMode,
     tools: agent.tools,
     knowledgeBaseId: agent.knowledgeBaseId,
+    frameworkAdapter: agent.frameworkAdapter ?? "agno",
+    guardrails: agent.guardrails ?? {
+      promptInjection: false,
+      piiDetection: false,
+      openaiModeration: false,
+    },
   };
 }
 
@@ -127,11 +134,22 @@ export function AgentEditor({
   }
 
   async function onPublish() {
-    setPublishing(true);
     setBanner(null);
+    const parsed = validateAgentDraft(form);
+    if (!parsed.success) {
+      const errs: Record<string, string> = {};
+      for (const issue of parsed.error.issues) {
+        const key = issue.path[0]?.toString() ?? "form";
+        errs[key] = issue.message;
+      }
+      setFieldErrors(errs);
+      return;
+    }
+    setFieldErrors({});
+    setPublishing(true);
     try {
       const token = await getAccessToken();
-      await saveAgentDraft(token, initial.id, form);
+      await saveAgentDraft(token, initial.id, parsed.data);
       const published = await publishAgent(token, initial.id);
       setStatus(published.status);
       setPublishedVersion(published.publishedVersion);
@@ -169,7 +187,7 @@ export function AgentEditor({
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5">
             <BackLink href="/admin/agents" label="Back to agents" />
-            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+            <h1 className="min-w-0 truncate py-0.5 font-display text-2xl font-semibold leading-snug tracking-tight">
               {form.name || "Untitled agent"}
             </h1>
           </div>
@@ -302,6 +320,62 @@ export function AgentEditor({
                   className="min-h-0 font-mono text-[13px]"
                 />
                 <FieldError message={fieldErrors.instructions} />
+              </div>
+              <div className="md:col-span-3 rounded-lg border border-line bg-canvas/40 p-3">
+                <p className="text-sm font-semibold">Advanced</p>
+                <p className="mt-1 text-xs text-slate-muted">
+                  Framework adapters wrap external runtimes when configured;
+                  unsupported adapters fail at run time with HTTP 400.
+                </p>
+                <div className="mt-3 max-w-sm">
+                  <Label htmlFor="framework-adapter">Framework adapter</Label>
+                  <Select
+                    id="framework-adapter"
+                    value={form.frameworkAdapter}
+                    onChange={(e) =>
+                      update(
+                        "frameworkAdapter",
+                        e.target.value as FrameworkAdapter,
+                      )
+                    }
+                  >
+                    <option value="agno">Native (default)</option>
+                    <option value="langgraph">LangGraph</option>
+                    <option value="dspy">DSPy</option>
+                    <option value="claude_agent_sdk">Claude Agent SDK</option>
+                    <option value="antigravity">Antigravity</option>
+                  </Select>
+                </div>
+                <p className="mt-4 text-sm font-semibold">Guardrails</p>
+                <p className="mt-1 text-xs text-slate-muted">
+                  Pre-run hooks attached when this agent version executes.
+                </p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  {(
+                    [
+                      ["promptInjection", "Prompt injection"],
+                      ["piiDetection", "PII detection"],
+                      ["openaiModeration", "OpenAI moderation"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label
+                      key={key}
+                      className="flex items-center gap-2 rounded-md border border-line px-2.5 py-2 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={form.guardrails[key]}
+                        onChange={(e) =>
+                          update("guardrails", {
+                            ...form.guardrails,
+                            [key]: e.target.checked,
+                          })
+                        }
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
               </div>
             </div>
           </section>

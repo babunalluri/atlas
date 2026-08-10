@@ -130,6 +130,17 @@ async def create_workspace(
             is_active=True,
         )
         session.add(tenant)
+        # Flush tenant first so platform_audit_events.tenant_id FK is satisfied.
+        # Without a mapper relationship, SQLAlchemy may insert the audit row first.
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="A workspace with this slug or organization already exists",
+            ) from exc
+
         session.add(
             PlatformAuditEvent(
                 id=new_id(),
@@ -139,14 +150,7 @@ async def create_workspace(
                 details={"slug": tenant.slug, "clerk_org_id": tenant.clerk_org_id},
             )
         )
-        try:
-            await session.commit()
-        except IntegrityError as exc:
-            await session.rollback()
-            raise HTTPException(
-                status_code=409,
-                detail="A workspace with this slug or organization already exists",
-            ) from exc
+        await session.commit()
         await session.refresh(tenant)
         return WorkspaceOut(
             id=tenant.id,

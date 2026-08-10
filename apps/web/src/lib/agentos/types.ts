@@ -1,4 +1,4 @@
-/** Typed AgentOS / Agno run stream events. */
+/** Typed AgentOS run stream events. */
 
 export type RunEventName =
   | "RunStarted"

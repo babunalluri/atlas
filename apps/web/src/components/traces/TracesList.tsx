@@ -56,6 +56,18 @@ function shortUser(userId: string) {
   return userId;
 }
 
+function targetFilterKey(row: ActivityRow) {
+  return `${row.personaType}:${row.personaName}`;
+}
+
+function targetTypeBadgeTone(
+  type: ActivityRow["personaType"],
+): "info" | "success" | "neutral" {
+  if (type === "team") return "info";
+  if (type === "workflow") return "success";
+  return "neutral";
+}
+
 export function TracesList({
   initialActivities,
 }: {
@@ -64,63 +76,69 @@ export function TracesList({
   const [tab, setTab] = useState<TabKey>("live_chat");
   const [user, setUser] = useState("all");
   const [target, setTarget] = useState("all");
-  const [slug, setSlug] = useState("all");
   const [status, setStatus] = useState("all");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
-  const users = useMemo(
-    () =>
-      [...new Set(initialActivities.map((row) => row.userId))].sort((a, b) =>
-        a.localeCompare(b),
-      ),
-    [initialActivities],
-  );
-  const targets = useMemo(
-    () =>
-      [...new Set(initialActivities.map((row) => row.personaName))].sort((a, b) =>
-        a.localeCompare(b),
-      ),
-    [initialActivities],
-  );
-  const slugs = useMemo(
-    () =>
-      [...new Set(initialActivities.map((row) => row.taskName))].sort((a, b) =>
-        a.localeCompare(b),
-      ),
-    [initialActivities],
-  );
+  const users = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const row of initialActivities) {
+      byId.set(row.userId, row.userLabel || shortUser(row.userId));
+    }
+    return [...byId.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [initialActivities]);
+  const targets = useMemo(() => {
+    const byKey = new Map<string, ActivityRow>();
+    for (const row of initialActivities) {
+      byKey.set(targetFilterKey(row), row);
+    }
+    return [...byKey.values()].sort((a, b) => {
+      const byName = a.personaName.localeCompare(b.personaName);
+      if (byName !== 0) return byName;
+      return a.personaType.localeCompare(b.personaType);
+    });
+  }, [initialActivities]);
 
-  const filtered = useMemo(() => {
+  const tabCounts = useMemo(() => {
+    const counts = Object.fromEntries(
+      TABS.map(({ key }) => [key, 0]),
+    ) as Record<TabKey, number>;
+    for (const row of initialActivities) {
+      counts.all += 1;
+      if (row.channel in counts) counts[row.channel] += 1;
+    }
+    return counts;
+  }, [initialActivities]);
+
+  const { filtered, counts } = useMemo(() => {
     const startMs = startDate ? new Date(`${startDate}T00:00:00`).getTime() : null;
     const endMs = endDate ? new Date(`${endDate}T23:59:59.999`).getTime() : null;
-    return initialActivities.filter((row) => {
-      if (!matchesChannel(row, tab)) return false;
-      if (user !== "all" && row.userId !== user) return false;
-      if (target !== "all" && row.personaName !== target) return false;
-      if (slug !== "all" && row.taskName !== slug) return false;
-      if (status !== "all" && row.status !== status) return false;
+    const rows: ActivityRow[] = [];
+    const nextCounts = { total: 0, completed: 0, running: 0, error: 0 };
+    for (const row of initialActivities) {
+      if (!matchesChannel(row, tab)) continue;
+      if (user !== "all" && row.userId !== user) continue;
+      if (target !== "all" && targetFilterKey(row) !== target) continue;
+      if (status !== "all" && row.status !== status) continue;
       const when = new Date(row.updatedAt).getTime();
-      if (startMs != null && when < startMs) return false;
-      if (endMs != null && when > endMs) return false;
-      return true;
-    });
-  }, [initialActivities, tab, user, target, slug, status, startDate, endDate]);
-
-  const counts = useMemo(() => {
-    const total = filtered.length;
-    const completed = filtered.filter((row) => row.status === "completed").length;
-    const running = filtered.filter(
-      (row) =>
+      if (startMs != null && when < startMs) continue;
+      if (endMs != null && when > endMs) continue;
+      rows.push(row);
+      nextCounts.total += 1;
+      if (row.status === "completed") nextCounts.completed += 1;
+      if (
         row.status === "running" ||
         row.status === "paused" ||
-        row.status === "active",
-    ).length;
-    const error = filtered.filter(
-      (row) => row.status === "error" || row.status === "cancelled",
-    ).length;
-    return { total, completed, running, error };
-  }, [filtered]);
+        row.status === "active"
+      ) {
+        nextCounts.running += 1;
+      }
+      if (row.status === "error" || row.status === "cancelled") {
+        nextCounts.error += 1;
+      }
+    }
+    return { filtered: rows, counts: nextCounts };
+  }, [initialActivities, tab, user, target, status, startDate, endDate]);
 
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
   const timeZoneHint = formatActivityTime(new Date().toISOString()).zone;
@@ -169,9 +187,7 @@ export function TracesList({
 
       <div className="flex flex-wrap gap-1 border-b border-line pb-px">
         {TABS.map((item) => {
-          const count = initialActivities.filter((row) =>
-            matchesChannel(row, item.key),
-          ).length;
+          const count = tabCounts[item.key];
           const selected = tab === item.key;
           return (
             <button
@@ -193,16 +209,16 @@ export function TracesList({
         })}
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <Select
           aria-label="Filter by user"
           value={user}
           onChange={(event) => setUser(event.target.value)}
         >
           <option value="all">All users</option>
-          {users.map((id) => (
+          {users.map(([id, label]) => (
             <option key={id} value={id}>
-              {shortUser(id)}
+              {label}
             </option>
           ))}
         </Select>
@@ -211,22 +227,10 @@ export function TracesList({
           value={target}
           onChange={(event) => setTarget(event.target.value)}
         >
-          <option value="all">All targets</option>
-          {targets.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </Select>
-        <Select
-          aria-label="Filter by slug"
-          value={slug}
-          onChange={(event) => setSlug(event.target.value)}
-        >
-          <option value="all">All slugs</option>
-          {slugs.map((name) => (
-            <option key={name} value={name}>
-              {name}
+          <option value="all">All teams / workflows</option>
+          {targets.map((row) => (
+            <option key={targetFilterKey(row)} value={targetFilterKey(row)}>
+              {row.personaName} ({activityTargetTypeLabel(row.personaType)})
             </option>
           ))}
         </Select>
@@ -258,13 +262,12 @@ export function TracesList({
       </div>
 
       <section className="table-shell overflow-x-auto rounded-xl">
-        <div className="min-w-[900px]">
-          <div className="grid grid-cols-[minmax(120px,0.9fr)_minmax(140px,0.9fr)_minmax(180px,1.4fr)_minmax(120px,0.9fr)_minmax(100px,0.7fr)_90px] gap-3 border-b border-line px-4 py-2.5">
+        <div className="min-w-[820px]">
+          <div className="grid grid-cols-[minmax(120px,0.9fr)_minmax(140px,0.9fr)_minmax(180px,1.4fr)_minmax(140px,1fr)_90px] gap-3 border-b border-line px-4 py-2.5">
             <span className="th-label">User</span>
             <span className="th-label">Time ({timeZoneHint})</span>
             <span className="th-label">Session</span>
             <span className="th-label">Target</span>
-            <span className="th-label">Slug</span>
             <span className="th-label text-right">Status</span>
           </div>
           {filtered.map((row) => {
@@ -273,10 +276,10 @@ export function TracesList({
               <Link
                 key={row.id}
                 href={`/admin/traces/${encodeURIComponent(row.id)}`}
-                className="grid grid-cols-[minmax(120px,0.9fr)_minmax(140px,0.9fr)_minmax(180px,1.4fr)_minmax(120px,0.9fr)_minmax(100px,0.7fr)_90px] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0 hover:bg-fog/40"
+                className="grid grid-cols-[minmax(120px,0.9fr)_minmax(140px,0.9fr)_minmax(180px,1.4fr)_minmax(140px,1fr)_90px] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0 hover:bg-fog/40"
               >
-                <p className="mono-cell truncate text-sm" title={row.userId}>
-                  {shortUser(row.userId)}
+                <p className="truncate text-sm font-medium" title={row.userId}>
+                  {row.userLabel || shortUser(row.userId)}
                 </p>
                 <p
                   className="mono-cell text-xs text-slate-muted"
@@ -286,17 +289,20 @@ export function TracesList({
                 </p>
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{row.title}</p>
-                  <p className="mono-cell truncate text-[11px] text-slate-muted">
+                  <p className="truncate text-[11px] text-slate-muted">
                     {activityChannelLabel(row.channel)}
                   </p>
                 </div>
-                <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-2">
                   <p className="truncate text-sm">{row.personaName}</p>
-                  <p className="mono-cell text-[11px] text-slate-muted">
+                  <Badge
+                    tone={targetTypeBadgeTone(row.personaType)}
+                    uppercase={false}
+                    className="shrink-0"
+                  >
                     {activityTargetTypeLabel(row.personaType)}
-                  </p>
+                  </Badge>
                 </div>
-                <p className="truncate text-sm text-slate-muted">{row.taskName}</p>
                 <div className="flex justify-end">
                   <Badge
                     tone={activityStatusTone(row.status)}

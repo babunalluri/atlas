@@ -68,7 +68,6 @@ def _settings_out(row: TenantMcpSettings | None) -> dict[str, Any]:
             "list tenant-accessible sessions",
         ],
         "limitations": [
-            "Run cancellation is not exposed because the runtime has no safe cancellation API.",
             "Paused HITL runs continue through the existing approvals API.",
         ],
     }
@@ -179,6 +178,26 @@ def _tools() -> list[dict[str, Any]]:
             ),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
+        {
+            "name": "atlas_cancel_run",
+            "description": (
+                "Cancel an in-flight agent/team/workflow run by run_id. Requires mcp:run."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["agent", "team", "workflow"],
+                    },
+                    "config_id": {"type": "string"},
+                },
+                "required": ["run_id", "session_id", "kind", "config_id"],
+                "additionalProperties": False,
+            },
+        },
     ]
 
 
@@ -286,6 +305,46 @@ async def _call_tool(
     if name in {"atlas_run_agent", "atlas_run_team", "atlas_run_workflow"}:
         _require_scope(context, "mcp:run")
         return await _run(name, arguments, session, context)
+    if name == "atlas_cancel_run":
+        _require_scope(context, "mcp:run")
+        from app.agent_runtime.run_control import cancel_component_run
+
+        try:
+            config_id = uuid.UUID(str(arguments["config_id"]))
+            run_id = str(arguments["run_id"]).strip()
+            session_id = str(arguments["session_id"]).strip()
+            kind = str(arguments["kind"]).strip()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("run_id, session_id, kind, and config_id are required") from exc
+        factory = AgentFactoryService(session, context)
+        if kind == "agent":
+            agent_config = await AgentRepository(session, context).get_config(config_id)
+            if agent_config is None or agent_config.published_version_id is None:
+                raise LookupError("Published agent not found")
+            component = await factory.create(
+                RuntimeRequest(agent_config.published_version_id, session_id)
+            )
+        elif kind == "team":
+            team_config = await TeamRepository(session, context).get_config(config_id)
+            if team_config is None or team_config.published_version_id is None:
+                raise LookupError("Published team not found")
+            component = await TeamFactoryService(factory).create(
+                TeamRuntimeRequest(team_config.published_version_id, session_id)
+            )
+        elif kind == "workflow":
+            workflow_config = await WorkflowRepository(session, context).get_config(
+                config_id
+            )
+            if workflow_config is None or workflow_config.published_version_id is None:
+                raise LookupError("Published workflow not found")
+            component = await WorkflowFactoryService(factory).create(
+                WorkflowRuntimeRequest(workflow_config.published_version_id, session_id)
+            )
+        else:
+            raise ValueError("kind must be agent, team, or workflow")
+        await session.commit()
+        ok = await cancel_component_run(component, run_id)
+        return {"ok": ok, "run_id": run_id, "status": "cancelled" if ok else "not_found"}
     raise LookupError(f"Unknown MCP tool: {name}")
 
 

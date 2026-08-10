@@ -223,6 +223,14 @@ async def _validate_custom_python_credential(
         )
 
 
+def _tenant_python_capability_dicts(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve capability dicts, AST-discovering when the list is empty."""
+    from app.tools.providers import TenantPythonConfig
+
+    parsed = TenantPythonConfig.model_validate(config)
+    return [item.model_dump(mode="json") for item in parsed.capabilities]
+
+
 async def _sync_tenant_python_draft(
     row: ToolDefinition,
     context: TenantContext,
@@ -230,12 +238,20 @@ async def _sync_tenant_python_draft(
 ) -> None:
     if row.kind != "tenant_python":
         return
-    config = row.config or {}
+    config = dict(row.config or {})
+    try:
+        capabilities = _tenant_python_capability_dicts(config)
+        # Persist discovered names so agent UI can show real capability counts.
+        if capabilities != list(config.get("capabilities") or []):
+            config["capabilities"] = capabilities
+            row.config = config
+    except ValueError:
+        capabilities = list(config.get("capabilities") or [])
     await ToolDefinitionVersionRepository(session, context).upsert_draft(
         tool_definition_id=row.id,
         source_code=str(config.get("source_code") or ""),
         dependencies=list(config.get("dependencies") or []),
-        capabilities=list(config.get("capabilities") or []),
+        capabilities=capabilities,
         settings=dict(config.get("settings") or {}),
         created_by=context.user_id,
     )
@@ -513,12 +529,27 @@ async def validate_tenant_python_source(
     await _validate_targets(row.kind, row.config, settings)
     await _validate_tenant_python_deps(row.kind, row.config, session)
     result = await _inspect_definition(row, context, session, settings, test=False)
+    discovered = [
+        {
+            "name": item.name,
+            "description": item.description,
+            "mutating": item.approval_required,
+            "input_schema": item.input_schema,
+        }
+        for item in result.capabilities
+    ]
+    config = dict(row.config or {})
+    config["capabilities"] = discovered
     versions = ToolDefinitionVersionRepository(session, context)
     draft = await versions.latest_draft(row.id)
     if draft is not None:
-        await versions.mark_validated(draft.id)
-        config = dict(row.config)
         config["version_status"] = "validated"
+        row.config = config
+        await versions.mark_validated(draft.id)
+        draft.capabilities = discovered
+        await session.flush()
+    else:
+        # Update discovered capabilities without claiming a validated version exists.
         row.config = config
         await session.flush()
     await repo.audit(
@@ -543,18 +574,34 @@ async def publish_tenant_python(
         raise HTTPException(status_code=404, detail="Editable Python tool not found")
     await _validate_targets(row.kind, row.config, settings)
     await _validate_tenant_python_deps(row.kind, row.config, session)
-    await _inspect_definition(row, context, session, settings, test=False)
+    result = await _inspect_definition(row, context, session, settings, test=False)
+    # Inspect returns approval_required; draft/version rows store mutating.
+    discovered = [
+        {
+            "name": item.name,
+            "description": item.description,
+            "mutating": item.approval_required,
+            "input_schema": item.input_schema,
+        }
+        for item in result.capabilities
+    ]
+    config = dict(row.config or {})
+    config["capabilities"] = discovered
+    row.config = config
     versions = ToolDefinitionVersionRepository(session, context)
     draft = await versions.latest_draft(row.id)
     if draft is None:
         draft = await versions.upsert_draft(
             tool_definition_id=row.id,
-            source_code=str(row.config.get("source_code") or ""),
-            dependencies=list(row.config.get("dependencies") or []),
-            capabilities=list(row.config.get("capabilities") or []),
-            settings=dict(row.config.get("settings") or {}),
+            source_code=str(config.get("source_code") or ""),
+            dependencies=list(config.get("dependencies") or []),
+            capabilities=discovered,
+            settings=dict(config.get("settings") or {}),
             created_by=context.user_id,
         )
+    else:
+        draft.capabilities = discovered
+        await session.flush()
     published = await versions.publish(draft.id, row)
     if published is None:
         raise HTTPException(status_code=422, detail="Unable to publish tool version")

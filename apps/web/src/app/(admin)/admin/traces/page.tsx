@@ -1,3 +1,6 @@
+import { Suspense } from "react";
+
+import { AdminPageSkeleton } from "@/components/layout/AdminPageSkeleton";
 import { TracesList } from "@/components/traces/TracesList";
 import { buildActivityRows } from "@/lib/activities";
 import {
@@ -11,10 +14,11 @@ import { getServerAgentOsToken } from "@/lib/auth/server-token";
 
 export const dynamic = "force-dynamic";
 
-export default async function TracesPage() {
+async function TracesData() {
   const token = await getServerAgentOsToken();
+  // listAgents/Teams/Workflows resolve via thin /catalog endpoints (paginated).
   const [sessions, schedules, agents, teams, workflows] = await Promise.all([
-    listAdminSessions(token),
+    listAdminSessions(token, { limit: 100 }),
     listSchedules(token).catch(() => []),
     listAgents(token).catch(() => []),
     listTeams(token).catch(() => []),
@@ -30,4 +34,12 @@ export default async function TracesPage() {
   });
 
   return <TracesList initialActivities={activities} />;
+}
+
+export default function TracesPage() {
+  return (
+    <Suspense fallback={<AdminPageSkeleton />}>
+      <TracesData />
+    </Suspense>
+  );
 }

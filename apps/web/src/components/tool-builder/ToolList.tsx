@@ -28,7 +28,7 @@ import type { ToolDefinition } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn, formatRelative } from "@/lib/utils";
 
-type ToolFamily = "api" | "python" | "mcp" | "legacy";
+type ToolFamily = "api" | "python" | "mcp" | "toolkits";
 type StatusFilter = "all" | "active" | "inactive";
 
 type ViewingSource = {
@@ -43,22 +43,24 @@ const FAMILY_KINDS: Record<ToolFamily, ReadonlyArray<ToolDefinition["kind"]>> = 
   api: ["http", "openapi"],
   python: ["tenant_python"],
   mcp: ["mcp"],
-  legacy: ["python_toolkit", "custom_python"],
+  toolkits: ["python_toolkit", "custom_python"],
 };
 
-const FAMILY_CREATE_KIND: Record<Exclude<ToolFamily, "legacy">, ToolDefinition["kind"]> =
-  {
-    api: "http",
-    python: "tenant_python",
-    mcp: "mcp",
-  };
+const FAMILY_CREATE_KIND: Record<
+  Exclude<ToolFamily, "toolkits">,
+  ToolDefinition["kind"]
+> = {
+  api: "http",
+  python: "tenant_python",
+  mcp: "mcp",
+};
 
-const PRIMARY_TABS: Array<{ id: Exclude<ToolFamily, "legacy">; label: string }> =
-  [
-    { id: "api", label: "API Tools" },
-    { id: "python", label: "Python Tools" },
-    { id: "mcp", label: "MCP Tools" },
-  ];
+const PRIMARY_TABS: Array<{ id: ToolFamily; label: string }> = [
+  { id: "api", label: "API Tools" },
+  { id: "python", label: "Python Tools" },
+  { id: "mcp", label: "MCP Tools" },
+  { id: "toolkits", label: "Toolkits" },
+];
 
 function kindLabel(tool: ToolDefinition): string {
   switch (tool.kind) {
@@ -90,8 +92,8 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
   const { getAccessToken } = useAgentOsToken();
   const [tools, setTools] = useState(initialTools);
   const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [cloningIds, setCloningIds] = useState<Set<string>>(() => new Set());
   const [family, setFamily] = useState<ToolFamily>("api");
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
@@ -105,19 +107,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
     null,
   );
 
-  const legacyCount = useMemo(
-    () =>
-      tools.filter((tool) => FAMILY_KINDS.legacy.includes(tool.kind)).length,
-    [tools],
-  );
-
-  const tabs = useMemo(() => {
-    const rows: Array<{ id: ToolFamily; label: string }> = [...PRIMARY_TABS];
-    if (legacyCount > 0) {
-      rows.push({ id: "legacy", label: "Legacy" });
-    }
-    return rows;
-  }, [legacyCount]);
+  const tabs = PRIMARY_TABS;
 
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase();
@@ -141,12 +131,14 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
   const end = Math.min(filtered.length, start + PAGE_SIZE);
 
   const createHref =
-    family === "legacy"
-      ? "/admin/tools/new?family=api&kind=http"
+    family === "toolkits"
+      ? "/admin/integrations"
       : `/admin/tools/new?family=${family}&kind=${FAMILY_CREATE_KIND[family]}`;
 
+  const createLabel = family === "toolkits" ? "Browse catalog" : "+ Create";
+
   async function onClone(tool: ToolDefinition) {
-    setCloningId(tool.id);
+    setCloningIds((current) => new Set(current).add(tool.id));
     setError(null);
     try {
       const cloned = await cloneToolDefinition(await getAccessToken(), tool.id);
@@ -155,7 +147,11 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
       setError(
         reason instanceof Error ? reason.message : "Failed to clone tool",
       );
-      setCloningId(null);
+      setCloningIds((current) => {
+        const next = new Set(current);
+        next.delete(tool.id);
+        return next;
+      });
     }
   }
 
@@ -163,7 +159,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
     if (!window.confirm(`Delete “${tool.name}”? This cannot be undone.`)) {
       return;
     }
-    setDeletingId(tool.id);
+    setDeletingIds((current) => new Set(current).add(tool.id));
     setError(null);
     try {
       await deleteToolDefinition(await getAccessToken(), tool.id);
@@ -176,7 +172,11 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
         reason instanceof Error ? reason.message : "Failed to delete tool",
       );
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(tool.id);
+        return next;
+      });
     }
   }
 
@@ -314,15 +314,26 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
             Tools
           </h1>
           <p className="mt-0.5 text-sm text-slate-muted">
-            API, Python, and MCP capabilities agents can call.
+            API, Python, MCP, and built-in toolkits agents can call. Enable
+            catalog toolkits, then attach them like any other tool.
           </p>
         </div>
-        <Link
-          href={createHref}
-          className={buttonClassName({ variant: "accent" })}
-        >
-          + Create
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          {family !== "toolkits" ? (
+            <Link
+              href="/admin/integrations"
+              className={buttonClassName({ variant: "secondary" })}
+            >
+              Toolkit catalog
+            </Link>
+          ) : null}
+          <Link
+            href={createHref}
+            className={buttonClassName({ variant: "accent" })}
+          >
+            {createLabel}
+          </Link>
+        </div>
       </header>
       {error ? <p className="text-sm text-rose">{error}</p> : null}
 
@@ -431,7 +442,9 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
             <span className="th-label">Kind</span>
             <span className="th-label">Status</span>
           </div>
-          <span className="th-label w-auto shrink-0 text-right">Actions</span>
+          <span className="th-label hidden w-auto shrink-0 text-right md:block">
+            Actions
+          </span>
         </div>
         <ul>
           {pageItems.map((tool) => (
@@ -487,20 +500,20 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
                     variant="ghost"
                     aria-label={`Clone ${tool.name}`}
                     title="Clone"
-                    disabled={cloningId === tool.id}
+                    disabled={cloningIds.has(tool.id)}
                     onClick={() => void onClone(tool)}
                   >
-                    {cloningId === tool.id ? "…" : <CloneIcon />}
+                    {cloningIds.has(tool.id) ? "…" : <CloneIcon />}
                   </Button>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${tool.name}`}
                     title="Delete"
-                    disabled={deletingId === tool.id}
+                    disabled={deletingIds.has(tool.id)}
                     onClick={() => void onDelete(tool)}
                   >
-                    {deletingId === tool.id ? "…" : <TrashIcon />}
+                    {deletingIds.has(tool.id) ? "…" : <TrashIcon />}
                   </Button>
                 </div>
               </div>
@@ -510,8 +523,8 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
             <li className="px-5 py-10 text-center text-sm text-slate-muted">
               {tools.length === 0
                 ? "No reusable tools yet."
-                : family === "legacy"
-                  ? "No legacy tools."
+                : family === "toolkits"
+                  ? "No toolkit tools yet — enable one from the catalog."
                   : "No tools in this category."}
             </li>
           ) : null}

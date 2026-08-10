@@ -1,4 +1,7 @@
+import { Suspense } from "react";
+
 import { AgentList } from "@/components/agent-builder/AgentList";
+import { AdminPageSkeleton } from "@/components/layout/AdminPageSkeleton";
 import { listAgentCatalog } from "@/lib/api/admin";
 import type { CatalogPage, AgentSummary } from "@/lib/api/types";
 import { getServerAgentOsToken } from "@/lib/auth/server-token";
@@ -10,7 +13,7 @@ const EMPTY: CatalogPage<AgentSummary> = {
   pageSize: 25,
 };
 
-export default async function AgentsPage() {
+async function AgentsData() {
   let initial = EMPTY;
   try {
     initial = await listAgentCatalog(await getServerAgentOsToken(), {
@@ -22,4 +25,12 @@ export default async function AgentsPage() {
   }
 
   return <AgentList initial={initial} />;
+}
+
+export default function AgentsPage() {
+  return (
+    <Suspense fallback={<AdminPageSkeleton />}>
+      <AgentsData />
+    </Suspense>
+  );
 }

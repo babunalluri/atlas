@@ -62,8 +62,8 @@ export function AgentList({
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [cloningId, setCloningId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [cloningIds, setCloningIds] = useState<Set<string>>(() => new Set());
   const skipInitialFetch = useRef(true);
 
   const [versionsAgent, setVersionsAgent] = useState<AgentSummary | null>(null);
@@ -251,7 +251,7 @@ export function AgentList({
   }
 
   async function onClone(agent: AgentSummary) {
-    setCloningId(agent.id);
+    setCloningIds((current) => new Set(current).add(agent.id));
     setError(null);
     try {
       const cloned = await cloneAgent(await getAccessToken(), agent.id);
@@ -260,7 +260,11 @@ export function AgentList({
       setError(
         reason instanceof Error ? reason.message : "Failed to clone agent",
       );
-      setCloningId(null);
+      setCloningIds((current) => {
+        const next = new Set(current);
+        next.delete(agent.id);
+        return next;
+      });
     }
   }
 
@@ -272,7 +276,7 @@ export function AgentList({
     ) {
       return;
     }
-    setDeletingId(agent.id);
+    setDeletingIds((current) => new Set(current).add(agent.id));
     setError(null);
     try {
       await deleteAgent(await getAccessToken(), agent.id);
@@ -289,7 +293,11 @@ export function AgentList({
         reason instanceof Error ? reason.message : "Failed to delete agent",
       );
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(agent.id);
+        return next;
+      });
     }
   }
 
@@ -328,7 +336,9 @@ export function AgentList({
             <span className="th-label">Status</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label w-auto shrink-0 text-right">Actions</span>
+          <span className="th-label hidden w-auto shrink-0 text-right md:block">
+            Actions
+          </span>
         </div>
         <ul>
           {pageData.items.map((agent) => (
@@ -340,9 +350,6 @@ export function AgentList({
                 >
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{agent.name}</p>
-                    <p className="mono-cell truncate text-slate-muted">
-                      /{agent.slug}
-                    </p>
                   </div>
                   <p className="mono-cell text-ink-soft">{agent.model}</p>
                   <div className="flex items-center gap-2">
@@ -385,20 +392,20 @@ export function AgentList({
                     variant="ghost"
                     aria-label={`Clone ${agent.name}`}
                     title="Clone"
-                    disabled={cloningId === agent.id}
+                    disabled={cloningIds.has(agent.id)}
                     onClick={() => void onClone(agent)}
                   >
-                    {cloningId === agent.id ? "…" : <CloneIcon />}
+                    {cloningIds.has(agent.id) ? "…" : <CloneIcon />}
                   </Button>
                   <Button
                     size="icon"
                     variant="danger"
                     aria-label={`Delete ${agent.name}`}
                     title="Delete"
-                    disabled={deletingId === agent.id}
+                    disabled={deletingIds.has(agent.id)}
                     onClick={() => void onDelete(agent)}
                   >
-                    {deletingId === agent.id ? "…" : <TrashIcon />}
+                    {deletingIds.has(agent.id) ? "…" : <TrashIcon />}
                   </Button>
                 </div>
               </div>

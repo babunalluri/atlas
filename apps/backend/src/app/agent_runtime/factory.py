@@ -31,7 +31,8 @@ from app.db.repositories import (
     WorkflowRepository,
 )
 from app.knowledge.embeddings import EmbeddingService
-from app.knowledge.store import MemoryConfig, TenantKnowledgeStore
+from app.knowledge import build_tenant_knowledge_store
+from app.knowledge.store import MemoryConfig
 from app.observability.tracing import trace_metadata
 from app.tenancy.context import TenantContext, current_tenant
 from app.tools.providers import PROVIDERS, ProviderBuildContext, legacy_http_config
@@ -67,6 +68,21 @@ except ImportError:  # pragma: no cover
     Groq = None  # type: ignore[assignment,misc]
 
 try:
+    from agno.models.moonshot import MoonShot
+except ImportError:  # pragma: no cover
+    MoonShot = None  # type: ignore[assignment,misc]
+
+try:
+    from agno.models.nvidia import Nvidia
+except ImportError:  # pragma: no cover
+    Nvidia = None  # type: ignore[assignment,misc]
+
+try:
+    from agno.models.google import Gemini
+except ImportError:  # pragma: no cover
+    Gemini = None  # type: ignore[assignment,misc]
+
+try:
     from agno.factory import RequestContext
 except ImportError:  # pragma: no cover
     RequestContext = Any  # type: ignore[misc,assignment]
@@ -81,6 +97,15 @@ ALLOWED_MODELS = {
     "groq:llama-3.3-70b": "llama-3.3-70b-versatile",
     "groq:llama-3.1-8b": "llama-3.1-8b-instant",
     "groq:gpt-oss-120b": "openai/gpt-oss-120b",
+    "moonshot:kimi-k2.5": "kimi-k2.5",
+    "moonshot:kimi-k2": "kimi-k2",
+    "moonshot:kimi-latest": "kimi-latest",
+    "nvidia:nvidia-llama-3.3-70b": "meta/llama-3.3-70b-instruct",
+    "nvidia:nvidia-llama-3.1-8b": "meta/llama-3.1-8b-instruct",
+    "nvidia:nvidia-nemotron-70b": "nvidia/llama-3.1-nemotron-70b-instruct",
+    "gemini:gemini-2.5-flash": "gemini-2.5-flash",
+    "gemini:gemini-2.5-pro": "gemini-2.5-pro",
+    "gemini:gemini-2.0-flash": "gemini-2.0-flash",
 }
 
 
@@ -115,6 +140,39 @@ def _supported_kwargs(callable_: Any, values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if key in signature.parameters}
 
 
+def _guardrails_from_team_config(team_config: dict[str, Any] | None) -> list[Any]:
+    """Build Agno pre_hooks from AgentVersion.team_config.guardrails JSON."""
+    raw = (team_config or {}).get("guardrails") if team_config else None
+    if not isinstance(raw, dict):
+        return []
+    hooks: list[Any] = []
+    try:
+        if raw.get("prompt_injection"):
+            from agno.guardrails import PromptInjectionGuardrail
+
+            hooks.append(PromptInjectionGuardrail())
+        if raw.get("pii_detection"):
+            from agno.guardrails import PIIDetectionGuardrail
+
+            hooks.append(PIIDetectionGuardrail())
+        if raw.get("openai_moderation"):
+            from agno.guardrails import OpenAIModerationGuardrail
+
+            hooks.append(OpenAIModerationGuardrail())
+    except ImportError:
+        return hooks
+    return hooks
+
+
+def normalize_guardrails(value: dict[str, Any] | None) -> dict[str, bool]:
+    value = value or {}
+    return {
+        "prompt_injection": bool(value.get("prompt_injection")),
+        "pii_detection": bool(value.get("pii_detection")),
+        "openai_moderation": bool(value.get("openai_moderation")),
+    }
+
+
 def _extract_factory_input(ctx: Any) -> dict[str, Any]:
     trusted = getattr(ctx, "trusted", None)
     claims = getattr(trusted, "claims", None) or getattr(ctx, "claims", None) or {}
@@ -141,10 +199,25 @@ class AgentFactoryService:
         self.tool_definitions = ToolDefinitionRepository(session, context)
         self.tool_versions = ToolDefinitionVersionRepository(session, context)
         self.sessions = SessionRepository(session, context)
-        self.knowledge = TenantKnowledgeStore(session, context)
+        self.knowledge = build_tenant_knowledge_store(session, context)
         self.context = context
+        self.session = session
+        self._user_vault: dict[str, str] | None = None
         settings = get_settings()
         self.rest_client = SafeRestClient(allowed_hosts or settings.allowed_outbound_hosts)
+
+    async def _user_vault_map(self) -> dict[str, str]:
+        if self._user_vault is None:
+            from app.vault import aload_user_vault_map
+
+            self._user_vault = await aload_user_vault_map(self.session, self.context)
+        return self._user_vault
+
+    async def _attach_session_state(self, component: Any) -> None:
+        from app.vault import session_state_for_user
+
+        vault = await self._user_vault_map()
+        component._saas_session_state = session_state_for_user(self.context, vault)
 
     async def create(self, request: RuntimeRequest) -> Any:
         allow_draft = request.preview and self.context.can_administer()
@@ -163,6 +236,10 @@ class AgentFactoryService:
                 runtime_user_id=runtime_user_id(self.context),
             )
 
+        adapter = str((version.team_config or {}).get("framework_adapter") or "agno")
+        if adapter != "agno":
+            return await self._create_framework_adapter(version, request, adapter)
+
         bindings = await self.repo.bindings(version.id)
         tools: list[Any] = []
         for binding in bindings:
@@ -177,6 +254,7 @@ class AgentFactoryService:
             kb_id = uuid.UUID(raw) if raw else None
 
         knowledge_retriever = await self._knowledge_retriever(kb_id) if kb_id else None
+        pre_hooks = _guardrails_from_team_config(version.team_config)
 
         values = {
             "id": str(version.agent_config_id),
@@ -195,17 +273,21 @@ class AgentFactoryService:
             "update_memory_on_run": memory.persistent,
             "cache_session": True,
             "store_events": True,
+            "stream_events": True,
             "knowledge_retriever": knowledge_retriever,
             "add_knowledge_to_context": knowledge_retriever is not None,
             "search_knowledge": False,
             "metadata": self._metadata(version, request),
             "debug_mode": False,
+            "pre_hooks": pre_hooks or None,
         }
         agent = Agent(**_supported_kwargs(Agent, values))
         if hasattr(agent, "initialize_agent"):
             agent.initialize_agent()
         agent._saas_metadata = values["metadata"]
         agent._saas_memory_mode = version.memory_mode
+        agent._saas_guardrails = (version.team_config or {}).get("guardrails") or {}
+        await self._attach_session_state(agent)
         return agent
 
     async def _knowledge_retriever(self, knowledge_base_id: uuid.UUID) -> Any:
@@ -220,6 +302,7 @@ class AgentFactoryService:
         embedder = EmbeddingService(
             api_key=api_key,
             model=settings.embedding_model,
+            dimensions=settings.embedding_dimensions,
         )
         context = self.context
 
@@ -240,7 +323,9 @@ class AgentFactoryService:
                         {"tenant_id": str(context.tenant_id)},
                     )
                 session.info["tenant_id"] = context.tenant_id
-                return await TenantKnowledgeStore(session, context).search(
+                return await build_tenant_knowledge_store(
+                    session, context, settings=settings
+                ).search(
                     knowledge_base_id,
                     query,
                     vector,
@@ -250,6 +335,87 @@ class AgentFactoryService:
                 )
 
         return retrieve
+
+    async def _create_framework_adapter(
+        self,
+        version: AgentVersion,
+        request: RuntimeRequest,
+        adapter: str,
+    ) -> Any:
+        """Build a non-Agno runtime via Agno's adapter classes, or fail with ValueError."""
+        adapter_cfg = dict((version.team_config or {}).get("adapter_config") or {})
+        common = {
+            "id": str(version.agent_config_id),
+            "name": f"tenant-{self.context.tenant_id}-agent-{version.agent_config_id}",
+            "description": version.instructions[:240],
+            "db": get_agno_db(),
+            "markdown": True,
+        }
+        try:
+            if adapter == "claude_agent_sdk":
+                from agno.agents.claude.agent import ClaudeAgent
+
+                model_name = ALLOWED_MODELS.get(version.model_id)
+                agent = ClaudeAgent(
+                    **_supported_kwargs(
+                        ClaudeAgent,
+                        {
+                            **common,
+                            "system_prompt": version.instructions,
+                            "model": model_name,
+                            **adapter_cfg,
+                        },
+                    )
+                )
+            elif adapter == "antigravity":
+                from agno.agents.antigravity.agent import AntigravityAgent
+
+                agent = AntigravityAgent(
+                    **_supported_kwargs(
+                        AntigravityAgent,
+                        {
+                            **common,
+                            "custom_agent_instructions": version.instructions,
+                            "custom_agent_name": common["name"],
+                            **adapter_cfg,
+                        },
+                    )
+                )
+            elif adapter == "langgraph":
+                from agno.agents.langgraph.agent import LangGraphAgent
+
+                if adapter_cfg.get("graph") is None:
+                    raise ValueError(
+                        "langgraph adapter requires adapter_config.graph "
+                        "(a compiled LangGraph); native Agno runtime is preferred"
+                    )
+                agent = LangGraphAgent(
+                    **_supported_kwargs(LangGraphAgent, {**common, **adapter_cfg})
+                )
+            elif adapter == "dspy":
+                from agno.agents.dspy.agent import DSPyAgent
+
+                if adapter_cfg.get("program") is None:
+                    raise ValueError(
+                        "dspy adapter requires adapter_config.program; "
+                        "native Agno runtime is preferred"
+                    )
+                agent = DSPyAgent(
+                    **_supported_kwargs(DSPyAgent, {**common, **adapter_cfg})
+                )
+            else:
+                raise ValueError(f"Unknown framework_adapter: {adapter}")
+        except ImportError as exc:
+            raise ValueError(
+                f"framework_adapter '{adapter}' is unavailable "
+                f"(missing dependency: {exc})"
+            ) from exc
+
+        agent._saas_metadata = self._metadata(version, request)
+        agent._saas_metadata["framework_adapter"] = adapter
+        agent._saas_memory_mode = version.memory_mode
+        await self._attach_session_state(agent)
+        return agent
 
     async def _build_model(self, version: AgentVersion) -> Any:
         model_name = ALLOWED_MODELS.get(version.model_id)
@@ -262,6 +428,9 @@ class AgentFactoryService:
             "openai": (OpenAIChat, settings.openai_api_key),
             "anthropic": (Claude, settings.anthropic_api_key),
             "groq": (Groq, settings.groq_api_key),
+            "moonshot": (MoonShot, settings.moonshot_api_key),
+            "nvidia": (Nvidia, settings.nvidia_api_key),
+            "gemini": (Gemini, settings.gemini_api_key),
         }
         if provider not in providers:
             raise ValueError(f"Model provider is not supported: {provider}")
@@ -273,6 +442,9 @@ class AgentFactoryService:
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "groq": "GROQ_API_KEY",
+            "moonshot": "MOONSHOT_API_KEY",
+            "nvidia": "NVIDIA_API_KEY",
+            "gemini": "GOOGLE_API_KEY",
         }
         api_key = platform_secret.get_secret_value() or os.getenv(env_keys[provider])
 
@@ -365,6 +537,10 @@ class AgentFactoryService:
                     approval_required=definition.approval_required,
                     credential_provider=credential_provider,
                     credential_value=credential_value,
+                    tenant_id=str(self.context.tenant_id),
+                    user_vault=await self._user_vault_map()
+                    if provider_key == "tenant_python"
+                    else None,
                 ),
             )
             return built[0] if len(built) == 1 else built
@@ -392,12 +568,18 @@ class AgentFactoryService:
     def _decrypt(ciphertext: str, key_version: str) -> str:
         settings = get_settings()
         envelope = EncryptedEnvelope(ciphertext, key_version)
-        if key_version.startswith("kms-"):
-            cipher = AwsKmsCipher(settings.aws_kms_key_id or "", settings.aws_region, key_version)
+        if key_version.startswith("kms-") or settings.aws_kms_key_id:
+            cipher = AwsKmsCipher(
+                settings.aws_kms_key_id or "",
+                settings.aws_region,
+                key_version if key_version.startswith("kms-") else "kms-v1",
+            )
         else:
+            # Current + previous keys; envelope.key_version selects which Fernet.
             cipher = LocalFernetCipher(
                 settings.encryption_key.get_secret_value(),
-                key_version,
+                settings.encryption_key_version,
+                previous_keys=settings.encryption_previous_keys,
             )
         return cipher.decrypt(envelope)
 
@@ -476,12 +658,14 @@ class TeamFactoryService:
             "add_history_to_context": True,
             "cache_session": True,
             "store_events": True,
+            "stream_events": True,
             "debug_mode": False,
         }
         team = Team(**_supported_kwargs(Team, values))
         if hasattr(team, "initialize_team"):
             team.initialize_team()
         team._saas_metadata = metadata
+        await self.agent_factory._attach_session_state(team)
         return team
 
 
@@ -506,11 +690,14 @@ class WorkflowFactoryService:
         if not step_rows:
             raise ValueError("Workflow has no steps")
 
+        try:
+            from agno.workflow.condition import Condition
+        except ImportError:  # pragma: no cover
+            Condition = None  # type: ignore[misc, assignment]
+
         built_steps: list[Any] = []
         team_factory = TeamFactoryService(self.agent_factory)
         for row in step_rows:
-            if row.condition_expression:
-                raise ValueError("CEL conditions are unavailable in this deployment")
             if row.target_type == "agent":
                 executor = await self.agent_factory.create(
                     RuntimeRequest(
@@ -520,13 +707,11 @@ class WorkflowFactoryService:
                         pin_session=False,
                     )
                 )
-                built_steps.append(
-                    Step(
-                        name=row.name,
-                        step_id=str(row.id),
-                        agent=executor,
-                        description=f"Tenant agent step {row.position + 1}",
-                    )
+                step = Step(
+                    name=row.name,
+                    step_id=str(row.id),
+                    agent=executor,
+                    description=f"Tenant agent step {row.position + 1}",
                 )
             else:
                 executor = await team_factory.create(
@@ -537,14 +722,25 @@ class WorkflowFactoryService:
                         pin_session=False,
                     )
                 )
+                step = Step(
+                    name=row.name,
+                    step_id=str(row.id),
+                    team=executor,
+                    description=f"Tenant team step {row.position + 1}",
+                )
+            if row.condition_expression:
+                if Condition is None:  # pragma: no cover
+                    raise RuntimeError("Agno Condition runtime is unavailable")
                 built_steps.append(
-                    Step(
+                    Condition(
+                        steps=[step],
+                        evaluator=row.condition_expression,
                         name=row.name,
-                        step_id=str(row.id),
-                        team=executor,
-                        description=f"Tenant team step {row.position + 1}",
+                        description=f"Condition for step {row.position + 1}",
                     )
                 )
+            else:
+                built_steps.append(step)
 
         await self.agent_factory.sessions.pin_workflow(
             external_session_id=request.session_id,
@@ -584,6 +780,7 @@ class WorkflowFactoryService:
         )
         workflow.initialize_workflow()
         workflow._saas_metadata = metadata
+        await self.agent_factory._attach_session_state(workflow)
         return workflow
 
 

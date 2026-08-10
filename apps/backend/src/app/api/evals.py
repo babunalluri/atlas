@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
 from app.db.models import EvalCaseResult, EvalDefinition, EvalRun, Role
-from app.db.repositories import AgentRepository, TeamRepository, WorkflowRepository
+from app.db.repositories import TeamRepository, WorkflowRepository
 from app.db.session import tenant_session
 from app.evals.service import EvalRepository, EvalService
 from app.tenancy.context import TenantContext
@@ -23,8 +23,16 @@ class EvalCaseIn(BaseModel):
     key: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=255)
     input: str = Field(min_length=1, max_length=100_000)
-    expected_output: str = Field(min_length=1, max_length=100_000)
-    evaluator: Literal["exact", "contains", "regex"] = "contains"
+    expected_output: str = Field(default="", max_length=100_000)
+    evaluator: Literal[
+        "exact",
+        "contains",
+        "regex",
+        "accuracy",
+        "agent_as_judge",
+        "performance",
+        "reliability",
+    ] = "contains"
 
 
 class EvalDefinitionCreateIn(BaseModel):
@@ -32,7 +40,7 @@ class EvalDefinitionCreateIn(BaseModel):
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
     description: str | None = Field(default=None, max_length=4000)
     suite: str = Field(default="smoke", min_length=1, max_length=32)
-    target_type: Literal["agent", "team", "workflow"]
+    target_type: Literal["team", "workflow"]
     target_id: uuid.UUID
     version_id: uuid.UUID
     cases: list[EvalCaseIn] = Field(min_length=1, max_length=100)
@@ -143,9 +151,9 @@ async def list_evals(context: AdminContext, session: TenantSession) -> list[dict
 async def list_eval_targets(
     context: AdminContext, session: TenantSession
 ) -> list[dict[str, Any]]:
+    """Teams and workflows only — agents are evaluated via the team/workflow they belong to."""
     output: list[dict[str, Any]] = []
     repositories: list[tuple[str, Any]] = [
-        ("agent", AgentRepository(session, context)),
         ("team", TeamRepository(session, context)),
         ("workflow", WorkflowRepository(session, context)),
     ]

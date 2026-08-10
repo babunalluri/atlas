@@ -13,6 +13,8 @@ export function Badge({
   tone = "neutral",
   dot = false,
   live = false,
+  /** When false, keep the label casing as provided (default status badges stay uppercase). */
+  uppercase = true,
   className,
 }: {
   children: React.ReactNode;
@@ -21,12 +23,14 @@ export function Badge({
   dot?: boolean;
   /** Render a pulsing live indicator dot (implies dot). */
   live?: boolean;
+  uppercase?: boolean;
   className?: string;
 }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.06em]",
+        "inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-semibold",
+        uppercase ? "uppercase tracking-[0.06em]" : "tracking-normal",
         tones[tone],
         className,
       )}

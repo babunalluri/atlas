@@ -1,8 +1,16 @@
 import Link from "next/link";
 
-export function BrandMark({ compact = false }: { compact?: boolean }) {
+export function BrandMark({
+  compact = false,
+  href = "/",
+  subtitle = "Multi-tenant control",
+}: {
+  compact?: boolean;
+  href?: string;
+  subtitle?: string;
+}) {
   return (
-    <Link href="/admin/agents" className="group inline-flex items-center gap-3">
+    <Link href={href} className="group inline-flex items-center gap-3">
       <span className="relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-md bg-ink text-teal-bright">
         <span className="absolute inset-0 opacity-40 grid-noise" />
         <span className="font-display text-lg font-bold tracking-tight">A</span>
@@ -13,7 +21,7 @@ export function BrandMark({ compact = false }: { compact?: boolean }) {
             Atlas Agents
           </span>
           <span className="block text-[11px] uppercase tracking-[0.14em] text-slate-muted">
-            Multi-tenant control
+            {subtitle}
           </span>
         </span>
       ) : null}

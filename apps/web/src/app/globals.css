@@ -131,6 +131,8 @@
 @layer utilities {
   .font-display {
     font-family: var(--font-display);
+    /* Syne paints outside a tight em-box; keep titles from clipping under truncate. */
+    line-height: 1.25;
   }
 
   /* Themed canvas for a subtree (e.g. the admin shell owns its own theme). */
@@ -142,23 +144,20 @@
   /* Frosted glass panel over the ambient gradient. */
   .surface-panel {
     border: 1px solid color-mix(in oklab, var(--tone-line) 80%, transparent);
-    background: color-mix(in oklab, var(--tone-raised) 76%, transparent);
-    backdrop-filter: blur(10px) saturate(1.15);
+    background: color-mix(in oklab, var(--tone-raised) 88%, transparent);
     box-shadow: var(--shadow-panel);
   }
 
-  /* Frosted sticky bars (admin top bar, pane headers). */
+  /* Sticky bars (admin top bar, pane headers). Avoid heavy blur — it stalls input. */
   .glass-bar {
-    background: color-mix(in oklab, var(--tone-canvas) 76%, transparent);
-    backdrop-filter: blur(14px) saturate(1.35);
+    background: color-mix(in oklab, var(--tone-canvas) 92%, transparent);
   }
 
   /* Dense data table / list container. */
   .table-shell {
     overflow: hidden;
     border: 1px solid color-mix(in oklab, var(--tone-line) 85%, transparent);
-    background: color-mix(in oklab, var(--tone-raised) 62%, transparent);
-    backdrop-filter: blur(8px);
+    background: color-mix(in oklab, var(--tone-raised) 92%, transparent);
   }
 
   /* Uppercase micro-label used for table headers and section eyebrows. */
@@ -187,8 +186,7 @@
     overflow: hidden;
     border-radius: 0.75rem;
     border: 1px solid color-mix(in oklab, var(--tone-line) 85%, transparent);
-    background: color-mix(in oklab, var(--tone-raised) 74%, transparent);
-    backdrop-filter: blur(8px);
+    background: color-mix(in oklab, var(--tone-raised) 92%, transparent);
     box-shadow: var(--shadow-panel);
   }
 
@@ -200,6 +198,34 @@
     right: 0;
     height: 2px;
     background: var(--kpi-edge, var(--tone-accent));
+  }
+
+  /* Soft placeholder bars for admin route loading states. */
+  .skeleton-bone {
+    background: color-mix(in oklab, var(--tone-line) 55%, var(--tone-raised));
+    animation: atlas-skeleton-pulse 1.4s ease-in-out infinite;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+
+  @keyframes atlas-skeleton-pulse {
+    0%,
+    100% {
+      opacity: 0.55;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 
   /* Pulsing live indicator dot; tint with text color utilities. */
@@ -230,5 +256,32 @@
       linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
       linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
     background-size: 28px 28px;
+  }
+
+  @keyframes portal-rise {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .portal-rise {
+    animation: portal-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .portal-rise-delay-1 {
+    animation-delay: 0.06s;
+  }
+
+  .portal-rise-delay-2 {
+    animation-delay: 0.12s;
+  }
+
+  .portal-rise-delay-3 {
+    animation-delay: 0.18s;
   }
 }

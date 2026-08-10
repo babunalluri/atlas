@@ -1,6 +1,8 @@
+import asyncio
+import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import CredentialCreateIn, CredentialOut
@@ -18,7 +20,11 @@ router = APIRouter(prefix="/admin/credentials", tags=["admin-credentials"])
 def _cipher(settings: Settings) -> CredentialCipher:
     if settings.aws_kms_key_id:
         return AwsKmsCipher(settings.aws_kms_key_id, settings.aws_region)
-    return LocalFernetCipher(settings.encryption_key.get_secret_value())
+    return LocalFernetCipher(
+        settings.encryption_key.get_secret_value(),
+        settings.encryption_key_version,
+        previous_keys=settings.encryption_previous_keys,
+    )
 
 
 def _out(row: TenantCredential) -> CredentialOut:
@@ -51,7 +57,11 @@ async def create_credential(
     session: Annotated[AsyncSession, Depends(tenant_session)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CredentialOut:
-    envelope = _cipher(settings).encrypt(body.value)
+    cipher = _cipher(settings)
+    if isinstance(cipher, AwsKmsCipher):
+        envelope = await cipher.aencrypt(body.value)
+    else:
+        envelope = await asyncio.to_thread(cipher.encrypt, body.value)
     row = await CredentialRepository(session, context).create(
         name=body.name,
         provider=body.provider,
@@ -59,3 +69,19 @@ async def create_credential(
         key_version=envelope.key_version,
     )
     return _out(row)
+
+
+@router.delete("/{credential_id}", status_code=204)
+async def delete_credential(
+    credential_id: uuid.UUID,
+    context: Annotated[
+        TenantContext, Depends(require_roles(Role.platform_admin, Role.tenant_admin))
+    ],
+    session: Annotated[AsyncSession, Depends(tenant_session)],
+) -> None:
+    try:
+        deleted = await CredentialRepository(session, context).delete(credential_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Credential not found")

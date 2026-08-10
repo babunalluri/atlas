@@ -88,6 +88,7 @@ class Membership(Base, TenantScoped, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     email: Mapped[str | None] = mapped_column(String(320))
+    phone: Mapped[str | None] = mapped_column(String(40))
     role: Mapped[Role] = mapped_column(Enum(Role), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     __table_args__ = (Index("uq_membership_tenant_user", "tenant_id", "user_id", unique=True),)
@@ -138,6 +139,30 @@ class TeamConfig(Base, TenantScoped, TimestampMixin):
     __table_args__ = (
         Index("uq_team_tenant_slug", "tenant_id", "slug", unique=True),
         UniqueConstraint("tenant_id", "id", name="uq_team_config_tenant_id"),
+    )
+
+
+class TeamAssignment(Base, TenantScoped, TimestampMixin):
+    """Grants one tenant user access to a published team."""
+
+    __tablename__ = "team_assignments"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    team_config_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "team_config_id"],
+            ["team_configs.tenant_id", "team_configs.id"],
+            ondelete="CASCADE",
+            name="fk_team_assignment_tenant_config",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "team_config_id",
+            "user_id",
+            name="uq_team_assignment_tenant_team_user",
+        ),
     )
 
 
@@ -552,6 +577,80 @@ class TenantCredential(Base, TenantScoped, TimestampMixin):
     __table_args__ = (UniqueConstraint("tenant_id", "id", name="uq_tenant_credential_tenant_id"),)
 
 
+class UserVaultEntry(Base, TenantScoped, TimestampMixin):
+    """Per-authenticated-user secrets and variables for tool injection."""
+
+    __tablename__ = "user_vault_entries"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    encrypted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    key_version: Mapped[str] = mapped_column(String(32), default="local-v1", nullable=False)
+    __table_args__ = (
+        CheckConstraint("kind IN ('secret', 'variable')", name="ck_user_vault_kind"),
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "name",
+            name="uq_user_vault_tenant_user_name",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_user_vault_tenant_id"),
+        Index("ix_user_vault_entries_user", "tenant_id", "user_id"),
+    )
+
+
+class UserNotification(Base, TenantScoped, TimestampMixin):
+    """In-app notification delivered to one org membership user."""
+
+    __tablename__ = "user_notifications"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    batch_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    audience: Mapped[str] = mapped_column(String(16), nullable=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint("audience IN ('user', 'all')", name="ck_user_notifications_audience"),
+        UniqueConstraint("tenant_id", "id", name="uq_user_notifications_tenant_id"),
+        Index("ix_user_notifications_user", "tenant_id", "user_id", "created_at"),
+        Index("ix_user_notifications_batch", "tenant_id", "batch_id"),
+    )
+
+
+class ChannelBinding(Base, TenantScoped, TimestampMixin):
+    """Maps an external messaging channel to a published team or workflow."""
+
+    __tablename__ = "channel_bindings"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_config_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    external_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('slack', 'telegram', 'whatsapp')",
+            name="ck_channel_bindings_provider",
+        ),
+        CheckConstraint(
+            "target_type IN ('team', 'workflow')",
+            name="ck_channel_bindings_target_type",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "credential_id"],
+            ["tenant_credentials.tenant_id", "tenant_credentials.id"],
+            ondelete="RESTRICT",
+            name="fk_channel_binding_tenant_credential",
+        ),
+        Index("ix_channel_bindings_provider", "tenant_id", "provider"),
+        UniqueConstraint("tenant_id", "id", name="uq_channel_binding_tenant_id"),
+    )
+
+
 class ServiceAccount(Base, TenantScoped, TimestampMixin):
     __tablename__ = "service_accounts"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -581,6 +680,7 @@ class ConversationSession(Base, TenantScoped, TimestampMixin):
     workflow_config_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    verified_end_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     title: Mapped[str | None] = mapped_column(String(255))
     runtime_session_id: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     runtime_user_id: Mapped[str] = mapped_column(String(512), default="", nullable=False)
@@ -610,6 +710,12 @@ class ConversationSession(Base, TenantScoped, TimestampMixin):
             ondelete="RESTRICT",
             name="fk_conversation_workflow_version",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "verified_end_user_id"],
+            ["end_users.tenant_id", "end_users.id"],
+            ondelete="SET NULL",
+            name="fk_conversation_verified_end_user",
+        ),
         Index(
             "uq_conversation_session_tenant_external",
             "tenant_id",
@@ -628,6 +734,69 @@ class ConversationSession(Base, TenantScoped, TimestampMixin):
             "AND agent_version_id IS NULL "
             "AND team_config_id IS NULL AND team_version_id IS NULL)",
             name="ck_conversation_session_target",
+        ),
+    )
+
+
+class EndUser(Base, TenantScoped, TimestampMixin):
+    """Verified customer / portal user for a tenant (not Clerk staff)."""
+
+    __tablename__ = "end_users"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    user_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "email", name="uq_end_user_tenant_email"),
+        UniqueConstraint("tenant_id", "id", name="uq_end_user_tenant_id"),
+        Index("ix_end_users_tenant_email", "tenant_id", "email"),
+    )
+
+
+class VerificationChallenge(Base, TenantScoped, TimestampMixin):
+    __tablename__ = "verification_challenges"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), default="bind_session", nullable=False)
+    external_session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    guest_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_verification_challenge_tenant_id"),
+        Index(
+            "ix_verification_challenges_lookup",
+            "tenant_id",
+            "external_session_id",
+            "email",
+        ),
+    )
+
+
+class EndUserSessionBind(Base, TenantScoped, TimestampMixin):
+    """Binds a public chat session to a verified end user (before or after pin)."""
+
+    __tablename__ = "end_user_session_binds"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    external_session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    guest_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    end_user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "external_session_id", name="uq_end_user_session_bind_session"
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_end_user_session_bind_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "end_user_id"],
+            ["end_users.tenant_id", "end_users.id"],
+            ondelete="CASCADE",
+            name="fk_end_user_session_bind_user",
         ),
     )
 
@@ -895,12 +1064,16 @@ class MetricDailyAggregate(Base, TenantScoped, TimestampMixin):
     unique_sessions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     top_tools: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     __table_args__ = (
+        # NULLS NOT DISTINCT so Postgres treats NULL target_id (tenant-wide
+        # "all" rows) as unique; SQLite ignores the dialect flag and still
+        # create_all's cleanly for the test harness.
         UniqueConstraint(
             "tenant_id",
             "metric_date",
             "target_type",
             "target_id",
             name="uq_metric_daily_dimension",
+            postgresql_nulls_not_distinct=True,
         ),
         Index("ix_metric_daily_tenant_date", "tenant_id", "metric_date"),
     )

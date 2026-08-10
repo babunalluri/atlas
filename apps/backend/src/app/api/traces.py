@@ -4,6 +4,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.actor_labels import label_for, resolve_actor_labels
 from app.auth.dependencies import require_tenant
 from app.db.models import TraceRecord, TraceSpan
 from app.db.session import tenant_session
@@ -27,7 +28,7 @@ async def require_trace_reader(
 TraceContext = Annotated[TenantContext, Depends(require_trace_reader)]
 
 
-def _summary(trace: TraceRecord, span_count: int) -> dict[str, Any]:
+def _summary(trace: TraceRecord, span_count: int, *, user_label: str | None = None) -> dict[str, Any]:
     return {
         "id": trace.id,
         "run_id": trace.run_id,
@@ -36,6 +37,7 @@ def _summary(trace: TraceRecord, span_count: int) -> dict[str, Any]:
         "target_id": trace.target_id,
         "version_id": trace.version_id,
         "user_id": trace.user_id,
+        "user_label": user_label,
         "name": trace.name,
         "status": trace.status,
         "started_at": trace.started_at,
@@ -79,7 +81,17 @@ async def list_traces(
         external_session_id=session_id,
         limit=limit,
     )
-    return [_summary(trace, len(await repo.spans(trace.id))) for trace in traces]
+    labels = await resolve_actor_labels(
+        session, context, [trace.user_id for trace in traces]
+    )
+    return [
+        _summary(
+            trace,
+            len(await repo.spans(trace.id)),
+            user_label=label_for(labels, trace.user_id),
+        )
+        for trace in traces
+    ]
 
 
 @router.get("/{trace_id}")
@@ -93,8 +105,13 @@ async def get_trace(
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
     spans = await repo.spans(trace.id)
+    labels = await resolve_actor_labels(session, context, [trace.user_id])
     return {
-        **_summary(trace, len(spans)),
+        **_summary(
+            trace,
+            len(spans),
+            user_label=label_for(labels, trace.user_id),
+        ),
         "input": trace.input,
         "output": trace.output,
         "metadata": trace.metadata_,

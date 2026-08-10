@@ -16,11 +16,9 @@ from app.tenancy.context import TenantContext
 
 @pytest.fixture(autouse=True)
 def _clear_rate_limiter():
-    limiter._events.clear()
-    limiter._inflight.clear()
+    limiter.clear()
     yield
-    limiter._events.clear()
-    limiter._inflight.clear()
+    limiter.clear()
 
 
 @pytest.fixture
@@ -112,7 +110,7 @@ async def _published_agent(factory, tenant: TenantContext, slug: str):
 
 
 @pytest.mark.asyncio
-async def test_public_surface_requires_published_agent(public_db):
+async def test_public_agent_surface_is_disabled(public_db):
     factory = public_db["factory"]
     tenant_a = public_db["tenant_a"]
     await _draft_agent(factory, tenant_a, "draft-bot")
@@ -120,39 +118,20 @@ async def test_public_surface_requires_published_agent(public_db):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        missing = await client.get("/public/t/acme/agents/draft-bot")
-        assert missing.status_code == 404
-
-        live = await client.get("/public/t/acme/agents/live-bot")
-        assert live.status_code == 200
-        body = live.json()
-        assert body["agent"]["slug"] == "live-bot"
-        assert body["tenant"]["slug"] == "acme"
-        assert "instructions" not in body["agent"]
-        assert "model_id" not in body["agent"]
+        for slug in ("draft-bot", "live-bot"):
+            response = await client.get(f"/public/t/acme/agents/{slug}")
+            assert response.status_code == 404
+            assert "team or workflow" in response.text
 
 
 @pytest.mark.asyncio
-async def test_public_surface_is_tenant_isolated(public_db):
-    factory = public_db["factory"]
-    await _published_agent(factory, public_db["tenant_a"], "acme-only")
-    await _published_agent(factory, public_db["tenant_b"], "globex-only")
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        assert (await client.get("/public/t/acme/agents/acme-only")).status_code == 200
-        assert (await client.get("/public/t/acme/agents/globex-only")).status_code == 404
-        assert (await client.get("/public/t/globex/agents/globex-only")).status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_public_agent_run_rejects_draft(public_db):
-    await _draft_agent(public_db["factory"], public_db["tenant_a"], "still-draft")
+async def test_public_agent_run_is_disabled(public_db):
+    await _published_agent(public_db["factory"], public_db["tenant_a"], "live-bot")
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
-            "/public/t/acme/agents/still-draft/runs",
+            "/public/t/acme/agents/live-bot/runs",
             data={
                 "message": "hello",
                 "session_id": str(uuid.uuid4()),
@@ -161,25 +140,7 @@ async def test_public_agent_run_rejects_draft(public_db):
             headers={"X-Guest-Id": "guest_test_12345678"},
         )
         assert response.status_code == 404
-        assert "Published agent not found" in response.text
-
-
-@pytest.mark.asyncio
-async def test_public_agent_run_rejects_cross_tenant_slug(public_db):
-    await _published_agent(public_db["factory"], public_db["tenant_b"], "secret-bot")
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/public/t/acme/agents/secret-bot/runs",
-            data={
-                "message": "hello",
-                "session_id": str(uuid.uuid4()),
-                "stream": "true",
-            },
-            headers={"X-Guest-Id": "guest_test_abcdefgh"},
-        )
-        assert response.status_code == 404
+        assert "team or workflow" in response.text
 
 
 @pytest.mark.asyncio
@@ -242,3 +203,79 @@ async def test_public_team_and_workflow_surfaces_published_only(public_db):
         assert body["workflow"]["teams"][0]["slug"] == "front-line"
 
         assert (await client.get("/public/t/acme/teams/unreleased")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_public_cancel_requires_existing_session(public_db):
+    factory = public_db["factory"]
+    tenant_a = public_db["tenant_a"]
+    agent = await _published_agent(factory, tenant_a, "cancel-member")
+
+    async with factory() as session:
+        session.info["tenant_id"] = tenant_a.tenant_id
+        teams = TeamRepository(session, tenant_a)
+        team = await teams.create_config(slug="cancel-team", name="Cancel Team")
+        draft = await teams.create_draft(
+            config_id=team.id,
+            instructions="Coordinate",
+            mode="coordinate",
+            model_id="openai:gpt-4.1-mini",
+            temperature=0.2,
+            member_config_ids=[agent.id],
+        )
+        await teams.publish(draft.id)
+        await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/public/t/acme/teams/cancel-team/runs/{uuid.uuid4()}/cancel",
+            data={"session_id": str(uuid.uuid4())},
+            headers={"X-Guest-Id": "guestuser123456"},
+        )
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_public_resume_requires_existing_session(public_db):
+    factory = public_db["factory"]
+    tenant_a = public_db["tenant_a"]
+    agent = await _published_agent(factory, tenant_a, "resume-member")
+
+    async with factory() as session:
+        session.info["tenant_id"] = tenant_a.tenant_id
+        teams = TeamRepository(session, tenant_a)
+        team = await teams.create_config(slug="resume-team", name="Resume Team")
+        team_draft = await teams.create_draft(
+            config_id=team.id,
+            instructions="Coordinate",
+            mode="coordinate",
+            model_id="openai:gpt-4.1-mini",
+            temperature=0.2,
+            member_config_ids=[agent.id],
+        )
+        await teams.publish(team_draft.id)
+        workflows = WorkflowRepository(session, tenant_a)
+        workflow = await workflows.create_config(slug="resume-wf", name="Resume WF")
+        wf_draft = await workflows.create_draft(
+            config_id=workflow.id,
+            mode="sequential",
+            steps=[
+                {
+                    "name": "Front",
+                    "target_type": "team",
+                    "target_config_id": team.id,
+                }
+            ],
+        )
+        await workflows.publish(wf_draft.id)
+        await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/public/t/acme/workflows/resume-wf/runs/{uuid.uuid4()}/resume",
+            data={"session_id": str(uuid.uuid4())},
+            headers={"X-Guest-Id": "guestuser123456"},
+        )
+        assert response.status_code == 404

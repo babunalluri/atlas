@@ -3,7 +3,6 @@ import type {
   AgentSummary,
   ApprovalRequest,
   KnowledgeSource,
-  PublicAgentSurface,
 } from "@/lib/api/types";
 
 export const MOCK_AGENTS: AgentSummary[] = [
@@ -65,6 +64,12 @@ export const MOCK_AGENT_DETAIL: AgentConfig = {
     },
   ],
   knowledgeBaseId: "kb_main",
+  frameworkAdapter: "agno",
+  guardrails: {
+    promptInjection: true,
+    piiDetection: false,
+    openaiModeration: false,
+  },
   knowledgeBase: {
     id: "kb_main",
     name: "Product docs",
@@ -144,21 +149,3 @@ export const MOCK_APPROVALS: ApprovalRequest[] = [
 
 export const MOCK_INGESTION: KnowledgeSource[] =
   MOCK_AGENT_DETAIL.knowledgeBase?.sources ?? [];
-
-export const MOCK_PUBLIC_SURFACE: PublicAgentSurface = {
-  tenant: {
-    name: "Northwind Retail",
-    slug: "northwind",
-    primaryColor: "#0b3d2e",
-    accentColor: "#e2b14b",
-    tagline: "Answers grounded in your catalog and policies",
-  },
-  agent: {
-    id: "agt_support",
-    name: "Support Concierge",
-    slug: "support-concierge",
-    description: "Product guidance with human-approved actions.",
-    welcomeMessage:
-      "Hi — I can help with orders, shipping, and returns using Northwind’s current docs.",
-  },
-};

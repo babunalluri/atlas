@@ -2,20 +2,22 @@ from datetime import UTC
 
 import pytest
 
-from app.db.repositories import AgentRepository
+from app.db.repositories import TeamRepository
 from app.scheduler.service import ScheduleRepository, SchedulerService, next_run_at
 
 
-async def _published_agent(session, context, suffix: str):
-    agents = AgentRepository(session, context)
-    config = await agents.create_config(slug=f"scheduled-{suffix}", name=f"Scheduled {suffix}")
-    version = await agents.create_draft(
+async def _published_team(session, context, suffix: str, member_ids: list):
+    teams = TeamRepository(session, context)
+    config = await teams.create_config(slug=f"scheduled-{suffix}", name=f"Scheduled {suffix}")
+    version = await teams.create_draft(
         config_id=config.id,
         instructions="Return a short answer.",
+        mode="coordinate",
         model_id="openai:gpt-4.1-mini",
         temperature=0,
+        member_config_ids=member_ids,
     )
-    await agents.publish(version.id)
+    await teams.publish(version.id)
     return config, version
 
 
@@ -32,8 +34,20 @@ def test_cron_and_timezone_validation():
 async def test_schedule_isolation_enable_disable_and_execution_recording(
     session, tenant_a, tenant_b
 ):
+    from app.db.repositories import AgentRepository
+
     session.info["tenant_id"] = tenant_a.tenant_id
-    config, version = await _published_agent(session, tenant_a, "a")
+    agents = AgentRepository(session, tenant_a)
+    member = await agents.create_config(slug="sched-member", name="Sched Member")
+    member_version = await agents.create_draft(
+        config_id=member.id,
+        instructions="Help",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0,
+    )
+    await agents.publish(member_version.id)
+
+    config, version = await _published_team(session, tenant_a, "a", [member.id])
     repo = ScheduleRepository(session, tenant_a)
     schedule = await repo.create(
         {
@@ -41,7 +55,7 @@ async def test_schedule_isolation_enable_disable_and_execution_recording(
             "cron_expression": "0 9 * * 1-5",
             "timezone": "UTC",
             "enabled": True,
-            "target_type": "agent",
+            "target_type": "team",
             "target_id": config.id,
             "version_id": version.id,
             "message": "Summarize open support requests.",
@@ -77,3 +91,34 @@ async def test_schedule_isolation_enable_disable_and_execution_recording(
     assert await other_repo.get(schedule.id) is None
     with pytest.raises(LookupError, match="Schedule not found"):
         await SchedulerService(session, tenant_b, runner=mocked_runner).run(schedule.id)
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_agent_target(session, tenant_a):
+    from app.db.repositories import AgentRepository
+
+    session.info["tenant_id"] = tenant_a.tenant_id
+    agents = AgentRepository(session, tenant_a)
+    config = await agents.create_config(slug="direct-agent", name="Direct Agent")
+    version = await agents.create_draft(
+        config_id=config.id,
+        instructions="Help",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0,
+    )
+    await agents.publish(version.id)
+    repo = ScheduleRepository(session, tenant_a)
+    with pytest.raises(ValueError, match="team or workflow"):
+        await repo.create(
+            {
+                "name": "Bad agent schedule",
+                "cron_expression": "0 9 * * 1-5",
+                "timezone": "UTC",
+                "enabled": True,
+                "target_type": "agent",
+                "target_id": config.id,
+                "version_id": version.id,
+                "message": "Should fail",
+                "input_payload": {},
+            }
+        )

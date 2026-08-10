@@ -33,14 +33,32 @@ export type ModelId =
   | "claude-haiku"
   | "llama-3.3-70b"
   | "llama-3.1-8b"
-  | "gpt-oss-120b";
+  | "gpt-oss-120b"
+  | "kimi-k2.5"
+  | "kimi-k2"
+  | "kimi-latest"
+  | "nvidia-llama-3.3-70b"
+  | "nvidia-llama-3.1-8b"
+  | "nvidia-nemotron-70b"
+  | "gemini-2.5-flash"
+  | "gemini-2.5-pro"
+  | "gemini-2.0-flash";
 
-export type ModelProvider = "openai" | "anthropic" | "groq";
+export type ModelProvider =
+  | "openai"
+  | "anthropic"
+  | "groq"
+  | "moonshot"
+  | "nvidia"
+  | "gemini";
 
 export const MODEL_PROVIDER_LABELS: Record<ModelProvider, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   groq: "Groq",
+  moonshot: "Kimi",
+  nvidia: "NVIDIA",
+  gemini: "Gemini",
 };
 
 export type ToolKind = "web_search" | "rest_read" | "rest_mutate";
@@ -194,6 +212,19 @@ export interface CatalogPage<T> {
   pageSize: number;
 }
 
+export interface AgentGuardrails {
+  promptInjection: boolean;
+  piiDetection: boolean;
+  openaiModeration: boolean;
+}
+
+export type FrameworkAdapter =
+  | "agno"
+  | "langgraph"
+  | "dspy"
+  | "claude_agent_sdk"
+  | "antigravity";
+
 export interface AgentConfig {
   id: string;
   name: string;
@@ -207,6 +238,8 @@ export interface AgentConfig {
   tools: ToolBinding[];
   knowledgeBaseId: string | null;
   knowledgeBase?: KnowledgeBaseSummary | null;
+  frameworkAdapter: FrameworkAdapter;
+  guardrails: AgentGuardrails;
   draftVersion: number;
   publishedVersion: number | null;
   updatedAt: string;
@@ -222,6 +255,8 @@ export interface AgentDraftInput {
   memoryMode: MemoryMode;
   tools: ToolBinding[];
   knowledgeBaseId: string | null;
+  frameworkAdapter: FrameworkAdapter;
+  guardrails: AgentGuardrails;
 }
 
 export interface TeamMember {
@@ -368,6 +403,8 @@ export interface ConversationSession {
 
 export interface AdminSession extends ConversationSession {
   userId: string;
+  /** Human-readable actor (membership display name, Guest, API, …). */
+  userLabel?: string | null;
   targetId: string;
   createdAt: string;
 }
@@ -378,6 +415,7 @@ export interface ActivityRow {
   id: string;
   title: string;
   userId: string;
+  userLabel: string;
   personaName: string;
   personaType: "agent" | "team" | "workflow";
   taskName: string;
@@ -394,6 +432,7 @@ export interface UserMemory {
   id: string;
   userId: string;
   memory: string;
+  topics?: string[];
   updatedAt?: string | null;
 }
 
@@ -409,17 +448,6 @@ export interface ChatMessage {
     status: "running" | "done" | "error" | "awaiting_approval";
   }>;
   pendingApproval?: boolean;
-}
-
-export interface PublicAgentSurface {
-  tenant: TenantBranding;
-  agent: {
-    id: string;
-    name: string;
-    slug: string;
-    description: string;
-    welcomeMessage: string;
-  };
 }
 
 export interface PublicTeamSurface {
@@ -459,6 +487,13 @@ export interface AvailableWorkflow {
   description: string;
 }
 
+export interface AvailableTeam {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+}
+
 export interface WorkflowAssignments {
   workflowId: string;
   userIds: string[];
@@ -469,20 +504,69 @@ export interface TenantUser {
   userId: string;
   displayName: string;
   email: string | null;
+  phone: string | null;
   role: "tenant_admin" | "end_user";
   isActive: boolean;
+  invitePending?: boolean;
+  temporaryPassword?: string | null;
+  signInUrl?: string | null;
   workflowIds: string[];
+  teamIds: string[];
   createdAt: string;
   updatedAt: string;
 }
 
 export interface TenantUserInput {
-  userId: string;
+  userId?: string;
   displayName: string;
-  email?: string | null;
+  email: string;
+  phone?: string;
   role: "tenant_admin" | "end_user";
   isActive: boolean;
   workflowIds: string[];
+  teamIds: string[];
+}
+
+export type NotificationAudience = "user" | "all";
+
+export interface UserNotification {
+  id: string;
+  batchId: string;
+  title: string;
+  body: string;
+  audience: NotificationAudience;
+  createdBy: string;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface NotificationBatch {
+  batchId: string;
+  title: string;
+  body: string;
+  audience: NotificationAudience;
+  createdBy: string;
+  recipientCount: number;
+  createdAt: string;
+}
+
+export interface NotificationSendResult {
+  batchId: string;
+  audience: NotificationAudience;
+  recipientCount: number;
+  title: string;
+}
+
+/** Verified public customer (OTP / inbound email), not Clerk staff. */
+export interface EndCustomer {
+  id: string;
+  email: string;
+  displayName: string;
+  emailVerifiedAt: string | null;
+  isActive: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export const ALLOWED_MODELS: Array<{
@@ -497,6 +581,27 @@ export const ALLOWED_MODELS: Array<{
   { id: "llama-3.3-70b", label: "Groq Llama 3.3 70B", provider: "groq" },
   { id: "llama-3.1-8b", label: "Groq Llama 3.1 8B", provider: "groq" },
   { id: "gpt-oss-120b", label: "Groq GPT-OSS 120B", provider: "groq" },
+  { id: "kimi-k2.5", label: "Kimi K2.5", provider: "moonshot" },
+  { id: "kimi-k2", label: "Kimi K2", provider: "moonshot" },
+  { id: "kimi-latest", label: "Kimi Latest", provider: "moonshot" },
+  {
+    id: "nvidia-llama-3.3-70b",
+    label: "NVIDIA Llama 3.3 70B",
+    provider: "nvidia",
+  },
+  {
+    id: "nvidia-llama-3.1-8b",
+    label: "NVIDIA Llama 3.1 8B",
+    provider: "nvidia",
+  },
+  {
+    id: "nvidia-nemotron-70b",
+    label: "NVIDIA Nemotron 70B",
+    provider: "nvidia",
+  },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", provider: "gemini" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", provider: "gemini" },
+  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", provider: "gemini" },
 ];
 
 export function providerForModel(modelId: ModelId | string): ModelProvider {
@@ -504,6 +609,9 @@ export function providerForModel(modelId: ModelId | string): ModelProvider {
   if (known) return known.provider;
   if (typeof modelId === "string") {
     if (modelId.startsWith("claude-")) return "anthropic";
+    if (modelId.startsWith("kimi-")) return "moonshot";
+    if (modelId.startsWith("nvidia-")) return "nvidia";
+    if (modelId.startsWith("gemini-")) return "gemini";
     if (modelId.startsWith("llama-") || modelId === "gpt-oss-120b") {
       return "groq";
     }
@@ -524,7 +632,10 @@ export function modelProvidersWithCredentials(
     if (
       credential.provider === "openai" ||
       credential.provider === "anthropic" ||
-      credential.provider === "groq"
+      credential.provider === "groq" ||
+      credential.provider === "moonshot" ||
+      credential.provider === "nvidia" ||
+      credential.provider === "gemini"
     ) {
       providers.add(credential.provider);
     }

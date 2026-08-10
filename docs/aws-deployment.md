@@ -13,7 +13,12 @@ Recommended first production shape:
 | Quotas | API Gateway / WAF + Redis (ElastiCache) |
 | Sandboxed Python | ECS RunTask (Fargate) + deny-all SG |
 
-Keep `AUTH_DISABLED=false` in every non-local environment. Rotate `CREDENTIAL_ENCRYPTION_KEY` / KMS CMK on a schedule and rehearse restore from RDS snapshots.
+Keep `AUTH_DISABLED=false` in every non-local environment. Set
+`ENVIRONMENT=production` (or `staging`) so production guards apply — default
+`development` is for local compose only. Admin API rate limits run whenever
+`RATE_LIMITS_ENABLED=true` (the default), independent of `ENVIRONMENT`. Rotate
+`CREDENTIAL_ENCRYPTION_KEY` / KMS CMK on a schedule and rehearse restore from RDS
+snapshots.
 
 ## Sandboxed Python tools
 

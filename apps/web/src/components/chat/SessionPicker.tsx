@@ -17,37 +17,39 @@ export function SessionPicker({
   onDelete: (id: string) => void;
 }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-white/60">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-between px-1">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-muted">
           Sessions
         </p>
         <button
           type="button"
           onClick={onCreate}
-          className="text-xs font-medium text-[var(--tenant-accent)] hover:underline"
+          className="rounded-md px-1.5 py-0.5 text-xs font-medium text-[var(--tenant-accent)] transition hover:bg-fog/60"
         >
-          New
+          + New
         </button>
       </div>
-      <ul className="space-y-1">
+      <ul className="mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto pr-0.5">
         {sessions.map((session) => (
           <li key={session.id}>
             <div
               className={cn(
-                "group flex items-center rounded-lg text-sm transition",
+                "group flex items-center rounded-xl text-sm transition",
                 activeId === session.id
-                  ? "bg-white/15 text-white"
-                  : "text-white/70 hover:bg-white/8 hover:text-white",
+                  ? "bg-fog text-ink ring-1 ring-line"
+                  : "text-slate-muted hover:bg-fog/70 hover:text-ink",
               )}
             >
               <button
                 type="button"
                 onClick={() => onSelect(session.id)}
-                className="min-w-0 flex-1 px-2.5 py-2 text-left"
+                className="min-w-0 flex-1 px-3 py-2.5 text-left"
               >
-                <span className="block truncate font-medium">{session.title}</span>
-                <span className="block text-[11px] text-white/45">
+                <span className="block truncate font-medium">
+                  {session.title}
+                </span>
+                <span className="mt-0.5 block text-[10px] uppercase tracking-[0.1em] text-slate-muted">
                   {session.status}
                 </span>
               </button>
@@ -55,7 +57,7 @@ export function SessionPicker({
                 type="button"
                 aria-label={`Delete ${session.title}`}
                 onClick={() => onDelete(session.id)}
-                className="mr-2 hidden text-xs text-white/45 hover:text-white group-hover:block"
+                className="mr-2 hidden size-6 items-center justify-center rounded-md text-slate-muted hover:bg-raised hover:text-ink group-hover:inline-flex"
               >
                 ×
               </button>

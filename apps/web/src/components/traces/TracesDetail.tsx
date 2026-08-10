@@ -26,7 +26,19 @@ import { cn } from "@/lib/utils";
 
 function shortUser(userId: string) {
   if (userId.startsWith("sa:")) return `API ${userId.slice(3, 11)}`;
+  if (userId.startsWith("guest:")) {
+    const rest = userId.slice("guest:".length);
+    if (rest.startsWith("ip:")) return "Guest (anonymous)";
+    return `Guest · ${rest.slice(0, 8)}`;
+  }
+  if (userId.startsWith("user_") && userId.length > 16) {
+    return `User · ${userId.slice(5, 13)}…`;
+  }
   return userId;
+}
+
+function displayUser(activity: ActivityRow) {
+  return activity.userLabel || shortUser(activity.userId);
 }
 
 function MessageTurn({
@@ -189,9 +201,22 @@ export function TracesDetail({
         <p className="mt-2 font-mono text-xs text-slate-muted">{activity.id}</p>
       </header>
 
+      {activity.status === "paused" ? (
+        <div className="rounded-xl border border-amber/40 bg-amber/10 px-4 py-3 text-sm text-ink">
+          This run is waiting on a tool approval. Resolve it in{" "}
+          <Link
+            href="/admin/approvals"
+            className="font-medium text-teal hover:underline"
+          >
+            Approvals
+          </Link>
+          .
+        </div>
+      ) : null}
+
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         {[
-          ["User", shortUser(activity.userId)],
+          ["User", displayUser(activity)],
           [
             "Target",
             `${activity.personaName} · ${activityTargetTypeLabel(activity.personaType)}`,

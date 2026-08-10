@@ -6,24 +6,24 @@ import {
   SignInButton,
   SignUpButton,
   UserButton,
+  useAuth,
 } from "@clerk/nextjs";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { BrandMark } from "@/components/layout/BrandMark";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 import {
-  PLATFORM_TENANT_COOKIE,
+  clearPlatformTenantSelection,
   PLATFORM_TENANT_NAME_COOKIE,
   tokenIsPlatformAdmin,
 } from "@/lib/auth/access-context";
-import { getOnboardingStatus } from "@/lib/api/admin";
-import { getAccessToken } from "@/lib/auth/token";
+import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
+import { useAgentOsToken } from "@/lib/auth/token";
 import {
-  readStoredTheme,
-  THEME_STORAGE_KEY,
   ThemeToggle,
-  type AdminTheme,
+  useSurfaceTheme,
 } from "@/components/layout/ThemeToggle";
 import { cn } from "@/lib/utils";
 
@@ -83,17 +83,6 @@ const icons = {
       <path d="M9 7h6" />
     </>,
   ),
-  sessions: icon(
-    <path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5Z" />,
-  ),
-  activities: icon(
-    <>
-      <path d="M4 6h16" />
-      <path d="M4 12h10" />
-      <path d="M4 18h14" />
-      <circle cx="18" cy="12" r="2" />
-    </>,
-  ),
   approvals: icon(
     <>
       <circle cx="12" cy="12" r="9" />
@@ -122,6 +111,21 @@ const icons = {
       <rect x="5" y="3" width="14" height="18" rx="2" />
       <path d="m9 12 2 2 4-4" />
       <path d="M9 7h6" />
+    </>,
+  ),
+  memories: icon(
+    <>
+      <path d="M4 7a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7Z" />
+      <path d="M8 11h8" />
+      <path d="M8 15h5" />
+    </>,
+  ),
+  learnings: icon(
+    <>
+      <path d="M5 4h9l5 5v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
+      <path d="M14 4v5h5" />
+      <path d="M8 13h8" />
+      <path d="M8 17h6" />
     </>,
   ),
   credentials: icon(
@@ -179,6 +183,12 @@ const icons = {
       <path d="M15 15.8c1.7.3 3.1 1.3 4.2 3.2" />
     </>,
   ),
+  notifications: icon(
+    <>
+      <path d="M6 9a6 6 0 0 1 12 0c0 7 3 7 3 7H3s3 0 3-7" />
+      <path d="M10 19a2 2 0 0 0 4 0" />
+    </>,
+  ),
 };
 
 const navGroups: Array<{
@@ -209,8 +219,14 @@ const navGroups: Array<{
       {
         href: "/admin/tools",
         label: "Tools",
-        hint: "API, Python, and MCP tools",
+        hint: "API, Python, MCP, and toolkits",
         icon: icons.tools,
+      },
+      {
+        href: "/admin/integrations",
+        label: "Toolkit catalog",
+        hint: "Enable built-in toolkits as tools",
+        icon: icons.integrations,
       },
     ],
   },
@@ -218,16 +234,16 @@ const navGroups: Array<{
     label: "Monitor",
     items: [
       {
-        href: "/admin/approvals",
-        label: "Approvals",
-        hint: "Actions waiting on you",
-        icon: icons.approvals,
-      },
-      {
         href: "/admin/traces",
         label: "Traces",
         hint: "Chat logs, runs, and errors",
         icon: icons.traces,
+      },
+      {
+        href: "/admin/approvals",
+        label: "Approvals",
+        hint: "Paused tool actions waiting on you",
+        icon: icons.approvals,
       },
       {
         href: "/admin/schedules",
@@ -259,22 +275,34 @@ const navGroups: Array<{
         icon: icons.knowledge,
       },
       {
+        href: "/admin/memories",
+        label: "Memories",
+        hint: "Persistent user memory rows",
+        icon: icons.memories,
+      },
+      {
+        href: "/admin/learnings",
+        label: "Learnings",
+        hint: "Learning store records",
+        icon: icons.learnings,
+      },
+      {
         href: "/admin/users",
         label: "Users",
         hint: "People and workflow access",
         icon: icons.users,
       },
       {
+        href: "/admin/notifications",
+        label: "Notifications",
+        hint: "Message one user or everyone",
+        icon: icons.notifications,
+      },
+      {
         href: "/admin/credentials",
         label: "Credentials",
         hint: "API keys kept server-side",
         icon: icons.credentials,
-      },
-      {
-        href: "/admin/integrations",
-        label: "Integrations",
-        hint: "Python toolkit settings",
-        icon: icons.integrations,
       },
       {
         href: "/admin/public-api",
@@ -326,6 +354,13 @@ function NavLinks({
   onNavigate?: () => void;
 }) {
   const groups = isPlatformAdmin ? [platformGroup, ...navGroups] : navGroups;
+  // Ignore repeat clicks while a navigation is still in flight (slow RSC).
+  const pendingHref = useRef<string | null>(null);
+
+  useEffect(() => {
+    pendingHref.current = null;
+  }, [pathname]);
+
   return (
     <nav className="flex flex-col gap-6">
       {groups.map((group) => (
@@ -340,7 +375,23 @@ function NavLinks({
                 <Link
                   key={item.href}
                   href={item.href}
-                  onClick={onNavigate}
+                  // Default prefetch floods ~15 RSC payloads on every shell paint.
+                  prefetch={false}
+                  onClick={(event) => {
+                    if (
+                      pendingHref.current !== null &&
+                      pendingHref.current !== item.href
+                    ) {
+                      event.preventDefault();
+                      return;
+                    }
+                    if (pendingHref.current === item.href) {
+                      event.preventDefault();
+                      return;
+                    }
+                    pendingHref.current = item.href;
+                    onNavigate?.();
+                  }}
                   title={item.hint}
                   className={cn(
                     "flex items-center gap-2.5 rounded-md border-l-2 px-3 py-1.5 text-sm font-medium transition",
@@ -366,19 +417,22 @@ function NavLinks({
 export function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [theme, setTheme] = useState<AdminTheme>("light");
+  const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
+  const { orgId } = useAuth();
+  const { theme, changeTheme } = useSurfaceTheme("admin");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [selectedTenantName, setSelectedTenantName] = useState<string | null>(
     null,
   );
+  const [workspaceHref, setWorkspaceHref] = useState<string | null>(null);
   const onOnboardingRoute = pathname.startsWith("/admin/onboarding");
+  const mobileNavId = useId();
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const lastOrgIdRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
-    setTheme(readStoredTheme());
-    void getAccessToken().then((token) => {
-      if (token) setIsPlatformAdmin(tokenIsPlatformAdmin(token));
-    });
     const nameCookie = document.cookie
       .split(";")
       .map((part) => part.trim())
@@ -390,16 +444,67 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Switching Clerk orgs must drop Platform → Open workspace override so
+  // requests use the home tenant for the active org (avoids stale 403s).
   useEffect(() => {
-    if (onOnboardingRoute) return;
+    if (lastOrgIdRef.current === undefined) {
+      lastOrgIdRef.current = orgId;
+      return;
+    }
+    if (lastOrgIdRef.current !== orgId) {
+      lastOrgIdRef.current = orgId;
+      clearPlatformTenantSelection();
+      setSelectedTenantName(null);
+    }
+  }, [orgId]);
+
+  // Re-check after Clerk is ready. Depend only on auth readiness — not on
+  // getAccessToken identity — to avoid effect thrash / click lag.
+  useEffect(() => {
+    if (!isLoaded) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        if (!isSignedIn) {
+          if (!cancelled) setIsPlatformAdmin(false);
+          return;
+        }
+        const token = await getAccessToken();
+        if (!cancelled) {
+          setIsPlatformAdmin(token ? tokenIsPlatformAdmin(token) : false);
+        }
+      } catch {
+        if (!cancelled) setIsPlatformAdmin(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- getAccessToken is stable via ref
+  }, [isLoaded, isSignedIn]);
+
+  useEffect(() => {
+    if (onOnboardingRoute || !isLoaded || !isSignedIn) return;
     let cancelled = false;
     void (async () => {
       try {
         const token = await getAccessToken();
         if (!token || cancelled) return;
         const status = await getOnboardingStatus(token);
-        if (!cancelled && !status.provisioned) {
+        if (cancelled) return;
+        if (!status.provisioned) {
           router.replace("/admin/onboarding");
+          return;
+        }
+        // End users do not build the control plane — only run assigned workflows.
+        const workspace = await getWorkspaceInfo(token);
+        if (cancelled) return;
+        const slug = workspace.slug || status.tenant_slug;
+        if (slug) {
+          setWorkspaceHref(`/t/${slug}/chat`);
+        }
+        if (workspace.can_administer === false) {
+          router.replace(`/t/${workspace.slug}/chat`);
         }
       } catch {
         // Ignore — individual pages still surface API errors.
@@ -408,24 +513,61 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [onOnboardingRoute, pathname, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once per auth readiness
+  }, [isLoaded, isSignedIn, onOnboardingRoute, router]);
 
   useEffect(() => {
     setMobileNavOpen(false);
   }, [pathname]);
 
-  function changeTheme(next: AdminTheme) {
-    setTheme(next);
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, next);
-    } catch {
-      // storage unavailable (private mode) — theme stays in-memory
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const focusables = () =>
+      Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+
+    const items = focusables();
+    (items[0] ?? drawer).focus();
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMobileNavOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const nodes = focusables();
+      if (nodes.length === 0) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
-  }
+
+    document.addEventListener("keydown", onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      (previouslyFocused ?? menuButtonRef.current)?.focus?.();
+    };
+  }, [mobileNavOpen]);
 
   function leaveTenantWorkspace() {
-    document.cookie = `${PLATFORM_TENANT_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
-    document.cookie = `${PLATFORM_TENANT_NAME_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
+    clearPlatformTenantSelection();
+    setSelectedTenantName(null);
     window.location.assign("/admin/platform/tenants");
   }
 
@@ -436,33 +578,45 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div
       data-theme={theme === "dark" ? "dark" : undefined}
-      className="app-canvas min-h-screen text-ink"
+      className="app-canvas flex h-dvh flex-col overflow-hidden text-ink"
     >
-      <header className="glass-bar sticky top-0 z-30 border-b border-line/70">
+      <header className="glass-bar z-30 shrink-0 border-b border-line/70">
         <div className="flex items-center justify-between gap-6 px-5 py-3">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <button
+              ref={menuButtonRef}
               type="button"
               aria-label="Toggle navigation"
+              aria-expanded={mobileNavOpen}
+              aria-controls={mobileNavId}
               onClick={() => setMobileNavOpen((open) => !open)}
-              className="rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:text-ink lg:hidden"
+              className="shrink-0 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:text-ink lg:hidden"
             >
               Menu
             </button>
-            <BrandMark />
+            <BrandMark href="/admin/agents" />
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3">
+            {workspaceHref && !onOnboardingRoute ? (
+              <Link
+                href={workspaceHref}
+                className="rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:border-teal/40 hover:text-ink"
+              >
+                Workspace
+              </Link>
+            ) : null}
             {isPlatformAdmin && selectedTenantName ? (
               <button
                 type="button"
                 onClick={leaveTenantWorkspace}
                 title="Return to platform administration"
-                className="hidden rounded-md border border-teal/30 bg-teal/10 px-2.5 py-1.5 text-xs font-medium text-teal hover:bg-teal/15 sm:block"
+                className="hidden max-w-[14rem] truncate rounded-md border border-teal/30 bg-teal/10 px-2.5 py-1.5 text-xs font-medium text-teal hover:bg-teal/15 sm:block"
               >
                 Tenant: {selectedTenantName} · Exit
               </button>
             ) : null}
             <ThemeToggle theme={theme} onChange={changeTheme} />
+            <NotificationBell />
             {clerkReady ? (
               <>
                 <SignedOut>
@@ -492,14 +646,22 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </header>
-      <div className="mx-auto flex w-full max-w-[1600px]">
+      <div className="relative mx-auto flex min-h-0 w-full max-w-[1600px] flex-1">
         {mobileNavOpen ? (
-          <div className="fixed inset-0 z-20 lg:hidden">
+          <div className="absolute inset-0 z-20 lg:hidden">
             <div
               className="absolute inset-0 bg-ink/30"
               onClick={() => setMobileNavOpen(false)}
             />
-            <aside className="glass-bar absolute inset-y-0 left-0 w-64 overflow-y-auto border-r border-line/70 px-3 pb-8 pt-20">
+            <aside
+              ref={drawerRef}
+              id={mobileNavId}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Navigation"
+              tabIndex={-1}
+              className="glass-bar absolute inset-y-0 left-0 w-64 overflow-y-auto border-r border-line/70 px-3 py-6 outline-none"
+            >
               <NavLinks
                 pathname={pathname}
                 isPlatformAdmin={isPlatformAdmin}
@@ -508,13 +670,15 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             </aside>
           </div>
         ) : null}
-        <aside className="sticky top-[57px] hidden h-[calc(100vh-57px)] w-60 shrink-0 overflow-y-auto border-r border-line/70 px-3 py-6 lg:block">
+        <aside className="hidden h-full w-60 shrink-0 overflow-y-auto border-r border-line/70 px-3 py-6 lg:block">
           <NavLinks
             pathname={pathname}
             isPlatformAdmin={isPlatformAdmin}
           />
         </aside>
-        <main className="min-w-0 flex-1 px-5 py-8">{children}</main>
+        <main className="min-w-0 flex-1 overflow-y-auto px-5 py-8">
+          {children}
+        </main>
       </div>
     </div>
   );

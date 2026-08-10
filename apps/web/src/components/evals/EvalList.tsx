@@ -10,11 +10,34 @@ import { Input, Label, Select } from "@/components/ui/Field";
 import {
   createEval,
   type EvalDefinition,
+  type EvalEvaluator,
   type EvalTarget,
 } from "@/lib/api/admin";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { formatRelative } from "@/lib/utils";
 import { slugifyName } from "@/lib/validation/agent-form";
+
+const EVALUATORS: Array<{ value: EvalEvaluator; label: string; hint: string }> = [
+  { value: "contains", label: "Contains", hint: "Expected text appears in the answer" },
+  { value: "exact", label: "Exact", hint: "Answer matches expected text exactly" },
+  { value: "regex", label: "Regex", hint: "Expected is a regular expression" },
+  { value: "accuracy", label: "Accuracy", hint: "LLM grader for expected answers" },
+  {
+    value: "agent_as_judge",
+    label: "Agent as judge",
+    hint: "Judge run quality using criteria",
+  },
+  {
+    value: "performance",
+    label: "Performance",
+    hint: "Latency check; expected = max seconds",
+  },
+  {
+    value: "reliability",
+    label: "Reliability",
+    hint: "Tool-use check; expected = tool names",
+  },
+];
 
 export function EvalList({
   evals,
@@ -29,13 +52,24 @@ export function EvalList({
   const [targetIndex, setTargetIndex] = useState(0);
   const [prompt, setPrompt] = useState("");
   const [expected, setExpected] = useState("");
+  const [evaluator, setEvaluator] = useState<EvalEvaluator>("contains");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const evaluatorMeta = EVALUATORS.find((item) => item.value === evaluator);
+
   async function create() {
     const target = targets[targetIndex];
-    if (!target || !name.trim() || !prompt.trim() || !expected.trim()) {
-      setError("Name, target, prompt, and expected answer are required.");
+    if (!target || !name.trim() || !prompt.trim()) {
+      setError("Name, target, and prompt are required.");
+      return;
+    }
+    if (
+      evaluator !== "performance" &&
+      evaluator !== "reliability" &&
+      !expected.trim()
+    ) {
+      setError("Expected answer or criteria is required for this evaluator.");
       return;
     }
     setBusy(true);
@@ -52,8 +86,8 @@ export function EvalList({
             key: "smoke-1",
             name: "Smoke answer",
             input: prompt.trim(),
-            expected_output: expected.trim(),
-            evaluator: "contains",
+            expected_output: expected.trim() || (evaluator === "performance" ? "30" : ""),
+            evaluator,
           },
         ],
       });
@@ -75,12 +109,13 @@ export function EvalList({
               Atlas quality
             </p>
             <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
-              Evals that ship with the agent.
+              Evals that ship with the product.
             </h1>
             <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-muted">
-              Run tenant-isolated correctness suites against pinned agent, team,
-              and workflow versions. Latency and token usage are captured when
-              the runtime provides them.
+              Run tenant-isolated correctness suites against pinned team and
+              workflow versions. Agents are covered through the teams/workflows
+              they belong to. Latency and token usage are captured when the
+              runtime provides them.
             </p>
           </div>
           <div className="grid gap-3 rounded-xl border border-line bg-raised/90 p-4">
@@ -107,6 +142,25 @@ export function EvalList({
                 ))}
               </Select>
             </div>
+            <div>
+              <Label htmlFor="eval-evaluator">Evaluator</Label>
+              <Select
+                id="eval-evaluator"
+                value={evaluator}
+                onChange={(event) =>
+                  setEvaluator(event.target.value as EvalEvaluator)
+                }
+              >
+                {EVALUATORS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </Select>
+              <p className="mt-1 text-xs text-slate-muted">
+                {evaluatorMeta?.hint}
+              </p>
+            </div>
             <div className="grid gap-3 md:grid-cols-2">
               <Input
                 aria-label="Eval prompt"
@@ -115,9 +169,17 @@ export function EvalList({
                 onChange={(event) => setPrompt(event.target.value)}
               />
               <Input
-                aria-label="Expected answer"
+                aria-label="Expected answer or criteria"
                 value={expected}
-                placeholder="Expected answer"
+                placeholder={
+                  evaluator === "performance"
+                    ? "Max seconds (e.g. 5)"
+                    : evaluator === "reliability"
+                      ? "tool_a, tool_b"
+                      : evaluator === "agent_as_judge"
+                        ? "Judging criteria"
+                        : "Expected answer"
+                }
                 onChange={(event) => setExpected(event.target.value)}
               />
             </div>

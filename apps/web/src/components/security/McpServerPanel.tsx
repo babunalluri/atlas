@@ -102,7 +102,7 @@ export function McpServerPanel({
             <li><code>mcp:sessions:read</code> — read accessible session metadata.</li>
           </ul>
           <p className="mt-4 text-xs text-slate-muted">
-            Tenant administrators can use the server with their Clerk token.
+            Tenant administrators can use the server with their signed-in token.
             Other users need equivalent JWT scopes. Service accounts must carry
             each required scope explicitly.
           </p>

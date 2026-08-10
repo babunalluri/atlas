@@ -7,10 +7,13 @@ import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
-import { Input, Label } from "@/components/ui/Field";
+import { Input, Label, Select } from "@/components/ui/Field";
 import { SaveIcon } from "@/components/ui/icons";
 import {
   deleteKnowledgeSource,
+  ingestKnowledgeGithub,
+  ingestKnowledgeS3,
+  ingestKnowledgeUrl,
   reindexKnowledgeSource,
   testKnowledgeSearch,
   updateKnowledgeBase,
@@ -42,6 +45,14 @@ export function KnowledgeEditor({
   const [name, setName] = useState(knowledgeBase.name);
   const [items, setItems] = useState(initialSources);
   const [file, setFile] = useState<File | null>(null);
+  const [connector, setConnector] = useState<"upload" | "url" | "s3" | "github">(
+    "upload",
+  );
+  const [urlValue, setUrlValue] = useState("");
+  const [s3Uri, setS3Uri] = useState("");
+  const [githubRepo, setGithubRepo] = useState("");
+  const [githubPath, setGithubPath] = useState("");
+  const [githubRef, setGithubRef] = useState("main");
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,6 +105,36 @@ export function KnowledgeEditor({
       setFile(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function ingest() {
+    setUploading(true);
+    setError(null);
+    try {
+      const token = await getAccessToken();
+      let source;
+      if (connector === "url") {
+        source = await ingestKnowledgeUrl(token, knowledgeBase.id, urlValue.trim());
+        setUrlValue("");
+      } else if (connector === "s3") {
+        source = await ingestKnowledgeS3(token, knowledgeBase.id, s3Uri.trim());
+        setS3Uri("");
+      } else if (connector === "github") {
+        source = await ingestKnowledgeGithub(token, knowledgeBase.id, {
+          repo: githubRepo.trim(),
+          path: githubPath.trim(),
+          ref: githubRef.trim() || "main",
+        });
+        setGithubPath("");
+      } else {
+        return;
+      }
+      setItems((current) => [source, ...current]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Ingest failed");
     } finally {
       setUploading(false);
     }
@@ -156,7 +197,7 @@ export function KnowledgeEditor({
           </p>
           <div className="flex min-w-0 items-center gap-1.5">
             <BackLink href="/admin/knowledge" label="Back to knowledge" />
-            <h1 className="truncate font-display text-2xl font-semibold tracking-tight">
+            <h1 className="min-w-0 truncate py-0.5 font-display text-2xl font-semibold leading-snug tracking-tight">
               {name || "Untitled knowledge"}
             </h1>
           </div>
@@ -206,29 +247,130 @@ export function KnowledgeEditor({
 
       <section className="rounded-xl border border-line bg-raised/40 p-3">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Upload</h2>
+          <h2 className="text-sm font-semibold">Add source</h2>
           <p className="text-xs text-slate-muted">
-            Text, Markdown, JSON, PDF
+            Upload or connect URL / S3 / GitHub
           </p>
         </div>
-        <div className="flex flex-wrap items-end gap-2">
-          <div className="min-w-[220px] flex-1">
-            <Label htmlFor="knowledge-file">Document</Label>
-            <Input
-              id="knowledge-file"
-              type="file"
-              accept=".txt,.md,.json,.pdf"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-            />
-          </div>
-          <Button
-            variant="accent"
-            disabled={!file || uploading}
-            onClick={() => void upload()}
+        <div className="mb-3 max-w-xs">
+          <Label htmlFor="knowledge-connector">Connector</Label>
+          <Select
+            id="knowledge-connector"
+            value={connector}
+            onChange={(event) =>
+              setConnector(
+                event.target.value as "upload" | "url" | "s3" | "github",
+              )
+            }
           >
-            {uploading ? "Uploading…" : "Upload"}
-          </Button>
+            <option value="upload">File upload</option>
+            <option value="url">URL</option>
+            <option value="s3">Document store URI</option>
+            <option value="github">GitHub file</option>
+          </Select>
         </div>
+        {connector === "upload" ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[220px] flex-1">
+              <Label htmlFor="knowledge-file">Document</Label>
+              <Input
+                id="knowledge-file"
+                type="file"
+                accept=".txt,.md,.json,.pdf"
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              />
+            </div>
+            <Button
+              variant="accent"
+              disabled={!file || uploading}
+              onClick={() => void upload()}
+            >
+              {uploading ? "Uploading…" : "Upload"}
+            </Button>
+          </div>
+        ) : null}
+        {connector === "url" ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[220px] flex-1">
+              <Label htmlFor="knowledge-url">Page URL</Label>
+              <Input
+                id="knowledge-url"
+                value={urlValue}
+                onChange={(event) => setUrlValue(event.target.value)}
+                placeholder="https://example.com/docs"
+              />
+            </div>
+            <Button
+              variant="accent"
+              disabled={!urlValue.trim() || uploading}
+              onClick={() => void ingest()}
+            >
+              {uploading ? "Ingesting…" : "Ingest URL"}
+            </Button>
+          </div>
+        ) : null}
+        {connector === "s3" ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[220px] flex-1">
+              <Label htmlFor="knowledge-s3">Existing store URI</Label>
+              <Input
+                id="knowledge-s3"
+                value={s3Uri}
+                onChange={(event) => setS3Uri(event.target.value)}
+                placeholder="s3://bucket/tenant/file.md or file:///…"
+              />
+            </div>
+            <Button
+              variant="accent"
+              disabled={!s3Uri.trim() || uploading}
+              onClick={() => void ingest()}
+            >
+              {uploading ? "Ingesting…" : "Ingest URI"}
+            </Button>
+          </div>
+        ) : null}
+        {connector === "github" ? (
+          <div className="space-y-2">
+            <div className="grid gap-2 md:grid-cols-3">
+              <div>
+                <Label htmlFor="knowledge-gh-repo">Repo (owner/name)</Label>
+                <Input
+                  id="knowledge-gh-repo"
+                  value={githubRepo}
+                  onChange={(event) => setGithubRepo(event.target.value)}
+                  placeholder="acme/docs"
+                />
+              </div>
+              <div>
+                <Label htmlFor="knowledge-gh-path">File path</Label>
+                <Input
+                  id="knowledge-gh-path"
+                  value={githubPath}
+                  onChange={(event) => setGithubPath(event.target.value)}
+                  placeholder="README.md"
+                />
+              </div>
+              <div>
+                <Label htmlFor="knowledge-gh-ref">Ref</Label>
+                <Input
+                  id="knowledge-gh-ref"
+                  value={githubRef}
+                  onChange={(event) => setGithubRef(event.target.value)}
+                  placeholder="main"
+                />
+              </div>
+            </div>
+            <Button
+              variant="accent"
+              disabled={
+                !githubRepo.trim() || !githubPath.trim() || uploading
+              }
+              onClick={() => void ingest()}
+            >
+              {uploading ? "Ingesting…" : "Ingest GitHub"}
+            </Button>
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-xl border border-line bg-raised/40 p-3">

@@ -27,10 +27,22 @@ class ClerkClaims(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+_jwks_clients: dict[str, PyJWKClient] = {}
+
+
+def _jwks_client(jwks_url: str) -> PyJWKClient:
+    client = _jwks_clients.get(jwks_url)
+    if client is None:
+        # Reuse across requests — constructing a new client per decode re-fetches JWKS.
+        client = PyJWKClient(jwks_url, cache_keys=True, lifespan=60 * 60)
+        _jwks_clients[jwks_url] = client
+    return client
+
+
 def _decode(token: str, settings: Settings) -> dict[str, Any]:
     if not settings.effective_jwks_url:
         raise jwt.InvalidTokenError("JWKS URL is not configured")
-    key = PyJWKClient(settings.effective_jwks_url).get_signing_key_from_jwt(token).key
+    key = _jwks_client(settings.effective_jwks_url).get_signing_key_from_jwt(token).key
     options = {"require": ["exp", "iat", "sub"]}
     kwargs: dict[str, Any] = {
         "algorithms": ["RS256"],
@@ -40,6 +52,14 @@ def _decode(token: str, settings: Settings) -> dict[str, Any]:
     if settings.clerk_audience:
         kwargs["audience"] = settings.clerk_audience
     return jwt.decode(token, key, **kwargs)
+
+
+def _email_from_payload(payload: dict[str, Any]) -> str | None:
+    for key in ("email", "email_address", "primary_email_address"):
+        value = payload.get(key)
+        if isinstance(value, str) and "@" in value:
+            return value.strip().lower()
+    return None
 
 
 def _role(claims: ClerkClaims) -> Role:
@@ -191,6 +211,13 @@ async def require_tenant(
             raise HTTPException(status_code=403, detail="Organization claim is required")
 
         role = _role(claims)
+        membership_role: Role | None = None
+        # Snapshot scalars before the session closes — commit/rollback expires
+        # ORM attributes and accessing them after raises DetachedInstanceError
+        # (browser then often surfaces that 500 as a vague "Failed to fetch").
+        resolved_tenant_id: uuid.UUID | None = None
+        resolved_clerk_org_id: str | None = None
+        home_org_provisioned = False
         async with SessionFactory() as session:
             home_tenant = await session.scalar(
                 select(Tenant).where(
@@ -198,6 +225,7 @@ async def require_tenant(
                     Tenant.is_active.is_(True),
                 )
             )
+            home_org_provisioned = home_tenant is not None
             tenant = home_tenant
             if x_platform_tenant_id:
                 if role != Role.platform_admin:
@@ -221,21 +249,67 @@ async def require_tenant(
                     raise HTTPException(
                         status_code=404, detail="Selected tenant is inactive or missing"
                     )
-        if home_tenant is None:
+            if tenant is not None:
+                resolved_tenant_id = tenant.id
+                resolved_clerk_org_id = tenant.clerk_org_id
+                email = _email_from_payload(payload)
+                try:
+                    from app.auth.identity_admin import IdentityAdminClient
+                    from app.db.repositories import MembershipRepository
+                    from app.db.session import apply_tenant_guc
+
+                    await apply_tenant_guc(session, resolved_tenant_id)
+                    claim_context = TenantContext(
+                        resolved_tenant_id,
+                        claims.sub,
+                        role,
+                        resolved_clerk_org_id,
+                        scopes=tuple(claims.scopes),
+                    )
+                    membership_repo = MembershipRepository(session, claim_context)
+                    # Fast path: already-linked members skip Clerk profile fetches.
+                    membership = await membership_repo.get_by_user_id(claims.sub)
+                    if membership is not None:
+                        membership_role = (
+                            membership.role if membership.is_active else Role.end_user
+                        )
+                    else:
+                        client = IdentityAdminClient(settings)
+                        if not email and client.configured():
+                            profile = await client.get_user(claims.sub)
+                            if profile is not None:
+                                email = IdentityAdminClient.primary_email(profile)
+                        if email:
+                            claimed = await membership_repo.claim_pending_by_email(
+                                email=email, user_id=claims.sub
+                            )
+                            if claimed is not None:
+                                await session.commit()
+                                membership_role = (
+                                    claimed.role if claimed.is_active else Role.end_user
+                                )
+                except ValueError:
+                    await session.rollback()
+                except Exception:
+                    # Claim is best-effort; never block authenticated requests.
+                    await session.rollback()
+        if not home_org_provisioned:
             raise HTTPException(
                 status_code=403,
                 detail=f"Organization is not provisioned ({claims.org_id})",
             )
-        if tenant is None:
+        if resolved_tenant_id is None or resolved_clerk_org_id is None:
             raise HTTPException(
                 status_code=403,
                 detail=f"Organization is not provisioned ({claims.org_id})",
             )
+        if role != Role.platform_admin and membership_role is not None:
+            role = membership_role
         context = TenantContext(
-            tenant.id,
+            resolved_tenant_id,
             claims.sub,
             role,
-            tenant.clerk_org_id,
+            resolved_clerk_org_id,
             scopes=tuple(claims.scopes),
         )
 

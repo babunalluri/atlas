@@ -134,16 +134,31 @@ async def test_workflow_rejects_cel_until_evaluator_available(session, tenant_a)
     agent, _ = await _published_agent(session, tenant_a, "conditional")
     repo = WorkflowRepository(session, tenant_a)
     config = await repo.create_config(slug="conditional", name="Conditional")
-    with pytest.raises(ValueError, match="CEL conditions are unavailable"):
+    version = await repo.create_draft(
+        config_id=config.id,
+        mode="sequential",
+        steps=[
+            {
+                "name": "Conditional",
+                "target_type": "agent",
+                "target_config_id": agent.id,
+                "condition_expression": "input.priority == 'high'",
+            }
+        ],
+    )
+    steps = await repo.steps(version.id)
+    assert steps[0].condition_expression == "input.priority == 'high'"
+
+    with pytest.raises(ValueError, match="Invalid CEL condition expression"):
         await repo.create_draft(
             config_id=config.id,
             mode="sequential",
             steps=[
                 {
-                    "name": "Conditional",
+                    "name": "Broken",
                     "target_type": "agent",
                     "target_config_id": agent.id,
-                    "condition_expression": "input.priority == 'high'",
+                    "condition_expression": "@@@ not valid cel",
                 }
             ],
         )

@@ -4,6 +4,10 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import type { TraceDetail, TraceSpan } from "@/lib/api/admin";
+import {
+  ACTIVITY_DISPLAY_TIMEZONE,
+  ACTIVITY_DISPLAY_ZONE_LABEL,
+} from "@/lib/activities";
 import { cn } from "@/lib/utils";
 
 function duration(value: number | null) {
@@ -16,7 +20,7 @@ function formatAbsolute(iso: string): string {
   return new Intl.DateTimeFormat("en-US", {
     dateStyle: "short",
     timeStyle: "medium",
-    timeZone: "UTC",
+    timeZone: ACTIVITY_DISPLAY_TIMEZONE,
   }).format(new Date(iso));
 }
 
@@ -81,7 +85,7 @@ export function TraceSpanPanel({ detail }: { detail: TraceDetail }) {
             dateTime={detail.startedAt}
             className="text-xs text-slate-muted"
           >
-            {formatAbsolute(detail.startedAt)} UTC
+            {formatAbsolute(detail.startedAt)} {ACTIVITY_DISPLAY_ZONE_LABEL}
           </time>
         </div>
       </div>

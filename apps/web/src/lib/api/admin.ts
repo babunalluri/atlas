@@ -3,13 +3,13 @@ import {
   MOCK_AGENTS,
   MOCK_APPROVALS,
   MOCK_INGESTION,
-  MOCK_PUBLIC_SURFACE,
 } from "./mocks";
 import type {
   AgentConfig,
   AgentDraftInput,
   AgentSummary,
   AvailableWorkflow,
+  AvailableTeam,
   AdminSession,
   ApprovalRequest,
   CatalogPage,
@@ -19,7 +19,6 @@ import type {
   KnowledgeSource,
   PlatformAuditEvent,
   PlatformTenant,
-  PublicAgentSurface,
   PublicTeamSurface,
   PublicWorkflowSurface,
   TeamConfig,
@@ -30,6 +29,11 @@ import type {
   TenantBranding,
   TenantUser,
   TenantUserInput,
+  EndCustomer,
+  NotificationAudience,
+  NotificationBatch,
+  NotificationSendResult,
+  UserNotification,
   ToolBinding,
   ToolCapability,
   ToolDefinition,
@@ -48,6 +52,7 @@ import {
   type PublicApiTeamOption,
 } from "@/lib/api/public-api-catalog";
 import { agentOsUrl, apiFetch } from "@/lib/agentos/client";
+import { unpackAccessContext } from "@/lib/auth/access-context";
 import { devTenantHeaders } from "@/lib/auth/token";
 
 interface BackendVersion {
@@ -75,6 +80,12 @@ interface BackendAgent {
     credential_id?: string | null;
   }>;
   knowledge_base_id: string | null;
+  framework_adapter?: string | null;
+  guardrails?: {
+    prompt_injection?: boolean;
+    pii_detection?: boolean;
+    openai_moderation?: boolean;
+  } | null;
   draft: BackendVersion | null;
   published: BackendVersion | null;
 }
@@ -186,7 +197,10 @@ function mapApproval(raw: BackendApproval): ApprovalRequest {
 }
 
 function frontendModel(modelId: string): AgentConfig["model"] {
-  return modelId.replace(/^(openai|anthropic|groq):/, "") as AgentConfig["model"];
+  return modelId.replace(
+    /^(openai|anthropic|groq|moonshot|nvidia|gemini):/,
+    "",
+  ) as AgentConfig["model"];
 }
 
 function backendModel(modelId: AgentDraftInput["model"]): string {
@@ -228,6 +242,13 @@ function mapAgent(raw: BackendAgent): AgentConfig {
     tools,
     knowledgeBaseId: raw.knowledge_base_id,
     knowledgeBase: null,
+    frameworkAdapter: (raw.framework_adapter ||
+      "agno") as import("@/lib/api/types").FrameworkAdapter,
+    guardrails: {
+      promptInjection: Boolean(raw.guardrails?.prompt_injection),
+      piiDetection: Boolean(raw.guardrails?.pii_detection),
+      openaiModeration: Boolean(raw.guardrails?.openai_moderation),
+    },
     draftVersion: raw.draft?.version ?? raw.published?.version ?? 1,
     publishedVersion: raw.published?.version ?? null,
     updatedAt: raw.updated_at,
@@ -258,6 +279,12 @@ function backendDraft(draft: AgentDraftInput) {
         };
       }),
     knowledge_base_id: draft.knowledgeBaseId,
+    framework_adapter: draft.frameworkAdapter,
+    guardrails: {
+      prompt_injection: draft.guardrails.promptInjection,
+      pii_detection: draft.guardrails.piiDetection,
+      openai_moderation: draft.guardrails.openaiModeration,
+    },
   };
 }
 
@@ -357,29 +384,6 @@ async function withFallback<T>(
   }
 }
 
-export function listAgents(accessToken: string): Promise<AgentSummary[]> {
-  return withFallback(
-    async () => {
-      const rows = await apiFetch<BackendAgent[]>("/admin/agents", {
-        accessToken,
-      });
-      return rows.map((row) => {
-        const agent = mapAgent(row);
-        return {
-          id: agent.id,
-          name: agent.name,
-          slug: agent.slug,
-          status: agent.status,
-          model: agent.model,
-          updatedAt: agent.updatedAt,
-          publishedVersion: agent.publishedVersion,
-        };
-      });
-    },
-    MOCK_AGENTS,
-  );
-}
-
 export type CatalogListParams = {
   q?: string;
   status?: "all" | "published" | "draft";
@@ -396,6 +400,22 @@ function catalogQuery(params: CatalogListParams = {}): string {
   search.set("page", String(params.page ?? 1));
   search.set("page_size", String(params.pageSize ?? 25));
   return search.toString();
+}
+
+/** Backend catalog `page_size` max is 100 — walk pages for picker lists. */
+async function loadAllCatalogPages<T>(
+  fetchPage: (page: number, pageSize: number) => Promise<CatalogPage<T>>,
+): Promise<T[]> {
+  const pageSize = 100;
+  const first = await fetchPage(1, pageSize);
+  if (first.total <= first.items.length) return first.items;
+  const items = [...first.items];
+  const totalPages = Math.ceil(first.total / pageSize);
+  for (let page = 2; page <= totalPages; page += 1) {
+    const next = await fetchPage(page, pageSize);
+    items.push(...next.items);
+  }
+  return items;
 }
 
 export async function listAgentCatalog(
@@ -504,6 +524,20 @@ export async function listWorkflowCatalog(
   };
 }
 
+/**
+ * Summaries for pickers / name lookup. Uses `/catalog` (thin rows) instead of
+ * `/admin/agents` which hydrates every draft + tools and dominated RSC time.
+ */
+export function listAgents(accessToken: string): Promise<AgentSummary[]> {
+  return withFallback(
+    () =>
+      loadAllCatalogPages((page, pageSize) =>
+        listAgentCatalog(accessToken, { page, pageSize }),
+      ),
+    MOCK_AGENTS,
+  );
+}
+
 export function getAgent(
   accessToken: string,
   agentId: string,
@@ -527,6 +561,12 @@ export function getAgent(
           draftVersion: 1,
           knowledgeBaseId: null,
           knowledgeBase: null,
+          frameworkAdapter: "agno",
+          guardrails: {
+            promptInjection: false,
+            piiDetection: false,
+            openaiModeration: false,
+          },
           tools: [],
         },
   );
@@ -712,6 +752,12 @@ export function createAgent(
       tools: [],
       knowledgeBaseId: null,
       knowledgeBase: null,
+      frameworkAdapter: "agno",
+      guardrails: {
+        promptInjection: false,
+        piiDetection: false,
+        openaiModeration: false,
+      },
       updatedAt: new Date().toISOString(),
     },
   );
@@ -720,20 +766,9 @@ export function createAgent(
 export async function listTeams(
   accessToken: string,
 ): Promise<TeamSummary[]> {
-  const rows = await apiFetch<BackendTeam[]>("/admin/teams", { accessToken });
-  return rows.map((row) => {
-    const team = mapTeam(row);
-    return {
-      id: team.id,
-      name: team.name,
-      slug: team.slug,
-      status: team.status,
-      mode: team.mode,
-      memberCount: team.members.length,
-      publishedVersion: team.publishedVersion,
-      updatedAt: team.updatedAt,
-    };
-  });
+  return loadAllCatalogPages((page, pageSize) =>
+    listTeamCatalog(accessToken, { page, pageSize }),
+  );
 }
 
 export async function getTeam(
@@ -905,20 +940,9 @@ export async function deleteTeam(
 export async function listWorkflows(
   accessToken: string,
 ): Promise<WorkflowSummary[]> {
-  const rows = await apiFetch<BackendWorkflow[]>("/admin/workflows", { accessToken });
-  return rows.map((row) => {
-    const workflow = mapWorkflow(row);
-    return {
-      id: workflow.id,
-      name: workflow.name,
-      slug: workflow.slug,
-      mode: workflow.mode,
-      status: workflow.status,
-      stepCount: workflow.steps.length,
-      publishedVersion: workflow.publishedVersion,
-      updatedAt: workflow.updatedAt,
-    };
-  });
+  return loadAllCatalogPages((page, pageSize) =>
+    listWorkflowCatalog(accessToken, { page, pageSize }),
+  );
 }
 
 /**
@@ -994,14 +1018,27 @@ export async function listAvailableWorkflows(
   });
 }
 
+export async function listAvailableTeams(
+  accessToken: string,
+): Promise<AvailableTeam[]> {
+  return apiFetch<AvailableTeam[]>("/api/teams/available", {
+    accessToken,
+  });
+}
+
 interface BackendTenantUser {
   id: string;
   user_id: string;
   display_name: string;
   email: string | null;
+  phone?: string | null;
   role: "tenant_admin" | "end_user";
   is_active: boolean;
+  invite_pending?: boolean;
+  temporary_password?: string | null;
+  sign_in_url?: string | null;
   workflow_ids: string[];
+  team_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -1012,9 +1049,14 @@ function mapTenantUser(row: BackendTenantUser): TenantUser {
     userId: row.user_id,
     displayName: row.display_name,
     email: row.email,
+    phone: row.phone ?? null,
     role: row.role,
     isActive: row.is_active,
-    workflowIds: row.workflow_ids,
+    invitePending: Boolean(row.invite_pending),
+    temporaryPassword: row.temporary_password ?? null,
+    signInUrl: row.sign_in_url ?? null,
+    workflowIds: row.workflow_ids ?? [],
+    teamIds: row.team_ids ?? [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1049,12 +1091,14 @@ export async function createTenantUser(
       accessToken,
       method: "POST",
       body: {
-        user_id: input.userId,
+        ...(input.userId ? { user_id: input.userId } : {}),
         display_name: input.displayName,
         email: input.email,
+        phone: input.phone?.trim() || null,
         role: input.role,
         is_active: input.isActive,
         workflow_ids: input.workflowIds,
+        team_ids: input.teamIds,
       },
     }),
   );
@@ -1074,13 +1118,47 @@ export async function updateTenantUser(
           ? { display_name: input.displayName }
           : {}),
         ...(input.email !== undefined ? { email: input.email } : {}),
+        ...(input.phone !== undefined
+          ? { phone: input.phone.trim() || null }
+          : {}),
         ...(input.role !== undefined ? { role: input.role } : {}),
         ...(input.isActive !== undefined ? { is_active: input.isActive } : {}),
         ...(input.workflowIds !== undefined
           ? { workflow_ids: input.workflowIds }
           : {}),
+        ...(input.teamIds !== undefined ? { team_ids: input.teamIds } : {}),
       },
     }),
+  );
+}
+
+export async function createTenantUserDevSignInLink(
+  accessToken: string,
+  membershipId: string,
+): Promise<TenantUser> {
+  return mapTenantUser(
+    await apiFetch<BackendTenantUser>(
+      `/admin/users/${membershipId}/dev-sign-in-link`,
+      {
+        accessToken,
+        method: "POST",
+      },
+    ),
+  );
+}
+
+export async function syncTenantUserIdentity(
+  accessToken: string,
+  membershipId: string,
+): Promise<TenantUser> {
+  return mapTenantUser(
+    await apiFetch<BackendTenantUser>(
+      `/admin/users/${membershipId}/sync-identity`,
+      {
+        accessToken,
+        method: "POST",
+      },
+    ),
   );
 }
 
@@ -1092,6 +1170,63 @@ export async function deleteTenantUser(
     accessToken,
     method: "DELETE",
   });
+}
+
+interface BackendEndCustomer {
+  id: string;
+  email: string;
+  display_name: string;
+  email_verified_at: string | null;
+  is_active: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapEndCustomer(row: BackendEndCustomer): EndCustomer {
+  return {
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name,
+    emailVerifiedAt: row.email_verified_at,
+    isActive: row.is_active,
+    metadata: row.metadata ?? {},
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listEndCustomers(
+  accessToken: string,
+): Promise<EndCustomer[]> {
+  const rows = await apiFetch<BackendEndCustomer[]>("/admin/customers", {
+    accessToken,
+  });
+  return rows.map(mapEndCustomer);
+}
+
+export async function updateEndCustomer(
+  accessToken: string,
+  customerId: string,
+  input: {
+    displayName?: string;
+    isActive?: boolean;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<EndCustomer> {
+  return mapEndCustomer(
+    await apiFetch<BackendEndCustomer>(`/admin/customers/${customerId}`, {
+      accessToken,
+      method: "PATCH",
+      body: {
+        ...(input.displayName !== undefined
+          ? { display_name: input.displayName }
+          : {}),
+        ...(input.isActive !== undefined ? { is_active: input.isActive } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      },
+    }),
+  );
 }
 
 export async function createWorkflow(
@@ -1331,12 +1466,18 @@ export async function uploadKnowledgeSource(
 ): Promise<KnowledgeSource> {
   const form = new FormData();
   form.set("file", file);
+  // Same unpacking as apiFetch — packed platform-tenant tokens must not be
+  // sent raw as Bearer (breaks KB upload for platform admins in a workspace).
+  const access = unpackAccessContext(accessToken);
   const response = await fetch(
     agentOsUrl(`/admin/knowledge/bases/${knowledgeBaseId}/upload`),
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${access.token}`,
+        ...(access.platformTenantId
+          ? { "X-Platform-Tenant-ID": access.platformTenantId }
+          : {}),
         ...devTenantHeaders(),
       },
       body: form,
@@ -1353,12 +1494,29 @@ export async function uploadKnowledgeSource(
     created_at: string;
     updated_at: string;
   };
+  return mapKnowledgeSourceRow(row, knowledgeBaseId, file.name, file.type, file.size);
+}
+
+function mapKnowledgeSourceRow(
+  row: {
+    id: string;
+    uri?: string;
+    status: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+    updated_at: string;
+  },
+  knowledgeBaseId: string,
+  fallbackName: string,
+  fallbackMime = "text/plain",
+  fallbackBytes = 0,
+): KnowledgeSource {
   return {
     id: row.id,
     knowledgeBaseId,
-    name: String(row.metadata.filename ?? file.name),
-    mimeType: String(row.metadata.content_type ?? file.type),
-    byteSize: Number(row.metadata.bytes ?? file.size),
+    name: String(row.metadata.filename ?? fallbackName),
+    mimeType: String(row.metadata.content_type ?? fallbackMime),
+    byteSize: Number(row.metadata.bytes ?? fallbackBytes),
     status:
       row.status === "queued" || row.status === "indexing"
         ? "processing"
@@ -1370,6 +1528,71 @@ export async function uploadKnowledgeSource(
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+export async function ingestKnowledgeUrl(
+  accessToken: string,
+  knowledgeBaseId: string,
+  url: string,
+): Promise<KnowledgeSource> {
+  const row = await apiFetch<{
+    id: string;
+    uri: string;
+    status: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+    updated_at: string;
+  }>(`/admin/knowledge/bases/${knowledgeBaseId}/ingest/url`, {
+    accessToken,
+    method: "POST",
+    body: { url },
+  });
+  return mapKnowledgeSourceRow(row, knowledgeBaseId, url);
+}
+
+export async function ingestKnowledgeS3(
+  accessToken: string,
+  knowledgeBaseId: string,
+  uri: string,
+): Promise<KnowledgeSource> {
+  const row = await apiFetch<{
+    id: string;
+    uri: string;
+    status: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+    updated_at: string;
+  }>(`/admin/knowledge/bases/${knowledgeBaseId}/ingest/s3`, {
+    accessToken,
+    method: "POST",
+    body: { uri },
+  });
+  return mapKnowledgeSourceRow(row, knowledgeBaseId, uri);
+}
+
+export async function ingestKnowledgeGithub(
+  accessToken: string,
+  knowledgeBaseId: string,
+  input: { repo: string; path: string; ref?: string; credentialId?: string },
+): Promise<KnowledgeSource> {
+  const row = await apiFetch<{
+    id: string;
+    uri: string;
+    status: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+    updated_at: string;
+  }>(`/admin/knowledge/bases/${knowledgeBaseId}/ingest/github`, {
+    accessToken,
+    method: "POST",
+    body: {
+      repo: input.repo,
+      path: input.path,
+      ref: input.ref ?? "main",
+      credential_id: input.credentialId ?? null,
+    },
+  });
+  return mapKnowledgeSourceRow(row, knowledgeBaseId, input.path);
 }
 
 export async function createKnowledgeBase(
@@ -1537,7 +1760,9 @@ export async function testKnowledgeSearch(
 
 export async function listAdminSessions(
   accessToken: string,
+  options: { limit?: number } = {},
 ): Promise<AdminSession[]> {
+  const limit = options.limit ?? 100;
   const rows = await apiFetch<
     Array<{
       id: string;
@@ -1550,12 +1775,16 @@ export async function listAdminSessions(
       workflow_config_id: string | null;
       workflow_version_id: string | null;
       user_id: string;
+      user_label?: string | null;
       last_run_id: string | null;
       status: AdminSession["status"];
       created_at: string;
       updated_at: string;
     }>
-  >("/api/sessions?all_users=true", { accessToken });
+  >(
+    `/api/sessions?all_users=true&limit=${encodeURIComponent(String(limit))}`,
+    { accessToken },
+  );
   return rows.map((row) => ({
     id: row.id,
     title: row.title,
@@ -1571,6 +1800,7 @@ export async function listAdminSessions(
       row.workflow_version_id ??
       "",
     userId: row.user_id,
+    userLabel: row.user_label ?? null,
     lastRunId: row.last_run_id,
     status: row.status,
     pausedForApproval: row.status === "paused",
@@ -1604,6 +1834,7 @@ export async function getAdminSessionDetail(
     workflow_config_id: string | null;
     workflow_version_id: string | null;
     user_id: string;
+    user_label?: string | null;
     last_run_id: string | null;
     status: AdminSession["status"];
     created_at: string;
@@ -1666,6 +1897,7 @@ export async function getAdminSessionDetail(
         row.workflow_version_id ??
         "",
       userId: row.user_id,
+      userLabel: row.user_label ?? null,
       lastRunId: row.last_run_id,
       status: row.status,
       pausedForApproval: row.status === "paused",
@@ -1688,9 +1920,101 @@ export async function listUserMemories(
     id: String(row.memory_id ?? row.id ?? ""),
     userId,
     memory: String(row.memory ?? row.content ?? ""),
+    topics: Array.isArray(row.topics)
+      ? row.topics.map((topic) => String(topic))
+      : [],
     updatedAt:
-      typeof row.updated_at === "string" ? row.updated_at : null,
+      typeof row.updated_at === "string"
+        ? row.updated_at
+        : typeof row.updated_at === "number"
+          ? new Date(row.updated_at * 1000).toISOString()
+          : null,
   }));
+}
+
+export async function createUserMemory(
+  accessToken: string,
+  input: { userId: string; memory: string; topics?: string[] },
+): Promise<UserMemory> {
+  const row = await apiFetch<Record<string, unknown>>("/api/memories", {
+    accessToken,
+    method: "POST",
+    body: {
+      user_id: input.userId,
+      memory: input.memory,
+      topics: input.topics ?? [],
+    },
+  });
+  return {
+    id: String(row.memory_id ?? row.id ?? ""),
+    userId: input.userId,
+    memory: String(row.memory ?? input.memory),
+    topics: Array.isArray(row.topics)
+      ? row.topics.map((topic) => String(topic))
+      : input.topics ?? [],
+    updatedAt: null,
+  };
+}
+
+export async function updateUserMemory(
+  accessToken: string,
+  memoryId: string,
+  input: { userId: string; memory: string; topics?: string[] },
+): Promise<UserMemory> {
+  const row = await apiFetch<Record<string, unknown>>(
+    `/api/memories/${encodeURIComponent(memoryId)}`,
+    {
+      accessToken,
+      method: "PATCH",
+      body: {
+        user_id: input.userId,
+        memory: input.memory,
+        topics: input.topics ?? [],
+      },
+    },
+  );
+  return {
+    id: String(row.memory_id ?? memoryId),
+    userId: input.userId,
+    memory: String(row.memory ?? input.memory),
+    topics: Array.isArray(row.topics)
+      ? row.topics.map((topic) => String(topic))
+      : input.topics ?? [],
+    updatedAt: null,
+  };
+}
+
+export async function optimizeUserMemories(
+  accessToken: string,
+  userId: string,
+  apply = true,
+): Promise<{
+  memoriesBefore: number;
+  memoriesAfter: number;
+  memories: UserMemory[];
+}> {
+  const row = await apiFetch<{
+    memories_before: number;
+    memories_after: number;
+    memories: Array<Record<string, unknown>>;
+  }>("/api/memories/optimize", {
+    accessToken,
+    method: "POST",
+    body: { user_id: userId, apply },
+  });
+  return {
+    memoriesBefore: row.memories_before,
+    memoriesAfter: row.memories_after,
+    memories: (row.memories ?? []).map((item) => ({
+      id: String(item.memory_id ?? item.id ?? ""),
+      userId,
+      memory: String(item.memory ?? ""),
+      topics: Array.isArray(item.topics)
+        ? item.topics.map((topic) => String(topic))
+        : [],
+      updatedAt: null,
+    })),
+  };
 }
 
 export async function deleteUserMemory(
@@ -1702,6 +2026,87 @@ export async function deleteUserMemory(
     `/api/memories/${encodeURIComponent(memoryId)}?user_id=${encodeURIComponent(userId)}`,
     { accessToken, method: "DELETE" },
   );
+}
+
+export interface LearningRecord {
+  learningId: string;
+  learningType: string;
+  namespace: string | null;
+  userId: string | null;
+  content: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  updatedAt: number | null;
+}
+
+export async function listLearnings(
+  accessToken: string,
+  opts?: { userId?: string; learningType?: string },
+): Promise<LearningRecord[]> {
+  const params = new URLSearchParams();
+  if (opts?.userId) params.set("user_id", opts.userId);
+  if (opts?.learningType) params.set("learning_type", opts.learningType);
+  const query = params.toString();
+  const row = await apiFetch<{
+    data: Array<Record<string, unknown>>;
+  }>(`/api/admin/learnings${query ? `?${query}` : ""}`, { accessToken });
+  return (row.data ?? []).map((item) => ({
+    learningId: String(item.learning_id ?? item.id ?? ""),
+    learningType: String(item.learning_type ?? ""),
+    namespace: item.namespace == null ? null : String(item.namespace),
+    userId: item.user_id == null ? null : String(item.user_id),
+    content:
+      item.content && typeof item.content === "object"
+        ? (item.content as Record<string, unknown>)
+        : {},
+    metadata:
+      item.metadata && typeof item.metadata === "object"
+        ? (item.metadata as Record<string, unknown>)
+        : {},
+    updatedAt: typeof item.updated_at === "number" ? item.updated_at : null,
+  }));
+}
+
+export async function createLearning(
+  accessToken: string,
+  input: {
+    learningType: string;
+    content: Record<string, unknown>;
+    userId?: string;
+    namespace?: string;
+  },
+): Promise<LearningRecord> {
+  const row = await apiFetch<Record<string, unknown>>("/api/admin/learnings", {
+    accessToken,
+    method: "POST",
+    body: {
+      learning_type: input.learningType,
+      content: input.content,
+      user_id: input.userId,
+      namespace: input.namespace,
+    },
+  });
+  return {
+    learningId: String(row.learning_id ?? ""),
+    learningType: String(row.learning_type ?? input.learningType),
+    namespace: row.namespace == null ? null : String(row.namespace),
+    userId: row.user_id == null ? null : String(row.user_id),
+    content:
+      row.content && typeof row.content === "object"
+        ? (row.content as Record<string, unknown>)
+        : input.content,
+    metadata: {},
+    updatedAt: null,
+  };
+}
+
+export async function deleteLearning(
+  accessToken: string,
+  learningId: string,
+): Promise<void> {
+  await apiFetch<void>(`/api/admin/learnings/${encodeURIComponent(learningId)}`, {
+    accessToken,
+    method: "DELETE",
+  });
 }
 
 export interface CredentialSummary {
@@ -1804,6 +2209,262 @@ export async function listCredentials(
   }));
 }
 
+export type UserVaultKind = "secret" | "variable";
+
+export type UserVaultEntry = {
+  name: string;
+  kind: UserVaultKind;
+  updatedAt: string;
+};
+
+export async function listUserVault(
+  accessToken: string,
+): Promise<UserVaultEntry[]> {
+  const rows = await apiFetch<
+    Array<{ name: string; kind: UserVaultKind; updated_at: string }>
+  >("/api/me/vault", { accessToken });
+  return rows.map((row) => ({
+    name: row.name,
+    kind: row.kind,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function upsertUserVaultEntry(
+  accessToken: string,
+  name: string,
+  input: { value: string; kind: UserVaultKind },
+): Promise<UserVaultEntry> {
+  const row = await apiFetch<{
+    name: string;
+    kind: UserVaultKind;
+    updated_at: string;
+  }>(`/api/me/vault/${encodeURIComponent(name)}`, {
+    accessToken,
+    method: "PUT",
+    body: input,
+  });
+  return {
+    name: row.name,
+    kind: row.kind,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function deleteUserVaultEntry(
+  accessToken: string,
+  name: string,
+): Promise<void> {
+  await apiFetch<void>(`/api/me/vault/${encodeURIComponent(name)}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
+export async function sendOrgNotification(
+  accessToken: string,
+  input: { title: string; body: string; userId?: string | null },
+): Promise<NotificationSendResult> {
+  const row = await apiFetch<{
+    batch_id: string;
+    audience: NotificationAudience;
+    recipient_count: number;
+    title: string;
+  }>("/admin/notifications", {
+    accessToken,
+    method: "POST",
+    body: {
+      title: input.title,
+      body: input.body,
+      user_id: input.userId ?? null,
+    },
+  });
+  return {
+    batchId: row.batch_id,
+    audience: row.audience,
+    recipientCount: row.recipient_count,
+    title: row.title,
+  };
+}
+
+export async function listSentNotifications(
+  accessToken: string,
+): Promise<NotificationBatch[]> {
+  const rows = await apiFetch<
+    Array<{
+      batch_id: string;
+      title: string;
+      body: string;
+      audience: NotificationAudience;
+      created_by: string;
+      recipient_count: number;
+      created_at: string;
+    }>
+  >("/admin/notifications", { accessToken });
+  return rows.map((row) => ({
+    batchId: row.batch_id,
+    title: row.title,
+    body: row.body,
+    audience: row.audience,
+    createdBy: row.created_by,
+    recipientCount: row.recipient_count,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function listMyNotifications(
+  accessToken: string,
+  opts?: { unreadOnly?: boolean; limit?: number },
+): Promise<UserNotification[]> {
+  const params = new URLSearchParams();
+  if (opts?.unreadOnly) params.set("unread_only", "true");
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      batch_id: string;
+      title: string;
+      body: string;
+      audience: NotificationAudience;
+      created_by: string;
+      read_at: string | null;
+      created_at: string;
+    }>
+  >(`/api/me/notifications${qs ? `?${qs}` : ""}`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    batchId: row.batch_id,
+    title: row.title,
+    body: row.body,
+    audience: row.audience,
+    createdBy: row.created_by,
+    readAt: row.read_at,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function getMyUnreadNotificationCount(
+  accessToken: string,
+): Promise<number> {
+  const row = await apiFetch<{ count: number }>(
+    "/api/me/notifications/unread-count",
+    { accessToken },
+  );
+  return row.count;
+}
+
+export async function markNotificationRead(
+  accessToken: string,
+  notificationId: string,
+): Promise<UserNotification> {
+  const row = await apiFetch<{
+    id: string;
+    batch_id: string;
+    title: string;
+    body: string;
+    audience: NotificationAudience;
+    created_by: string;
+    read_at: string | null;
+    created_at: string;
+  }>(`/api/me/notifications/${notificationId}/read`, {
+    accessToken,
+    method: "POST",
+  });
+  return {
+    id: row.id,
+    batchId: row.batch_id,
+    title: row.title,
+    body: row.body,
+    audience: row.audience,
+    createdBy: row.created_by,
+    readAt: row.read_at,
+    createdAt: row.created_at,
+  };
+}
+
+export async function markAllNotificationsRead(
+  accessToken: string,
+): Promise<number> {
+  const row = await apiFetch<{ updated: number }>(
+    "/api/me/notifications/read-all",
+    { accessToken, method: "POST" },
+  );
+  return row.updated;
+}
+
+export type AdminVaultTarget = {
+  userId: string;
+  displayName: string;
+  email: string;
+};
+
+export async function listAdminVaultTargets(
+  accessToken: string,
+): Promise<AdminVaultTarget[]> {
+  const rows = await apiFetch<
+    Array<{ user_id: string; display_name: string; email: string }>
+  >("/admin/vault/users", { accessToken });
+  return rows.map((row) => ({
+    userId: row.user_id,
+    displayName: row.display_name,
+    email: row.email,
+  }));
+}
+
+export async function listAdminUserVault(
+  accessToken: string,
+  userId: string,
+): Promise<UserVaultEntry[]> {
+  const rows = await apiFetch<
+    Array<{ name: string; kind: UserVaultKind; updated_at: string }>
+  >(`/admin/vault/users/${encodeURIComponent(userId)}`, { accessToken });
+  return rows.map((row) => ({
+    name: row.name,
+    kind: row.kind,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function upsertAdminUserVaultEntry(
+  accessToken: string,
+  userId: string,
+  name: string,
+  input: { value: string; kind: UserVaultKind },
+): Promise<UserVaultEntry> {
+  const row = await apiFetch<{
+    name: string;
+    kind: UserVaultKind;
+    updated_at: string;
+  }>(
+    `/admin/vault/users/${encodeURIComponent(userId)}/${encodeURIComponent(name)}`,
+    {
+      accessToken,
+      method: "PUT",
+      body: input,
+    },
+  );
+  return {
+    name: row.name,
+    kind: row.kind,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function deleteAdminUserVaultEntry(
+  accessToken: string,
+  userId: string,
+  name: string,
+): Promise<void> {
+  await apiFetch<void>(
+    `/admin/vault/users/${encodeURIComponent(userId)}/${encodeURIComponent(name)}`,
+    {
+      accessToken,
+      method: "DELETE",
+    },
+  );
+}
+
 export async function createCredential(
   accessToken: string,
   input: { name: string; provider: CredentialSummary["provider"]; value: string },
@@ -1826,6 +2487,115 @@ export async function createCredential(
     keyVersion: row.key_version,
     createdAt: row.created_at,
   };
+}
+
+export type ChannelProvider = "slack" | "telegram" | "whatsapp";
+
+export interface ChannelBinding {
+  id: string;
+  provider: ChannelProvider;
+  credentialId: string;
+  targetType: "team" | "workflow";
+  targetConfigId: string;
+  externalConfig: Record<string, unknown>;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listChannelBindings(
+  accessToken: string,
+): Promise<ChannelBinding[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      provider: ChannelProvider;
+      credential_id: string;
+      target_type: "team" | "workflow";
+      target_config_id: string;
+      external_config: Record<string, unknown>;
+      active: boolean;
+      created_at: string;
+      updated_at: string;
+    }>
+  >("/admin/channels", { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    provider: row.provider,
+    credentialId: row.credential_id,
+    targetType: row.target_type,
+    targetConfigId: row.target_config_id,
+    externalConfig: row.external_config ?? {},
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function createChannelBinding(
+  accessToken: string,
+  input: {
+    provider: ChannelProvider;
+    credentialId: string;
+    targetType: "team" | "workflow";
+    targetConfigId: string;
+    externalConfig?: Record<string, unknown>;
+    active?: boolean;
+  },
+): Promise<ChannelBinding> {
+  const row = await apiFetch<{
+    id: string;
+    provider: ChannelProvider;
+    credential_id: string;
+    target_type: "team" | "workflow";
+    target_config_id: string;
+    external_config: Record<string, unknown>;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>("/admin/channels", {
+    accessToken,
+    method: "POST",
+    body: {
+      provider: input.provider,
+      credential_id: input.credentialId,
+      target_type: input.targetType,
+      target_config_id: input.targetConfigId,
+      external_config: input.externalConfig ?? {},
+      active: input.active ?? true,
+    },
+  });
+  return {
+    id: row.id,
+    provider: row.provider,
+    credentialId: row.credential_id,
+    targetType: row.target_type,
+    targetConfigId: row.target_config_id,
+    externalConfig: row.external_config ?? {},
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function deleteChannelBinding(
+  accessToken: string,
+  bindingId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/channels/${bindingId}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
+export async function deleteCredential(
+  accessToken: string,
+  credentialId: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/credentials/${credentialId}`, {
+    accessToken,
+    method: "DELETE",
+  });
 }
 
 export interface ServiceAccountSummary {
@@ -2477,25 +3247,6 @@ export async function updatePlatformSandboxPackage(
   };
 }
 
-export function getPublicChatSurface(
-  tenantSlug: string,
-  agentSlug: string,
-): Promise<PublicAgentSurface> {
-  const live = () =>
-    apiFetch<PublicAgentSurface>(
-      `/public/t/${tenantSlug}/agents/${agentSlug}`,
-      { accessToken: "public" },
-    );
-  if (!mocksEnabled()) {
-    return live();
-  }
-  return withFallback(live, {
-    ...MOCK_PUBLIC_SURFACE,
-    tenant: { ...MOCK_PUBLIC_SURFACE.tenant, slug: tenantSlug },
-    agent: { ...MOCK_PUBLIC_SURFACE.agent, slug: agentSlug },
-  });
-}
-
 export async function getPublicTenantBranding(
   tenantSlug: string,
 ): Promise<TenantBranding> {
@@ -2551,6 +3302,10 @@ export interface WorkspaceInfo {
   name: string;
   slug: string;
   branding: Record<string, unknown>;
+  email_inbound_domain?: string | null;
+  user_id?: string;
+  role?: "platform_admin" | "tenant_admin" | "end_user";
+  can_administer?: boolean;
 }
 
 export async function getWorkspaceInfo(
@@ -2588,12 +3343,21 @@ export async function createSelfServeWorkspace(
   });
 }
 
+export type EvalEvaluator =
+  | "exact"
+  | "contains"
+  | "regex"
+  | "accuracy"
+  | "agent_as_judge"
+  | "performance"
+  | "reliability";
+
 export interface EvalCase {
   key: string;
   name: string;
   input: string;
   expected_output: string;
-  evaluator: "exact" | "contains" | "regex";
+  evaluator: EvalEvaluator;
 }
 
 export interface EvalCaseResult {
@@ -2639,7 +3403,7 @@ export interface EvalDefinition {
   slug: string;
   description: string | null;
   suite: string;
-  target_type: "agent" | "team" | "workflow";
+  target_type: "team" | "workflow";
   target_id: string;
   version_id: string;
   cases: EvalCase[];
@@ -2658,7 +3422,7 @@ export function listEvals(accessToken: string): Promise<EvalDefinition[]> {
 }
 
 export interface EvalTarget {
-  target_type: "agent" | "team" | "workflow";
+  target_type: "team" | "workflow";
   target_id: string;
   version_id: string;
   name: string;
@@ -2686,7 +3450,7 @@ export function createEval(
   input: {
     name: string;
     slug: string;
-    target_type: "agent" | "team" | "workflow";
+    target_type: "team" | "workflow";
     target_id: string;
     version_id: string;
     cases: EvalCase[];
@@ -2755,7 +3519,7 @@ export function getMetrics(
 }
 
 export interface ScheduleTarget {
-  target_type: "agent" | "team" | "workflow";
+  target_type: "team" | "workflow";
   target_id: string;
   version_id: string;
   name: string;
@@ -2983,6 +3747,84 @@ export async function enterPlatformTenant(
     { accessToken, method: "POST" },
   );
   return mapPlatformTenant(row);
+}
+
+export interface PlatformCatalogItem {
+  id: string;
+  name: string;
+  slug: string;
+  kind: "team" | "workflow";
+  status: "draft" | "published";
+}
+
+export async function listPlatformTenantCatalog(
+  accessToken: string,
+  tenantId: string,
+): Promise<PlatformCatalogItem[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      name: string;
+      slug: string;
+      kind: "team" | "workflow";
+      status: "draft" | "published";
+    }>
+  >(`/admin/platform/tenants/${tenantId}/catalog`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    kind: row.kind,
+    status: row.status,
+  }));
+}
+
+export interface PlatformImportResult {
+  agents: Record<string, string>;
+  teams: Record<string, string>;
+  workflows: Record<string, string>;
+  tools: Record<string, string>;
+  knowledgeBases: Record<string, string>;
+  warnings: string[];
+  counts: Record<string, number>;
+}
+
+export async function importPlatformTenantResources(
+  accessToken: string,
+  input: {
+    sourceTenantId: string;
+    destinationTenantId: string;
+    teamIds: string[];
+    workflowIds: string[];
+  },
+): Promise<PlatformImportResult> {
+  const row = await apiFetch<{
+    agents: Record<string, string>;
+    teams: Record<string, string>;
+    workflows: Record<string, string>;
+    tools: Record<string, string>;
+    knowledge_bases: Record<string, string>;
+    warnings: string[];
+    counts: Record<string, number>;
+  }>("/admin/platform/tenants/import", {
+    accessToken,
+    method: "POST",
+    body: {
+      source_tenant_id: input.sourceTenantId,
+      destination_tenant_id: input.destinationTenantId,
+      team_ids: input.teamIds,
+      workflow_ids: input.workflowIds,
+    },
+  });
+  return {
+    agents: row.agents,
+    teams: row.teams,
+    workflows: row.workflows,
+    tools: row.tools,
+    knowledgeBases: row.knowledge_bases,
+    warnings: row.warnings,
+    counts: row.counts,
+  };
 }
 
 export async function listPlatformAudit(

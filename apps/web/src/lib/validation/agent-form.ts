@@ -17,6 +17,9 @@ export const toolBindingSchema = z.object({
   enabled: z.boolean(),
   config: z.record(z.unknown()),
   requiresApproval: z.boolean(),
+  // Tenant reusable tools; must survive Save validation or backendDraft
+  // falls back to tool_key=kind (often rest_mutate) and drops the definition.
+  definitionId: z.string().min(1).optional(),
 });
 
 export const agentDraftSchema = z.object({
@@ -45,6 +48,18 @@ export const agentDraftSchema = z.object({
   memoryMode: z.enum(["session", "persistent"]),
   tools: z.array(toolBindingSchema),
   knowledgeBaseId: z.string().nullable(),
+  frameworkAdapter: z.enum([
+    "agno",
+    "langgraph",
+    "dspy",
+    "claude_agent_sdk",
+    "antigravity",
+  ]),
+  guardrails: z.object({
+    promptInjection: z.boolean(),
+    piiDetection: z.boolean(),
+    openaiModeration: z.boolean(),
+  }),
 });
 
 export type AgentDraftFormValues = z.infer<typeof agentDraftSchema>;
@@ -56,6 +71,20 @@ export function slugifyName(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
+}
+
+/** Short unique slug for Create flows — avoid embedding Date.now() digits in the UI. */
+export function provisionalSlug(prefix: string): string {
+  const base = slugifyName(prefix) || "item";
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `${base}-${suffix}`.slice(0, 64);
+}
+
+/** True when slug looks auto-generated (untitled + digits / random junk). */
+export function isProvisionalSlug(slug: string): boolean {
+  return /^(untitled|untitled-team|untitled-workflow|untitled-agent|team|agent|workflow)(-[a-z0-9]+)+$/i.test(
+    slug,
+  );
 }
 
 export function validateAgentDraft(input: unknown) {
