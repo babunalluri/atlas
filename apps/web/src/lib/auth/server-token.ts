@@ -1,8 +1,8 @@
 import "server-only";
 
-import { auth } from "@clerk/nextjs/server";
 import { cookies } from "next/headers";
 
+import { auth } from "@/auth";
 import {
   effectivePlatformTenantId,
   packAccessContext,
@@ -22,13 +22,18 @@ export async function getServerAgentOsToken(): Promise<string> {
   }
 
   const session = await auth();
-  const token = await session.getToken({ template: "agentos" });
+  const typed = session as {
+    accessToken?: string;
+    error?: string;
+  } | null;
+  if (typed?.error === "RefreshAccessTokenError") {
+    throw new Error("Session expired — sign in again");
+  }
+  const token = typed?.accessToken;
   if (!token) {
     throw new Error("Authentication is required");
   }
 
-  // Stale Platform → Open workspace cookies must not ride along for
-  // non–platform-admin JWTs (e.g. after switching to a normal org).
   if (selectedTenantId && !tokenIsPlatformAdmin(token)) {
     return packAccessContext(token, null);
   }

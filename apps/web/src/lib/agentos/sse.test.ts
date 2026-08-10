@@ -135,7 +135,7 @@ describe("streamAgentRun", () => {
     const contents: string[] = [];
     const result = await streamAgentRun({
       url: "http://agentos/agents/runs",
-      accessToken: "clerk_jwt",
+      accessToken: "oidc_jwt",
       lastEventId: "0",
       body: {
         message: "hi",
@@ -153,7 +153,7 @@ describe("streamAgentRun", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.headers).toMatchObject({
-      Authorization: "Bearer clerk_jwt",
+      Authorization: "Bearer oidc_jwt",
       Accept: "text/event-stream",
       "Last-Event-ID": "0",
     });

@@ -6,7 +6,7 @@ export interface PlatformTenant {
   id: string;
   name: string;
   slug: string;
-  clerkOrgId: string;
+  authOrgId: string;
   branding: Record<string, unknown>;
   isActive: boolean;
   createdAt: string;

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
-import { ClerkProvider } from "@clerk/nextjs";
+import { SessionProvider } from "next-auth/react";
 import { IBM_Plex_Mono, IBM_Plex_Sans, Syne } from "next/font/google";
+
+import { auth } from "@/auth";
 
 import "./globals.css";
 
@@ -29,25 +31,25 @@ export const metadata: Metadata = {
   description: "Multi-tenant agent configuration and branded customer chat",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const clerkReady =
-    !!publishableKey && !publishableKey.includes("replace_me");
+  const session = await auth();
 
   return (
     <html lang="en">
       <body
         className={`${syne.variable} ${plexSans.variable} ${plexMono.variable} font-sans`}
       >
-        {clerkReady ? (
-          <ClerkProvider publishableKey={publishableKey}>{children}</ClerkProvider>
-        ) : (
-          children
-        )}
+        <SessionProvider
+          session={session}
+          refetchInterval={4 * 60}
+          refetchOnWindowFocus
+        >
+          {children}
+        </SessionProvider>
       </body>
     </html>
   );

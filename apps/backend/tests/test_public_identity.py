@@ -35,14 +35,14 @@ async def identity_db(monkeypatch):
 
     tenant_a = Tenant(
         id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
-        clerk_org_id="org_demo_acme",
+        auth_org_id="org_demo_acme",
         slug="acme",
         name="Acme Corp",
         branding={},
     )
     tenant_b = Tenant(
         id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
-        clerk_org_id="org_demo_globex",
+        auth_org_id="org_demo_globex",
         slug="globex",
         name="Globex Inc",
         branding={},
@@ -67,14 +67,14 @@ async def identity_db(monkeypatch):
         tenant_id=tenant_a.id,
         user_id="guest-a",
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
         principal_type="guest",
     )
     ctx_b = TenantContext(
         tenant_id=tenant_b.id,
         user_id="guest-b",
         role=Role.end_user,
-        clerk_org_id=tenant_b.clerk_org_id,
+        auth_org_id=tenant_b.auth_org_id,
         principal_type="guest",
     )
     yield {"factory": factory, "tenant_a": ctx_a, "tenant_b": ctx_b, "eng": eng}
@@ -216,7 +216,7 @@ async def test_my_profile_uses_context_not_model_ids(identity_db):
             tenant_id=ctx.tenant_id,
             user_id=ctx.user_id,
             role=ctx.role,
-            clerk_org_id=ctx.clerk_org_id,
+            auth_org_id=ctx.auth_org_id,
             principal_type="guest",
             verified_end_user_id=user.id,
             verified_email=user.email,
@@ -234,7 +234,7 @@ async def test_my_profile_uses_context_not_model_ids(identity_db):
             tenant_id=ctx.tenant_id,
             user_id=ctx.user_id,
             role=ctx.role,
-            clerk_org_id=ctx.clerk_org_id,
+            auth_org_id=ctx.auth_org_id,
             principal_type="guest",
         )
         set_tenant_context(unbound)

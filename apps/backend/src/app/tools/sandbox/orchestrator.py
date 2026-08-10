@@ -189,7 +189,8 @@ class SandboxOrchestrator:
         method: str,
         url: str,
         headers: dict[str, str] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
+        form_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request = _RUN_REQUESTS.get(run_id)
         rest_client = self.client
@@ -208,6 +209,7 @@ class SandboxOrchestrator:
                     url=url,
                     headers=headers,
                     json_body=json_body,
+                    form_body=form_body,
                 )
             raise LookupError("Sandbox run is not owned by this instance")
         merged = {**request.headers, **(headers or {})}
@@ -222,6 +224,7 @@ class SandboxOrchestrator:
                 url,
                 headers=merged,
                 json_body=json_body,
+                form_body=form_body,
                 allowed_methods=allowed,
             )
             raw_body = response.get("body")
@@ -315,6 +318,7 @@ async def _forward_proxy_to_owner(
     url: str,
     headers: dict[str, str] | None,
     json_body: dict[str, Any] | None,
+    form_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     token = get_settings().sandbox_internal_token.get_secret_value()
     target = f"{owner_url.rstrip('/')}/internal/sandbox/proxy/{run_id}"
@@ -328,6 +332,7 @@ async def _forward_proxy_to_owner(
                     "url": url,
                     "headers": headers or {},
                     "json": json_body,
+                    "form": form_body,
                 },
             )
             if response.status_code >= 400:

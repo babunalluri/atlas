@@ -310,7 +310,7 @@ async def resend_inbound_webhook(request: Request) -> JSONResponse:
                 tenant_id=context.tenant_id,
                 user_id=context.user_id,
                 role=context.role,
-                clerk_org_id=context.clerk_org_id,
+                auth_org_id=context.auth_org_id,
                 scopes=context.scopes,
                 principal_type=context.principal_type,
                 verified_end_user_id=end_user.id,

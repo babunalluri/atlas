@@ -9,7 +9,7 @@ Recommended first production shape:
 | Database | RDS PostgreSQL with pgvector |
 | Documents | S3 + private signed URLs |
 | Secrets | Secrets Manager + KMS envelope keys |
-| Auth | Clerk (external) verified via JWKS |
+| Auth | **Keycloak** (OIDC) verified via JWKS — see [`auth.md`](./auth.md) |
 | Quotas | API Gateway / WAF + Redis (ElastiCache) |
 | Sandboxed Python | ECS RunTask (Fargate) + deny-all SG |
 

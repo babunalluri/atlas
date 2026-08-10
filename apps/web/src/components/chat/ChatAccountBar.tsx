@@ -1,16 +1,10 @@
 "use client";
 
-import {
-  SignedIn,
-  SignedOut,
-  SignInButton,
-  UserButton,
-  useAuth,
-} from "@clerk/nextjs";
 import Link from "next/link";
+import { signIn, signOut, useSession } from "next-auth/react";
 
 /**
- * Compact account control for hosted chat — avatar only when signed in.
+ * Compact account control for hosted chat.
  */
 export function ChatAccountBar({
   tenantSlug,
@@ -19,59 +13,50 @@ export function ChatAccountBar({
   tenantSlug: string;
   signInRedirect: string;
 }) {
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const clerkReady =
-    !!publishableKey && !publishableKey.includes("replace_me");
+  const { data: session, status } = useSession();
 
-  if (!clerkReady) {
-    return (
-      <Link
-        href={`/sign-in?redirect_url=${encodeURIComponent(signInRedirect)}`}
-        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/80"
-      >
-        Account
-      </Link>
-    );
-  }
-
-  return <ClerkChatAccount tenantSlug={tenantSlug} signInRedirect={signInRedirect} />;
-}
-
-function ClerkChatAccount({
-  tenantSlug,
-  signInRedirect,
-}: {
-  tenantSlug: string;
-  signInRedirect: string;
-}) {
-  const { isLoaded } = useAuth();
-
-  if (!isLoaded) {
+  if (status === "loading") {
     return <span className="size-8 rounded-full bg-white/10" />;
   }
 
+  if (!session) {
+    return (
+      <button
+        type="button"
+        onClick={() =>
+          signIn("keycloak", { callbackUrl: signInRedirect || `/t/${tenantSlug}/chat` })
+        }
+        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10"
+      >
+        Sign in
+      </button>
+    );
+  }
+
   return (
-    <div className="flex items-center">
-      <SignedOut>
-        <SignInButton mode="modal" forceRedirectUrl={signInRedirect}>
-          <button
-            type="button"
-            className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10"
-          >
-            Sign in
-          </button>
-        </SignInButton>
-      </SignedOut>
-      <SignedIn>
-        <UserButton
-          afterSignOutUrl={`/t/${tenantSlug}/chat`}
-          appearance={{
-            elements: {
-              avatarBox: "size-8",
-            },
-          }}
-        />
-      </SignedIn>
-    </div>
+    <button
+      type="button"
+      onClick={() => signOut({ callbackUrl: `/t/${tenantSlug}/chat` })}
+      className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10"
+      title={session.user?.email || "Signed in"}
+    >
+      Sign out
+    </button>
+  );
+}
+
+/** Keep a simple link fallback for surfaces that only need navigation. */
+export function ChatAccountLink({
+  tenantSlug,
+}: {
+  tenantSlug: string;
+}) {
+  return (
+    <Link
+      href={`/sign-in?callbackUrl=${encodeURIComponent(`/t/${tenantSlug}/chat`)}`}
+      className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/80"
+    >
+      Account
+    </Link>
   );
 }

@@ -1,35 +1,31 @@
-import { SignUp } from "@clerk/nextjs";
+"use client";
+
+import { signIn } from "next-auth/react";
 import Link from "next/link";
 
 export default function SignUpPage() {
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const clerkReady =
-    !!publishableKey && !publishableKey.includes("replace_me");
-
-  if (!clerkReady) {
-    return (
-      <main className="flex min-h-screen items-center justify-center px-4">
-        <section className="surface-panel max-w-md rounded-2xl p-8 text-center">
-          <h1 className="font-display text-3xl font-semibold">
-            Authentication is not configured
-          </h1>
-          <p className="mt-3 text-sm text-slate-muted">
-            Account creation is disabled in local development mode.
-          </p>
-          <Link
-            href="/admin/agents"
-            className="mt-6 inline-flex rounded-lg bg-ink px-4 py-2 text-sm font-semibold text-paper"
-          >
-            Continue to admin
-          </Link>
-        </section>
-      </main>
-    );
-  }
-
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <SignUp />
-    </div>
+    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-6">
+      <div>
+        <p className="text-sm font-medium text-accent">Atlas</p>
+        <h1 className="mt-2 font-display text-3xl text-ink">Create account</h1>
+        <p className="mt-2 text-sm text-slate-muted">
+          Registration is handled by Keycloak. After signup, an Atlas admin must
+          attach your user to a workspace organization/group.
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={() =>
+          signIn("keycloak", { callbackUrl: "/admin", redirect: true })
+        }
+        className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
+      >
+        Register via Keycloak
+      </button>
+      <Link href="/sign-in" className="text-sm text-accent underline">
+        Already have an account? Sign in
+      </Link>
+    </main>
   );
 }

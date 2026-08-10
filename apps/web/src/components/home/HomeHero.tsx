@@ -1,15 +1,11 @@
 "use client";
 
-import {
-  SignInButton,
-  SignUpButton,
-} from "@clerk/nextjs";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { BrandMark } from "@/components/layout/BrandMark";
-import { Button, buttonClassName } from "@/components/ui/Button";
+import { Button } from "@/components/ui/Button";
 import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
@@ -147,15 +143,11 @@ export function HomeHero() {
 }
 
 function SignedOutLanding({ loading }: { loading: boolean }) {
-  const clerkReady =
-    !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace_me");
-
   return (
     <div className="relative overflow-hidden">
       <div className="pointer-events-none absolute inset-0 grid-noise opacity-45" />
       <div
-        className="pointer-events-none absolute -left-32 top-0 h-[28rem] w-[28rem] rounded-full opacity-50"
+        className="pointer-events-none absolute -left-32 top-0 h-[28rem] w-[28rem] rounded-full opacity-45"
         style={{
           background:
             "radial-gradient(circle, color-mix(in oklab, var(--tone-accent) 26%, transparent), transparent 68%)",
@@ -189,40 +181,14 @@ function SignedOutLanding({ loading }: { loading: boolean }) {
               or administer the control plane.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              {clerkReady ? (
-                <>
-                  <SignInButton mode="modal">
-                    <button
-                      type="button"
-                      className={buttonClassName({
-                        variant: "accent",
-                        className: "min-w-[9.5rem]",
-                      })}
-                    >
-                      Sign in
-                    </button>
-                  </SignInButton>
-                  <SignUpButton mode="modal">
-                    <button
-                      type="button"
-                      className={buttonClassName({ variant: "secondary" })}
-                    >
-                      Create account
-                    </button>
-                  </SignUpButton>
-                </>
-              ) : (
-                <>
-                  <Link href="/sign-in">
-                    <Button variant="accent" className="min-w-[9.5rem]">
-                      Sign in
-                    </Button>
-                  </Link>
-                  <Link href="/sign-up">
-                    <Button variant="secondary">Create account</Button>
-                  </Link>
-                </>
-              )}
+              <Link href="/sign-in">
+                <Button variant="accent" className="min-w-[9.5rem]">
+                  Sign in
+                </Button>
+              </Link>
+              <Link href="/sign-up">
+                <Button variant="secondary">Create account</Button>
+              </Link>
             </div>
           </div>
 

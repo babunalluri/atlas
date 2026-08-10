@@ -10,7 +10,7 @@ class TenantContext:
     tenant_id: uuid.UUID
     user_id: str
     role: Role
-    clerk_org_id: str
+    auth_org_id: str
     scopes: tuple[str, ...] = field(default_factory=tuple)
     principal_type: str = "user"
     verified_end_user_id: uuid.UUID | None = None

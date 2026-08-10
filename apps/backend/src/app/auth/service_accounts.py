@@ -82,7 +82,7 @@ async def authenticate_service_account(token: str) -> TenantContext | None:
             tenant_id=tenant.id,
             user_id=f"sa:{account.id}",
             role=Role.end_user,
-            clerk_org_id=tenant.clerk_org_id,
+            auth_org_id=tenant.auth_org_id,
             scopes=tuple(account.scopes),
             principal_type="service_account",
         )

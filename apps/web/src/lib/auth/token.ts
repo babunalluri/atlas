@@ -1,56 +1,39 @@
 "use client";
 
-import { useAuth } from "@clerk/nextjs";
-import { useCallback, useRef } from "react";
+import { getSession, useSession } from "next-auth/react";
+import { useCallback } from "react";
 
 import {
   effectivePlatformTenantId,
   packAccessContext,
 } from "@/lib/auth/access-context";
 
-function clerkConfigured(): boolean {
-  const key = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  return !!key && !key.includes("replace_me");
+function devAuthEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_DEV_AUTH === "true";
 }
 
-function devAuthEnabled(): boolean {
-  return (
-    process.env.NEXT_PUBLIC_DEV_AUTH === "true" ||
-    !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace_me")
-  );
-}
+type AtlasSession = {
+  accessToken?: string;
+  error?: string;
+};
 
 /**
- * Resolve a bearer token for AgentOS calls.
- * Prefers Clerk session JWT; falls back to a local sentinel when
- * NEXT_PUBLIC_DEV_AUTH=true or Clerk is not configured.
+ * Resolve a bearer token for AgentOS calls (Keycloak access token via Auth.js).
+ * Always hits `/api/auth/session` so the JWT callback can refresh expired tokens.
  */
 export async function getAccessToken(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
   try {
-    const clerk = (
-      window as unknown as {
-        Clerk?: {
-          session?: {
-            getToken: (opts?: {
-              template?: string;
-            }) => Promise<string | null>;
-          };
-        };
-      }
-    ).Clerk;
-    if (clerk?.session?.getToken) {
-      const token = await clerk.session.getToken({ template: "agentos" });
-      if (token) {
-        return packAccessContext(token, effectivePlatformTenantId(token));
-      }
-      const fallback = await clerk.session.getToken();
-      return fallback
-        ? packAccessContext(fallback, effectivePlatformTenantId(fallback))
-        : null;
+    const session = (await getSession()) as AtlasSession | null;
+    if (session?.error === "RefreshAccessTokenError") {
+      return null;
+    }
+    const token = session?.accessToken;
+    if (token) {
+      return packAccessContext(token, effectivePlatformTenantId(token));
     }
   } catch {
-    // Fall through to dev mode.
+    // fall through
   }
   if (devAuthEnabled()) {
     return packAccessContext(
@@ -73,19 +56,9 @@ export function devTenantHeaders(tenantId?: string): Record<string, string> {
   };
 }
 
-/**
- * Hook that resolves a fresh Clerk bearer token for AgentOS.
- * Requires ClerkProvider when Clerk is configured (root layout).
- *
- * `getAccessToken` is intentionally stable across Clerk `getToken` identity
- * changes so list/shell effects do not thrash and stall UI clicks.
- */
 export function useAgentOsToken() {
-  const { isLoaded, isSignedIn, getToken } = useAuth();
-  const bypass =
-    !clerkConfigured() || process.env.NEXT_PUBLIC_DEV_AUTH === "true";
-  const getTokenRef = useRef(getToken);
-  getTokenRef.current = getToken;
+  const { status } = useSession();
+  const bypass = process.env.NEXT_PUBLIC_DEV_AUTH === "true";
 
   const getAccessTokenCb = useCallback(async () => {
     if (bypass) {
@@ -94,24 +67,27 @@ export function useAgentOsToken() {
         effectivePlatformTenantId("dev-token"),
       );
     }
-    if (!isLoaded) {
+    if (status === "loading") {
       throw new Error("Sign in required");
     }
-    if (!isSignedIn) {
+    const session = (await getSession()) as AtlasSession | null;
+    if (session?.error === "RefreshAccessTokenError") {
+      throw new Error("Session expired — sign in again");
+    }
+    const accessToken = session?.accessToken;
+    if (!accessToken) {
       throw new Error("Sign in required");
     }
-    const token =
-      (await getTokenRef.current({ template: "agentos" })) ||
-      (await getTokenRef.current());
-    if (!token) {
-      throw new Error("Sign in required");
-    }
-    return packAccessContext(token, effectivePlatformTenantId(token));
-  }, [bypass, isLoaded, isSignedIn]);
+    return packAccessContext(
+      accessToken,
+      effectivePlatformTenantId(accessToken),
+    );
+  }, [bypass, status]);
 
   return {
     getAccessToken: getAccessTokenCb,
-    isLoaded: bypass ? true : isLoaded,
-    isSignedIn: bypass ? true : Boolean(isSignedIn),
+    isLoaded: bypass ? true : status !== "loading",
+    // Optimistic: real token is resolved when getAccessToken runs (after refresh).
+    isSignedIn: bypass ? true : status === "authenticated",
   };
 }

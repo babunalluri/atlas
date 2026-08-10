@@ -16,7 +16,7 @@ from app.db.session import SessionFactory
 from app.tenancy.context import TenantContext, reset_tenant_context, set_tenant_context
 
 
-class ClerkClaims(BaseModel):
+class AuthClaims(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     sub: str
@@ -46,24 +46,41 @@ def _decode(token: str, settings: Settings) -> dict[str, Any]:
     options = {"require": ["exp", "iat", "sub"]}
     kwargs: dict[str, Any] = {
         "algorithms": ["RS256"],
-        "issuer": settings.clerk_issuer or None,
+        "issuer": settings.auth_issuer or None,
         "options": options,
     }
-    if settings.clerk_audience:
-        kwargs["audience"] = settings.clerk_audience
-    return jwt.decode(token, key, **kwargs)
+    if settings.auth_audience:
+        kwargs["audience"] = settings.auth_audience
+    try:
+        return jwt.decode(token, key, **kwargs)
+    except jwt.InvalidAudienceError:
+        # Keycloak often emits aud=["account"] and azp=<clientId>. Accept azp
+        # when it matches AUTH_AUDIENCE so local/prod still work if the
+        # audience mapper is missing.
+        if not settings.auth_audience:
+            raise
+        soft = {
+            **kwargs,
+            "options": {**options, "verify_aud": False},
+        }
+        soft.pop("audience", None)
+        payload = jwt.decode(token, key, **soft)
+        azp = payload.get("azp") or payload.get("client_id")
+        if azp != settings.auth_audience:
+            raise
+        return payload
 
 
 def _email_from_payload(payload: dict[str, Any]) -> str | None:
-    for key in ("email", "email_address", "primary_email_address"):
+    for key in ("email", "email_address", "preferred_username", "primary_email_address"):
         value = payload.get(key)
         if isinstance(value, str) and "@" in value:
             return value.strip().lower()
     return None
 
 
-def _role(claims: ClerkClaims) -> Role:
-    # Platform elevation must only be emitted by the server-controlled JWT template.
+def _role(claims: AuthClaims) -> Role:
+    # Platform elevation must only be emitted by the server-controlled token mapper.
     platform_flag = claims.platform_admin
     if platform_flag is None:
         platform_flag = claims.metadata.get("platform_admin")
@@ -74,7 +91,8 @@ def _role(claims: ClerkClaims) -> Role:
     return Role.end_user
 
 
-def _flatten_clerk_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _flatten_oidc_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize org claims from Keycloak mappers or nested `o` shapes."""
     org_from_o: str | None = None
     org_role_from_o: str | None = None
     if "o" in payload and isinstance(payload["o"], dict):
@@ -88,14 +106,14 @@ def _flatten_clerk_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return next_payload
 
 
-async def resolve_clerk_identity(
+async def resolve_auth_identity(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
     settings: Settings | None = None,
-) -> ClerkClaims:
-    """Validate Clerk (or dev) identity without requiring a provisioned tenant.
+) -> AuthClaims:
+    """Validate OIDC (or dev) identity without requiring a provisioned tenant.
 
-    Used for self-serve onboarding. clerk_org_id always comes from verified
+    Used for self-serve onboarding. ``auth_org_id`` always comes from verified
     claims — never from the request body.
     """
     if settings is None:
@@ -117,13 +135,13 @@ async def resolve_clerk_identity(
             async with SessionFactory() as session:
                 tenant = await session.get(Tenant, tenant_id)
             if tenant is not None and tenant.is_active:
-                return ClerkClaims(
+                return AuthClaims(
                     sub=user_id,
-                    org_id=tenant.clerk_org_id,
+                    org_id=tenant.auth_org_id,
                     org_role=org_role,
                 )
         org_id = request.headers.get("x-dev-org-id", "org_unprovisioned_dev")
-        return ClerkClaims(sub=user_id, org_id=org_id, org_role=org_role)
+        return AuthClaims(sub=user_id, org_id=org_id, org_role=org_role)
     if not bearer_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
@@ -135,7 +153,7 @@ async def resolve_clerk_identity(
         )
     try:
         payload = await asyncio.to_thread(_decode, bearer_token, settings)
-        claims = ClerkClaims.model_validate(_flatten_clerk_payload(payload))
+        claims = AuthClaims.model_validate(_flatten_oidc_payload(payload))
     except (jwt.PyJWTError, ValidationError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
     if not claims.org_id:
@@ -165,7 +183,7 @@ async def require_tenant(
             raise HTTPException(status_code=401, detail="Invalid service account token")
         payload = {
             "sub": context.user_id,
-            "org_id": context.clerk_org_id,
+            "org_id": context.auth_org_id,
             "scopes": list(context.scopes),
             "principal_type": context.principal_type,
         }
@@ -204,7 +222,7 @@ async def require_tenant(
             )
         try:
             payload = await asyncio.to_thread(_decode, bearer_token, settings)
-            claims = ClerkClaims.model_validate(_flatten_clerk_payload(payload))
+            claims = AuthClaims.model_validate(_flatten_oidc_payload(payload))
         except (jwt.PyJWTError, ValidationError, ValueError) as exc:
             raise HTTPException(status_code=401, detail="Invalid token") from exc
         if not claims.org_id:
@@ -216,12 +234,12 @@ async def require_tenant(
         # ORM attributes and accessing them after raises DetachedInstanceError
         # (browser then often surfaces that 500 as a vague "Failed to fetch").
         resolved_tenant_id: uuid.UUID | None = None
-        resolved_clerk_org_id: str | None = None
+        resolved_auth_org_id: str | None = None
         home_org_provisioned = False
         async with SessionFactory() as session:
             home_tenant = await session.scalar(
                 select(Tenant).where(
-                    Tenant.clerk_org_id == claims.org_id,
+                    Tenant.auth_org_id == claims.org_id,
                     Tenant.is_active.is_(True),
                 )
             )
@@ -251,10 +269,9 @@ async def require_tenant(
                     )
             if tenant is not None:
                 resolved_tenant_id = tenant.id
-                resolved_clerk_org_id = tenant.clerk_org_id
+                resolved_auth_org_id = tenant.auth_org_id
                 email = _email_from_payload(payload)
                 try:
-                    from app.auth.identity_admin import IdentityAdminClient
                     from app.db.repositories import MembershipRepository
                     from app.db.session import apply_tenant_guc
 
@@ -263,31 +280,24 @@ async def require_tenant(
                         resolved_tenant_id,
                         claims.sub,
                         role,
-                        resolved_clerk_org_id,
+                        resolved_auth_org_id,
                         scopes=tuple(claims.scopes),
                     )
                     membership_repo = MembershipRepository(session, claim_context)
-                    # Fast path: already-linked members skip Clerk profile fetches.
                     membership = await membership_repo.get_by_user_id(claims.sub)
                     if membership is not None:
                         membership_role = (
                             membership.role if membership.is_active else Role.end_user
                         )
-                    else:
-                        client = IdentityAdminClient(settings)
-                        if not email and client.configured():
-                            profile = await client.get_user(claims.sub)
-                            if profile is not None:
-                                email = IdentityAdminClient.primary_email(profile)
-                        if email:
-                            claimed = await membership_repo.claim_pending_by_email(
-                                email=email, user_id=claims.sub
+                    elif email:
+                        claimed = await membership_repo.claim_pending_by_email(
+                            email=email, user_id=claims.sub
+                        )
+                        if claimed is not None:
+                            await session.commit()
+                            membership_role = (
+                                claimed.role if claimed.is_active else Role.end_user
                             )
-                            if claimed is not None:
-                                await session.commit()
-                                membership_role = (
-                                    claimed.role if claimed.is_active else Role.end_user
-                                )
                 except ValueError:
                     await session.rollback()
                 except Exception:
@@ -298,7 +308,7 @@ async def require_tenant(
                 status_code=403,
                 detail=f"Organization is not provisioned ({claims.org_id})",
             )
-        if resolved_tenant_id is None or resolved_clerk_org_id is None:
+        if resolved_tenant_id is None or resolved_auth_org_id is None:
             raise HTTPException(
                 status_code=403,
                 detail=f"Organization is not provisioned ({claims.org_id})",
@@ -309,7 +319,7 @@ async def require_tenant(
             resolved_tenant_id,
             claims.sub,
             role,
-            resolved_clerk_org_id,
+            resolved_auth_org_id,
             scopes=tuple(claims.scopes),
         )
 
@@ -317,7 +327,7 @@ async def require_tenant(
     request.state.tenant = context
     # AgentOS treats request.state.user_id as authoritative over form input.
     # Namespace it so native session/memory/trace rows cannot collide across
-    # organizations even when Clerk user IDs or client session IDs repeat.
+    # organizations even when IdP subject IDs or client session IDs repeat.
     request.state.user_id = f"{context.tenant_id}:{context.user_id}"
     request.state.claims = payload
     request.state.scopes = list(context.scopes)

@@ -46,7 +46,7 @@ export function clearPlatformTenantSelection(): void {
 
 /**
  * Platform tenant override is only valid for platform admins.
- * Stale cookies after switching Clerk orgs must not be sent.
+ * Stale cookies after switching home orgs must not be sent.
  */
 export function effectivePlatformTenantId(
   token: string,

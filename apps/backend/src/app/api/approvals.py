@@ -97,7 +97,7 @@ async def resolve_approval(
         tenant_id=context.tenant_id,
         user_id=conversation.user_id,
         role=context.role,
-        clerk_org_id=context.clerk_org_id,
+        auth_org_id=context.auth_org_id,
         scopes=context.scopes,
     )
     agent_factory = AgentFactoryService(session, runtime_context)

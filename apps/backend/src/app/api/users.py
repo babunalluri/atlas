@@ -9,7 +9,6 @@ from app.auth.dependencies import require_roles
 from app.auth.identity_admin import (
     IdentityAdminClient,
     IdentityProvisionError,
-    atlas_role_to_org_role,
     is_pending_user_id,
 )
 from app.core.settings import get_settings
@@ -41,8 +40,7 @@ async def _user_out(
         phone=membership.phone,
         role=membership.role.value,
         is_active=membership.is_active,
-        invite_pending=is_pending_user_id(membership.user_id)
-        or not membership.user_id.startswith("user_"),
+        invite_pending=is_pending_user_id(membership.user_id),
         temporary_password=temporary_password,
         sign_in_url=sign_in_url,
         workflow_ids=await workflows.assigned_workflow_ids(membership.user_id),
@@ -68,17 +66,12 @@ async def _provision_or_raise(
             detail="Cannot sync users while AUTH_DISABLED=true",
         )
     client = IdentityAdminClient(settings)
-    if not client.configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Identity provider is not configured (set CLERK_SECRET_KEY)",
-        )
     try:
         provisioned: ProvisionedIdentity = await client.provision_tenant_user(
             email=email,
             display_name=display_name,
             role=role,
-            organization_id=context.clerk_org_id,
+            organization_id=context.auth_org_id,
             inviter_user_id=context.user_id,
             redirect_url=f"{settings.app_public_url.rstrip('/')}/sign-in",
         )
@@ -191,34 +184,14 @@ async def create_dev_sign_in_link(
     context: AdminContext,
     session: TenantSession,
 ) -> TenantUserOut:
-    """Development-only one-click sign-in (skips email OTP)."""
+    """Development-only one-click sign-in (not available with Keycloak local flow)."""
     settings = get_settings()
     if not settings.is_development:
         raise HTTPException(status_code=404, detail="Not found")
-    users = MembershipRepository(session, context)
-    workflows = WorkflowRepository(session, context)
-    teams = TeamRepository(session, context)
-    membership = await users.get(membership_id)
-    if membership is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not membership.user_id.startswith("user_"):
-        raise HTTPException(
-            status_code=400,
-            detail="Sync this user to the sign-in provider first",
-        )
-    client = IdentityAdminClient(settings)
-    if not client.configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Identity provider is not configured (set CLERK_SECRET_KEY)",
-        )
-    try:
-        sign_in_url = await client.create_dev_sign_in_url(
-            membership.user_id, organization_id=context.clerk_org_id
-        )
-    except IdentityProvisionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return await _user_out(membership, workflows, teams, sign_in_url=sign_in_url)
+    raise HTTPException(
+        status_code=501,
+        detail="Dev sign-in links are not used with Keycloak; sign in at /sign-in",
+    )
 
 
 @router.get("/{membership_id}", response_model=TenantUserOut)
@@ -246,7 +219,6 @@ async def update_user(
     users = MembershipRepository(session, context)
     workflows = WorkflowRepository(session, context)
     teams = TeamRepository(session, context)
-    settings = get_settings()
     try:
         if body.email is not None:
             other = await users.get_by_email(body.email)
@@ -271,21 +243,6 @@ async def update_user(
             await workflows.replace_user_assignments(membership.user_id, body.workflow_ids)
         if body.team_ids is not None:
             await teams.replace_user_assignments(membership.user_id, body.team_ids)
-        if body.role is not None:
-            client = IdentityAdminClient(settings)
-            if (
-                client.configured()
-                and not settings.auth_disabled
-                and membership.user_id.startswith("user_")
-            ):
-                try:
-                    await client.update_organization_membership_role(
-                        organization_id=context.clerk_org_id,
-                        user_id=membership.user_id,
-                        role=atlas_role_to_org_role(Role(body.role)),
-                    )
-                except IdentityProvisionError as exc:
-                    raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -300,24 +257,7 @@ async def delete_user(
     session: TenantSession,
 ) -> Response:
     users = MembershipRepository(session, context)
-    settings = get_settings()
     deleted = await users.delete(membership_id)
     if deleted is None:
         raise HTTPException(status_code=404, detail="User not found")
-    client = IdentityAdminClient(settings)
-    if (
-        client.configured()
-        and not settings.auth_disabled
-        and deleted.user_id.startswith("user_")
-    ):
-        try:
-            await client.remove_organization_membership(
-                organization_id=context.clerk_org_id,
-                user_id=deleted.user_id,
-            )
-        except IdentityProvisionError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"User removed from Atlas, but organization sync failed: {exc}",
-            ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

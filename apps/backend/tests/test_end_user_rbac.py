@@ -23,7 +23,7 @@ async def rbac_db(monkeypatch):
 
     tenant = Tenant(
         id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
-        clerk_org_id="org_demo_acme",
+        auth_org_id="org_demo_acme",
         slug="acme",
         name="Acme Corp",
         branding={"primaryColor": "#0f766e"},
@@ -48,7 +48,7 @@ async def rbac_db(monkeypatch):
             tenant_id=tenant.id,
             user_id="end-user-1",
             role=Role.end_user,
-            clerk_org_id=tenant.clerk_org_id,
+            auth_org_id=tenant.auth_org_id,
         ),
     }
     await eng.dispose()

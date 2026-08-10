@@ -1,4 +1,4 @@
-"""Self-serve workspace provisioning for unprovisioned Clerk organizations."""
+"""Self-serve workspace provisioning for unprovisioned auth organizations."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.auth.dependencies import ClerkClaims, resolve_clerk_identity
+from app.auth.dependencies import AuthClaims, resolve_auth_identity
 from app.db.models import PlatformAuditEvent, Tenant
 from app.db.session import SessionFactory
 from app.tenancy.ids import new_id, validate_slug
@@ -37,12 +37,12 @@ class WorkspaceOut(BaseModel):
     id: UUID
     name: str
     slug: str
-    clerk_org_id: str
+    auth_org_id: str
     branding: dict[str, Any]
     is_active: bool
 
 
-def _can_self_serve(claims: ClerkClaims) -> bool:
+def _can_self_serve(claims: AuthClaims) -> bool:
     if claims.org_role in {"org:admin", "admin", "org:owner"}:
         return True
     platform_flag = claims.platform_admin
@@ -56,11 +56,11 @@ async def onboarding_status(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> OnboardingStatusOut:
-    claims = await resolve_clerk_identity(request, authorization=authorization)
+    claims = await resolve_auth_identity(request, authorization=authorization)
     async with SessionFactory() as session:
         tenant = await session.scalar(
             select(Tenant).where(
-                Tenant.clerk_org_id == claims.org_id,
+                Tenant.auth_org_id == claims.org_id,
                 Tenant.is_active.is_(True),
             )
         )
@@ -85,12 +85,12 @@ async def create_workspace(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> WorkspaceOut:
-    """Create a tenant for the caller's Clerk org when none exists yet.
+    """Create a tenant for the caller's auth org when none exists yet.
 
-    clerk_org_id is taken from the verified JWT — never from the request body —
+    auth_org_id is taken from the verified JWT — never from the request body —
     so a user cannot attach another organization's id.
     """
-    claims = await resolve_clerk_identity(request, authorization=authorization)
+    claims = await resolve_auth_identity(request, authorization=authorization)
     if not _can_self_serve(claims):
         raise HTTPException(
             status_code=403,
@@ -104,7 +104,7 @@ async def create_workspace(
 
     async with SessionFactory() as session:
         existing = await session.scalar(
-            select(Tenant).where(Tenant.clerk_org_id == claims.org_id)
+            select(Tenant).where(Tenant.auth_org_id == claims.org_id)
         )
         if existing is not None:
             if not existing.is_active:
@@ -121,7 +121,7 @@ async def create_workspace(
             id=new_id(),
             name=payload.name.strip(),
             slug=slug,
-            clerk_org_id=claims.org_id,
+            auth_org_id=claims.org_id,
             branding={
                 "primaryColor": "#0f766e",
                 "accentColor": "#5eead4",
@@ -147,7 +147,7 @@ async def create_workspace(
                 actor_id=claims.sub,
                 action="tenant.self_serve.create",
                 tenant_id=tenant.id,
-                details={"slug": tenant.slug, "clerk_org_id": tenant.clerk_org_id},
+                details={"slug": tenant.slug, "auth_org_id": tenant.auth_org_id},
             )
         )
         await session.commit()
@@ -156,7 +156,7 @@ async def create_workspace(
             id=tenant.id,
             name=tenant.name,
             slug=tenant.slug,
-            clerk_org_id=tenant.clerk_org_id,
+            auth_org_id=tenant.auth_org_id,
             branding=tenant.branding or {},
             is_active=tenant.is_active,
         )

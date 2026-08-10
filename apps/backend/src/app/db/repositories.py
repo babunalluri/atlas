@@ -100,18 +100,18 @@ class TenantAdminRepository:
     async def get_by_slug(self, slug: str) -> Tenant | None:
         return await self.session.scalar(select(Tenant).where(Tenant.slug == slug))
 
-    async def get_by_clerk_org(self, clerk_org_id: str) -> Tenant | None:
-        return await self.session.scalar(select(Tenant).where(Tenant.clerk_org_id == clerk_org_id))
+    async def get_by_auth_org(self, auth_org_id: str) -> Tenant | None:
+        return await self.session.scalar(select(Tenant).where(Tenant.auth_org_id == auth_org_id))
 
     async def ensure(
-        self, *, clerk_org_id: str, slug: str, name: str, branding: dict[str, Any] | None = None
+        self, *, auth_org_id: str, slug: str, name: str, branding: dict[str, Any] | None = None
     ) -> Tenant:
-        existing = await self.get_by_clerk_org(clerk_org_id)
+        existing = await self.get_by_auth_org(auth_org_id)
         if existing:
             return existing
         tenant = Tenant(
             id=new_id(),
-            clerk_org_id=clerk_org_id,
+            auth_org_id=auth_org_id,
             slug=validate_slug(slug),
             name=name,
             branding=branding or {},

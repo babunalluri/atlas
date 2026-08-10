@@ -79,12 +79,15 @@ class SafeRestClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
+        form_body: dict[str, Any] | None = None,
         allowed_methods: Sequence[str] = ("GET",),
     ) -> dict[str, Any]:
         method = method.upper()
         if method not in {m.upper() for m in allowed_methods}:
             raise UnsafeOutboundRequest("HTTP method is not permitted")
+        if json_body is not None and form_body is not None:
+            raise UnsafeOutboundRequest("Provide either json_body or form_body, not both")
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower().rstrip(".")
         addresses = await self.validate_url(url)
@@ -97,7 +100,16 @@ class SafeRestClient:
         else:
             netloc = f"{pinned_ip}:{port}"
         pinned_url = parsed._replace(netloc=netloc).geturl()
-        body = json.dumps(json_body).encode() if json_body is not None else b""
+        if form_body is not None:
+            from urllib.parse import urlencode as _urlencode
+
+            body = _urlencode(
+                {str(k): "" if v is None else str(v) for k, v in form_body.items()}
+            ).encode()
+        elif json_body is not None:
+            body = json.dumps(json_body).encode()
+        else:
+            body = b""
         if len(body) > 100_000:
             raise UnsafeOutboundRequest("Request body is too large")
         safe_headers = {
@@ -106,6 +118,14 @@ class SafeRestClient:
             if key.lower() not in {"host", "content-length", "connection"}
         }
         safe_headers["Host"] = host if parsed.port in (None, 443) else f"{host}:{parsed.port}"
+        if form_body is not None and not any(
+            k.lower() == "content-type" for k in safe_headers
+        ):
+            safe_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        elif json_body is not None and not any(
+            k.lower() == "content-type" for k in safe_headers
+        ):
+            safe_headers["Content-Type"] = "application/json"
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
             async with client.stream(
                 method,

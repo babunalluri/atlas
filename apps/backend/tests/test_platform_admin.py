@@ -22,7 +22,7 @@ def platform_admin(tenant_a) -> TenantContext:
         tenant_id=tenant_a.tenant_id,
         user_id="platform-owner",
         role=Role.platform_admin,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
 
 
@@ -32,7 +32,7 @@ async def test_platform_admin_can_create_and_suspend_tenant(session, platform_ad
         TenantCreate(
             name="New Customer",
             slug="new-customer",
-            clerk_org_id="org_new_customer",
+            auth_org_id="org_new_customer",
         ),
         platform_admin,
         session,

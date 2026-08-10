@@ -1,38 +1,12 @@
 "use client";
 
-import {
-  SignedIn,
-  SignedOut,
-  SignInButton,
-  SignUpButton,
-  UserButton,
-  useAuth,
-} from "@clerk/nextjs";
 import Link from "next/link";
+import { signIn, signOut, useSession } from "next-auth/react";
 
 export function AuthControls() {
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const clerkReady =
-    !!publishableKey && !publishableKey.includes("replace_me");
+  const { data: session, status } = useSession();
 
-  if (!clerkReady) {
-    return (
-      <Link
-        href="/sign-in"
-        className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
-      >
-        Dev account
-      </Link>
-    );
-  }
-
-  return <ClerkAuthControls />;
-}
-
-function ClerkAuthControls() {
-  const { isLoaded } = useAuth();
-
-  if (!isLoaded) {
+  if (status === "loading") {
     return (
       <span className="rounded-md border border-line bg-raised px-3 py-2 text-sm text-slate-muted">
         Loading…
@@ -40,23 +14,38 @@ function ClerkAuthControls() {
     );
   }
 
+  if (!session) {
+    return (
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => signIn("keycloak", { callbackUrl: "/admin" })}
+          className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
+        >
+          Sign in
+        </button>
+        <Link
+          href="/sign-up"
+          className="rounded-md bg-ink px-3 py-2 text-sm font-medium text-canvas"
+        >
+          Sign up
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-center gap-2">
-      <SignedOut>
-        <SignInButton mode="modal">
-          <button className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink">
-            Sign in
-          </button>
-        </SignInButton>
-        <SignUpButton mode="modal">
-          <button className="rounded-md bg-ink px-3 py-2 text-sm font-medium text-canvas">
-            Sign up
-          </button>
-        </SignUpButton>
-      </SignedOut>
-      <SignedIn>
-        <UserButton afterSignOutUrl="/" />
-      </SignedIn>
+      <span className="hidden text-sm text-slate-muted sm:inline">
+        {session.user?.email || session.user?.name || "Signed in"}
+      </span>
+      <button
+        type="button"
+        onClick={() => signOut({ callbackUrl: "/" })}
+        className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
+      >
+        Sign out
+      </button>
     </div>
   );
 }

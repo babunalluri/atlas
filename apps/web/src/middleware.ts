@@ -1,49 +1,32 @@
-import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
 
-const isPublicRoute = createRouteMatcher([
-  "/",
-  "/sign-in(.*)",
-  "/sign-up(.*)",
-  "/t/(.*)",
-  "/embed/(.*)",
-]);
+import { auth } from "@/auth";
 
-const clerkConfigured =
-  !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY &&
-  !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.includes("replace_me");
+const publicPrefixes = ["/", "/sign-in", "/sign-up", "/t/", "/embed/", "/api/auth"];
 
-// Local-only bypass. Ignored when NODE_ENV is not development.
+function isPublic(pathname: string): boolean {
+  if (pathname === "/") return true;
+  return publicPrefixes.some(
+    (prefix) => prefix !== "/" && pathname.startsWith(prefix),
+  );
+}
+
 const allowDevAuthBypass =
   process.env.NEXT_PUBLIC_DEV_AUTH === "true" &&
   (process.env.NODE_ENV ?? "development") === "development";
 
-function denyMisconfiguredAuth() {
-  return new NextResponse(
-    "Authentication is not configured. Set a real NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY.",
-    { status: 503 },
-  );
-}
-
-export default clerkConfigured
-  ? clerkMiddleware(async (auth, request) => {
-      if (isPublicRoute(request) || allowDevAuthBypass) {
-        return NextResponse.next();
-      }
-      const session = await auth();
-      if (!session.userId) {
-        return session.redirectToSignIn({ returnBackUrl: request.url });
-      }
-      return NextResponse.next();
-    })
-  : function failClosed(request: NextRequest) {
-      // Without Clerk, only public surfaces may load — never /admin.
-      if (isPublicRoute(request) || allowDevAuthBypass) {
-        return NextResponse.next();
-      }
-      return denyMisconfiguredAuth();
-    };
+export default auth((request) => {
+  const { pathname } = request.nextUrl;
+  if (isPublic(pathname) || allowDevAuthBypass) {
+    return NextResponse.next();
+  }
+  if (!request.auth) {
+    const signIn = new URL("/sign-in", request.nextUrl.origin);
+    signIn.searchParams.set("callbackUrl", request.nextUrl.href);
+    return NextResponse.redirect(signIn);
+  }
+  return NextResponse.next();
+});
 
 export const config = {
   matcher: [

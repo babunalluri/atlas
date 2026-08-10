@@ -73,7 +73,7 @@ async def _with_verified_identity(
         tenant_id=context.tenant_id,
         user_id=context.user_id,
         role=context.role,
-        clerk_org_id=context.clerk_org_id,
+        auth_org_id=context.auth_org_id,
         scopes=context.scopes,
         principal_type=context.principal_type,
         verified_end_user_id=user.id,
@@ -128,7 +128,7 @@ async def _public_run_context(
             tenant_id=tenant.id,
             user_id=guest_user_id,
             role=Role.end_user,
-            clerk_org_id=tenant.clerk_org_id,
+            auth_org_id=tenant.auth_org_id,
             principal_type="guest",
         )
         set_tenant_context(context)

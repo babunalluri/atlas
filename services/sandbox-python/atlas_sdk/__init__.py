@@ -23,10 +23,30 @@ class HttpClient:
         self,
         url: str,
         *,
-        json: dict[str, Any] | None = None,
+        json: dict[str, Any] | list[Any] | None = None,
+        form: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> Any:
-        return await self.request("POST", url, json=json, headers=headers)
+        return await self.request("POST", url, json=json, form=form, headers=headers)
+
+    async def put(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any] | list[Any] | None = None,
+        form: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        return await self.request("PUT", url, json=json, form=form, headers=headers)
+
+    async def delete(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        return await self.request("DELETE", url, params=params, headers=headers)
 
     async def request(
         self,
@@ -34,7 +54,8 @@ class HttpClient:
         url: str,
         *,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        json: dict[str, Any] | list[Any] | None = None,
+        form: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> Any:
         # Async surface for author ergonomics; IPC itself is synchronous.
@@ -43,6 +64,7 @@ class HttpClient:
             url,
             params=params,
             json_body=json,
+            form_body=form,
             headers=headers,
         )
         if not result.get("ok", True):

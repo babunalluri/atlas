@@ -231,7 +231,7 @@ async def test_end_user_cannot_resolve_approvals(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id="end",
         role=__import__("app.db.models", fromlist=["Role"]).Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     repo = ApprovalRepository(session, end_user)
     with pytest.raises(PermissionError):

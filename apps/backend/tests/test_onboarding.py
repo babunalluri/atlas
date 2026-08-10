@@ -1,4 +1,4 @@
-"""Self-serve workspace onboarding for unprovisioned Clerk orgs."""
+"""Self-serve workspace onboarding for unprovisioned auth orgs."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ async def test_self_serve_creates_workspace_from_dev_org(onboarding_db):
         assert created.status_code == 201
         payload = created.json()
         assert payload["slug"] == "brand-new"
-        assert payload["clerk_org_id"] == "org_brand_new"
+        assert payload["auth_org_id"] == "org_brand_new"
 
         again = await client.post(
             "/admin/onboarding/workspace",
@@ -79,7 +79,7 @@ async def test_self_serve_creates_workspace_from_dev_org(onboarding_db):
 
     async with onboarding_db() as session:
         tenant = await session.scalar(
-            select(Tenant).where(Tenant.clerk_org_id == "org_brand_new")
+            select(Tenant).where(Tenant.auth_org_id == "org_brand_new")
         )
         assert tenant is not None
         events = (
@@ -108,7 +108,7 @@ async def test_self_serve_requires_org_admin(onboarding_db):
 
 
 @pytest.mark.asyncio
-async def test_self_serve_ignores_body_clerk_org_id(onboarding_db):
+async def test_self_serve_ignores_body_auth_org_id(onboarding_db):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         created = await client.post(
@@ -121,19 +121,19 @@ async def test_self_serve_ignores_body_clerk_org_id(onboarding_db):
             json={
                 "name": "From Claims",
                 "slug": "from-claims",
-                "clerk_org_id": "org_spoofed",
+                "auth_org_id": "org_spoofed",
             },
         )
         assert created.status_code == 201
-        assert created.json()["clerk_org_id"] == "org_from_claims"
+        assert created.json()["auth_org_id"] == "org_from_claims"
 
     async with onboarding_db() as session:
         spoofed = await session.scalar(
-            select(Tenant).where(Tenant.clerk_org_id == "org_spoofed")
+            select(Tenant).where(Tenant.auth_org_id == "org_spoofed")
         )
         assert spoofed is None
         real = await session.scalar(
-            select(Tenant).where(Tenant.clerk_org_id == "org_from_claims")
+            select(Tenant).where(Tenant.auth_org_id == "org_from_claims")
         )
         assert real is not None
         assert real.id != uuid.UUID(int=0)

@@ -159,7 +159,7 @@ async def test_factory_hides_draft_from_end_users(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id="end",
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     factory = AgentFactoryService(session, end_user, allowed_hosts=set())
     with pytest.raises(LookupError):

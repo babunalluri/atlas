@@ -33,7 +33,7 @@ async def test_vault_isolation_by_user_and_tenant(session, tenant_a, tenant_b, c
         tenant_id=tenant_a.tenant_id,
         user_id="user-a-other",
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     env = cipher.encrypt("secret-a")
     await repo_a.upsert(

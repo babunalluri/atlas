@@ -1,6 +1,6 @@
 # Multi-Tenant Agent SaaS
 
-A branded platform for configuring and operating tenant-isolated Agno agents. The runtime uses AgentOS over FastAPI, Postgres/pgvector for durable state, Clerk organizations for identity, and Next.js for the admin and customer experiences.
+A branded platform for configuring and operating tenant-isolated Agno agents. The runtime uses AgentOS over FastAPI, Postgres/pgvector for durable state, **Keycloak (OIDC)** for staff identity, and Next.js for the admin and customer experiences.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ A branded platform for configuring and operating tenant-isolated Agno agents. Th
 - Mutating tools pause for approval and can be resolved only by tenant/platform admins.
 - Atlas schedules pin published target versions and execute through the same tenant-aware factories as interactive runs.
 
-See [docs/architecture.md](docs/architecture.md) and [docs/aws-deployment.md](docs/aws-deployment.md).
+See [docs/architecture.md](docs/architecture.md), [docs/auth.md](docs/auth.md), [docs/aws-deployment.md](docs/aws-deployment.md), and [docs/oci-deployment.md](docs/oci-deployment.md).
 
 ## Repository layout
 
@@ -28,19 +28,20 @@ docker-compose.yml  Postgres (pgvector) + backend + web
    ```sh
    cp .env.example .env
    ```
-2. Default local/Compose auth is production-like Clerk (`AUTH_DISABLED=false`, `NEXT_PUBLIC_DEV_AUTH=false`) with issuer `https://emerging-unicorn-41.clerk.accounts.dev`. Put real Clerk keys in `.env` / `apps/web/.env.local`. For a no-Clerk bypass only, set both auth flags to `true` (never in shared environments).
+2. Default local auth is **Keycloak OIDC** (`AUTH_DISABLED=false`, `NEXT_PUBLIC_DEV_AUTH=false`). Start Keycloak with Compose (port 8080). Put secrets in `.env` / `apps/web/.env.local`. For a no-IdP bypass only, set both auth flags to `true` (never in shared environments).
 3. Start the stack:
    ```sh
    docker compose up --build
    ```
 4. Open:
    - App: http://localhost:3000
+   - Keycloak: http://localhost:8080 (admin / admin)
    - Admin agents: http://localhost:3000/admin/agents
    - Admin schedules: http://localhost:3000/admin/schedules
    - Demo chat: http://localhost:3000/t/acme/chat/support
    - API docs: http://localhost:7777/docs
 
-Seed tenants: `acme` and `globex`.
+Seed tenants: `acme` and `globex`. Dev IdP users: `admin@atlas.local` / `atlas-admin`, `ops@acme.atlas.local` / `atlas-acme`.
 
 ## Useful commands
 
@@ -64,27 +65,29 @@ registry key; arbitrary source, import paths, packages, and commands are never
 accepted from tenants. See [docs/custom-python-tools.md](docs/custom-python-tools.md)
 for the implementation template and security requirements.
 
-## Clerk JWT template
+## Staff authentication (Keycloak)
 
-Configure a Clerk JWT template with audience `agent-saas` and claims controlled by Clerk:
+See [docs/auth.md](docs/auth.md). Atlas verifies OIDC JWTs via JWKS (`AUTH_ISSUER` /
+`AUTH_JWKS_URL`). Web sign-in uses Auth.js + Keycloak — **Clerk is not required**.
+
+IdP access-token claims should include:
 
 ```json
 {
-  "org_id": "{{org.id}}",
-  "org_role": "{{org.role}}",
+  "org_id": "org_demo_acme",
+  "org_role": "org:admin",
   "scopes": ["agents:read", "agents:run", "sessions:read"],
-  "platform_admin": "{{user.private_metadata.platform_admin}}"
+  "platform_admin": true
 }
 ```
 
-Do not accept tenant, role, scopes, or user identity from request bodies. Production should keep platform-admin state in server-controlled metadata.
-
-Set `private_metadata.platform_admin` to `true` for the internal user in Clerk,
-then sign out and back in so the `agentos` JWT is refreshed. That user will see
-**Platform → Super admin**, where they can provision or suspend tenants and
-open a tenant workspace. Workspace selection is sent as a dedicated header;
-the backend accepts it only after verifying the platform-admin JWT claim, then
-continues to use the selected tenant's normal RLS context.
+Do not accept tenant, role, scopes, or user identity from request bodies. Set
+`platform_admin=true` on the IdP user for internal operators, then sign out and
+back in so the access token refreshes. That user will see **Platform → Super
+admin**, where they can provision or suspend tenants and open a tenant
+workspace. Workspace selection is sent as a dedicated header; the backend
+accepts it only after verifying the platform-admin JWT claim, then continues to
+use the selected tenant's normal RLS context.
 
 ## Scheduler
 
@@ -99,7 +102,7 @@ An in-process async poller enumerates active tenants, opens one RLS-scoped trans
 ### Atlas MCP server
 
 Tenant administrators can enable Atlas's outbound MCP surface at
-`/admin/mcp`; compatible clients connect to `POST /mcp` with a Clerk token or,
+`/admin/mcp`; compatible clients connect to `POST /mcp` with a staff OIDC token or,
 preferably, a scoped Atlas service-account token. Machine clients need
 `mcp:access` to connect plus `mcp:read`, `mcp:run`, and/or
 `mcp:sessions:read` for the operations they use. The tenant ID is always

@@ -7,10 +7,11 @@ This is separate from source-controlled [`custom_python`](./custom-python-tools.
 ## Lifecycle
 
 1. Create a tool with kind **Editable Python** in Tool builder.
-2. Edit source in the Monaco editor (or load the **Contact Center PBX starter**).
-   Capability names are discovered from top-level `async def`s or public methods
-   on a `BaseToolkit`/`Toolkit` subclass — no manual capability list. Optional
-   allowlisted dependencies can still be selected.
+2. Edit source in the Monaco editor (optional starter templates may appear in
+   the UI — they are conveniences only). Capability names are discovered from
+   top-level `async def`s or public methods on a `BaseToolkit`/`Toolkit`
+   subclass — no manual capability list. Optional allowlisted dependencies can
+   still be selected.
 3. **Save** writes a draft `tool_definition_versions` row and keeps
    `config.version_status=draft`.
 4. **Validate** runs AST checks and dependency allowlist checks; marks the draft
@@ -22,56 +23,22 @@ This is separate from source-controlled [`custom_python`](./custom-python-tools.
    Delete) to view / restore draft / restore live published version.
 7. Mutating capabilities always require HITL approval.
 
-For local Freshdesk-style tools, add your exact HTTPS host (e.g.
-`api.freshdesk.com` or `{domain}.freshdesk.com`) to
-`REST_TOOL_ALLOWED_HOSTS` / `BACKEND_ALLOWED_OUTBOUND_HOSTS` — matching is
-exact hostname, not a wildcard suffix.
+## Outbound HTTPS
 
-## CC PBX example (Contact Center PBX starter)
+Before a sandboxed tool can call an external HTTPS API, add that API’s **exact
+hostname** to `REST_TOOL_ALLOWED_HOSTS` / `BACKEND_ALLOWED_OUTBOUND_HOSTS`.
+Matching is exact (no wildcard suffix). Keep platform env examples generic
+(e.g. `api.example.com`); add real hosts only in the environments that need
+them. Project-specific hosts belong with that project’s tool instructions, not
+in platform defaults.
 
-The built-in `cc_pbx` template wraps CloudConnect / HODU PBX REST APIs
-(`hodupbx_api/v1.4` and `ccpl_api/v1.4`). It exposes 11 capabilities:
+Typical setup:
 
-| Category | Capabilities | Mutating |
-|----------|--------------|----------|
-| Provisioning | `create_tenant`, `create_extension`, `create_did`, `add_balance` | yes |
-| Reference | `get_billplan`, `get_rateplan`, `get_og_rule`, `get_did_details` | no |
-| Monitoring | `get_balance`, `get_active_calls`, `get_call_log` | no |
-
-### Setup
-
-1. **Allowlist the API host** — add `dev2.cloud-connect.in` to
-   `BACKEND_ALLOWED_OUTBOUND_HOSTS` (or `REST_TOOL_ALLOWED_HOSTS`) in your
-   backend `.env` for local dev. Never commit live tokens.
-2. **Create a tenant credential** with JSON value (stored encrypted):
-
-   ```json
-   {
-     "pbx_token_id": "<hodupbx_api token>",
-     "ccpl_token_id": "<ccpl_api token>",
-     "ccpl_unique_token": "<per-tenant unique token for call logs>"
-   }
-   ```
-
-   CC PBX auth sends `token_id` in each POST body — not an `Authorization`
-   header. The provider merges this JSON into sandbox settings at runtime and
-   skips Bearer injection when body-token keys are present.
-3. **Load the CC PBX starter** in Tool builder. Default settings:
-
-   ```json
-   {
-     "base_url": "https://dev2.cloud-connect.in",
-     "pbx_api_root": "hodupbx_api/v1.4/api",
-     "ccpl_api_root": "ccpl_api/v1.4/api",
-     "timeout": 60
-   }
-   ```
-
-4. Bind the credential to the tool, **Validate**, then **Publish** before
-   attaching it to an agent.
-
-Use reference lookups (`get_billplan`, `get_og_rule`, etc.) before provisioning
-calls to resolve IDs for `create_tenant` and `create_did`.
+1. Allowlist the hostname from the tool’s `base_url`.
+2. Create a tenant credential (encrypted) — Bearer token and/or JSON settings
+   merged at runtime, depending on how the tool authenticates.
+3. Set tool settings (`base_url`, timeouts, non-secret options).
+4. Bind credential → **Validate** → **Publish** → attach to an agent.
 
 ## Isolation model
 
@@ -83,14 +50,14 @@ Agent tool call
   → atlas-sandbox-python container (--network none)
        ↕ JSON-RPC stdin/stdout
   → HttpProxy callback on backend
-  → SafeRestClient (HTTPS host allowlist)
+  → SafeRestClient (HTTPS host allowlist; JSON or form-urlencoded bodies)
 ```
 
 - Backend never mounts `docker.sock`.
 - Guest has no network; all HTTPS is host-mediated.
-- Credentials are injected on proxied requests on the host, not into guest env
-  when possible. CC PBX-style tools merge credential JSON into sandbox settings
-  (body tokens) instead of Bearer headers.
+- Credentials are injected on proxied requests on the host when possible
+  (e.g. Bearer), or merged into sandbox settings when the tool expects tokens
+  in the request body / settings object.
 - Import AST policy is **deny-list only**: dangerous modules (`os`, `sys`,
   `subprocess`, `socket`, …) and dangerous builtins (`eval`, `exec`, `open`,
   …) are rejected. **Any other import root is allowed at save time**; packages
@@ -138,3 +105,7 @@ image contains the new wheels/hashes.
 ## AWS / ECS Fargate path
 
 See [aws-deployment.md](./aws-deployment.md#sandboxed-python-tools).
+
+## Oracle Cloud / OKE path
+
+See [oci-deployment.md](./oci-deployment.md#sandboxed-python-tools).

@@ -3339,7 +3339,7 @@ export async function getOnboardingStatus(
 export async function createSelfServeWorkspace(
   accessToken: string,
   input: { name: string; slug: string },
-): Promise<WorkspaceInfo & { clerk_org_id: string; is_active: boolean }> {
+): Promise<WorkspaceInfo & { auth_org_id: string; is_active: boolean }> {
   return apiFetch("/admin/onboarding/workspace", {
     accessToken,
     method: "POST",
@@ -3668,7 +3668,7 @@ interface BackendPlatformTenant {
   id: string;
   name: string;
   slug: string;
-  clerk_org_id: string;
+  auth_org_id: string;
   branding: Record<string, unknown>;
   is_active: boolean;
   created_at: string;
@@ -3689,7 +3689,7 @@ function mapPlatformTenant(row: BackendPlatformTenant): PlatformTenant {
     id: row.id,
     name: row.name,
     slug: row.slug,
-    clerkOrgId: row.clerk_org_id,
+    authOrgId: row.auth_org_id,
     branding: row.branding,
     isActive: row.is_active,
     createdAt: row.created_at,
@@ -3709,7 +3709,7 @@ export async function listPlatformTenants(
 
 export async function createPlatformTenant(
   accessToken: string,
-  input: { name: string; slug: string; clerkOrgId: string },
+  input: { name: string; slug: string; authOrgId: string },
 ): Promise<PlatformTenant> {
   const row = await apiFetch<BackendPlatformTenant>(
     "/admin/platform/tenants",
@@ -3719,7 +3719,7 @@ export async function createPlatformTenant(
       body: {
         name: input.name,
         slug: input.slug,
-        clerk_org_id: input.clerkOrgId,
+        auth_org_id: input.authOrgId,
       },
     },
   );

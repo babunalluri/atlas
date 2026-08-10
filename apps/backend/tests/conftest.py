@@ -37,14 +37,14 @@ async def session(engine) -> AsyncIterator[AsyncSession]:
     async with factory() as session:
         tenant = Tenant(
             id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
-            clerk_org_id="org_demo_acme",
+            auth_org_id="org_demo_acme",
             slug="acme",
             name="Acme Corp",
             branding={"primaryColor": "#0f766e"},
         )
         other = Tenant(
             id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
-            clerk_org_id="org_demo_globex",
+            auth_org_id="org_demo_globex",
             slug="globex",
             name="Globex Inc",
             branding={},
@@ -60,7 +60,7 @@ def tenant_a() -> TenantContext:
         tenant_id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
         user_id="user-a",
         role=Role.tenant_admin,
-        clerk_org_id="org_demo_acme",
+        auth_org_id="org_demo_acme",
     )
 
 
@@ -70,7 +70,7 @@ def tenant_b() -> TenantContext:
         tenant_id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
         user_id="user-b",
         role=Role.tenant_admin,
-        clerk_org_id="org_demo_globex",
+        auth_org_id="org_demo_globex",
     )
 
 

@@ -332,6 +332,7 @@ async def _proxy(
                 "url": url,
                 "headers": params.get("headers") or {},
                 "json": params.get("json"),
+                "form": params.get("form"),
             },
         )
         if response.status_code >= 400:

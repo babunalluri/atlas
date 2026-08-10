@@ -61,6 +61,28 @@ services:
       mc mb --ignore-existing local/atlas-documents
       "
 
+  # Open-source IdP (replaces Clerk). Admin UI: http://localhost:8080
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/keycloak/atlas-realm.json:/opt/keycloak/data/import/atlas-realm.json:ro
+      - keycloak_data:/opt/keycloak/data
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 40s
+
   sandbox-python:
     build:
       context: ./services/sandbox-python
@@ -111,10 +133,12 @@ services:
       MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent_saas}:${POSTGRES_PASSWORD:-agent_saas_dev}@postgres:5432/${POSTGRES_DB:-agent_saas}
       POSTGRES_APP_PASSWORD: ${POSTGRES_PASSWORD:-agent_saas_dev}
       AUTH_DISABLED: "false"
-      CLERK_ISSUER: https://emerging-unicorn-41.clerk.accounts.dev
-      CLERK_JWKS_URL: https://emerging-unicorn-41.clerk.accounts.dev/.well-known/jwks.json
-      CLERK_AUDIENCE: agent-saas
-      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      AUTH_PROVIDER: oidc
+      # Token iss is the browser-facing Keycloak URL; JWKS is fetched in-network.
+      AUTH_ISSUER: ${AUTH_ISSUER:-http://localhost:8080/realms/atlas}
+      AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://keycloak:8080/realms/atlas/protocol/openid-connect/certs}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:-atlas-web}
+      AUTH_ADMIN_SECRET: ${AUTH_ADMIN_SECRET:-}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-dev-only-change-me-please-32b}
       DOCUMENT_UPLOAD_DIR: /data/uploads
       # Force MinIO for compose; empty DOCUMENT_BUCKET= in host .env would otherwise win.
@@ -150,6 +174,8 @@ services:
         condition: service_completed_successfully
       sandbox-manager:
         condition: service_healthy
+      keycloak:
+        condition: service_started
     command: >
       sh -c "python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
       alembic upgrade head &&
@@ -173,6 +199,12 @@ services:
     environment:
       NEXT_PUBLIC_AGENTOS_URL: http://localhost:7777
       AGENTOS_INTERNAL_URL: http://backend:7777
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      AUTH_SECRET: ${AUTH_SECRET:-dev-only-auth-secret-change-me-please}
+      AUTH_KEYCLOAK_ID: atlas-web
+      AUTH_KEYCLOAK_SECRET: atlas-web-dev-secret-change-me
+      AUTH_KEYCLOAK_ISSUER: http://localhost:8080/realms/atlas
+      NEXT_PUBLIC_AUTH_PROVIDER: keycloak
       NEXT_PUBLIC_DEV_AUTH: "false"
       NEXT_PUBLIC_DEV_TENANT_ID: "11111111-1111-1111-1111-111111111111"
       NEXT_PUBLIC_DEV_USER_ID: "dev-admin"
@@ -186,6 +218,8 @@ services:
       - web_next:/app/.next
     depends_on:
       backend:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
     command: sh -c "npm install --include=optional && npm run dev -- --hostname 0.0.0.0"
     healthcheck:
@@ -204,5 +238,6 @@ volumes:
   postgres_data:
   document_uploads:
   minio_data:
+  keycloak_data:
   web_node_modules:
   web_next:

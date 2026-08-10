@@ -39,7 +39,7 @@ export function PlatformTenantsPanel({
   const [audit, setAudit] = useState(initialAudit);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
-  const [clerkOrgId, setClerkOrgId] = useState("");
+  const [authOrgId, setAuthOrgId] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,21 +99,21 @@ export function PlatformTenantsPanel({
   }, [getAccessToken, sourceTenantId]);
 
   async function createTenant() {
-    if (!name.trim() || !clerkOrgId.trim()) return;
+    if (!name.trim() || !authOrgId.trim()) return;
     setCreating(true);
     setError(null);
     try {
       const created = await createPlatformTenant(await getAccessToken(), {
         name: name.trim(),
         slug: slugifyName(slug || name),
-        clerkOrgId: clerkOrgId.trim(),
+        authOrgId: authOrgId.trim(),
       });
       setTenants((current) =>
         [...current, created].sort((a, b) => a.name.localeCompare(b.name)),
       );
       setName("");
       setSlug("");
-      setClerkOrgId("");
+      setAuthOrgId("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Tenant creation failed");
     } finally {
@@ -253,16 +253,16 @@ export function PlatformTenantsPanel({
                 </Label>
                 <Input
                   id="org-id"
-                  value={clerkOrgId}
+                  value={authOrgId}
                   placeholder="org_..."
-                  onChange={(event) => setClerkOrgId(event.target.value)}
+                  onChange={(event) => setAuthOrgId(event.target.value)}
                 />
               </div>
             </div>
             <Button
               className="mt-3 w-full"
               variant="accent"
-              disabled={creating || !name.trim() || !clerkOrgId.trim()}
+              disabled={creating || !name.trim() || !authOrgId.trim()}
               onClick={createTenant}
             >
               {creating ? "Provisioning…" : "Provision tenant"}
@@ -307,7 +307,7 @@ export function PlatformTenantsPanel({
                   </p>
                 </div>
                 <p className="mono-cell truncate text-slate-muted">
-                  {tenant.clerkOrgId}
+                  {tenant.authOrgId}
                 </p>
                 <Badge dot tone={tenant.isActive ? "success" : "danger"}>
                   {tenant.isActive ? "Active" : "Suspended"}

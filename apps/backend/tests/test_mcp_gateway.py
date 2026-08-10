@@ -35,7 +35,7 @@ async def test_service_account_without_mcp_access_cannot_reach_route(monkeypatch
         tenant_id=uuid.uuid4(),
         user_id="sa:test",
         role=Role.end_user,
-        clerk_org_id="org",
+        auth_org_id="org",
         scopes=("mcp:run",),
         principal_type="service_account",
     )
@@ -86,7 +86,7 @@ async def test_mcp_resources_and_settings_are_tenant_isolated(
             "tenant_id": tenant_a.tenant_id,
             "user_id": tenant_a.user_id,
             "role": Role.end_user,
-            "clerk_org_id": tenant_a.clerk_org_id,
+            "auth_org_id": tenant_a.auth_org_id,
             "scopes": ("mcp:access", "mcp:read"),
             "principal_type": "service_account",
         }
@@ -96,7 +96,7 @@ async def test_mcp_resources_and_settings_are_tenant_isolated(
             "tenant_id": tenant_b.tenant_id,
             "user_id": tenant_b.user_id,
             "role": Role.end_user,
-            "clerk_org_id": tenant_b.clerk_org_id,
+            "auth_org_id": tenant_b.auth_org_id,
             "scopes": ("mcp:access", "mcp:read", "mcp:run"),
             "principal_type": "service_account",
         }

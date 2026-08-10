@@ -1,17 +1,11 @@
 "use client";
 
-import {
-  SignedIn,
-  SignedOut,
-  SignInButton,
-  SignUpButton,
-  UserButton,
-  useAuth,
-} from "@clerk/nextjs";
 import Link from "next/link";
+import { useSession } from "next-auth/react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
 
+import { AuthControls } from "@/components/auth/AuthControls";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import {
@@ -431,7 +425,8 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
-  const { orgId } = useAuth();
+  const { data: session } = useSession();
+  const orgId = (session as { orgId?: string } | null)?.orgId;
   const { theme, changeTheme } = useSurfaceTheme("admin");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
@@ -457,7 +452,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Switching Clerk orgs must drop Platform → Open workspace override so
+  // Switching active org must drop Platform → Open workspace override so
   // requests use the home tenant for the active org (avoids stale 403s).
   useEffect(() => {
     if (lastOrgIdRef.current === undefined) {
@@ -471,7 +466,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     }
   }, [orgId]);
 
-  // Re-check after Clerk is ready. Depend only on auth readiness — not on
+  // Re-check after auth is ready. Depend only on auth readiness — not on
   // getAccessToken identity — to avoid effect thrash / click lag.
   useEffect(() => {
     if (!isLoaded) return;
@@ -584,10 +579,6 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     window.location.assign("/admin/platform/tenants");
   }
 
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const clerkReady =
-    !!publishableKey && !publishableKey.includes("replace_me");
-
   return (
     <div
       data-theme={theme === "dark" ? "dark" : undefined}
@@ -630,32 +621,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             ) : null}
             <ThemeToggle theme={theme} onChange={changeTheme} />
             <NotificationBell />
-            {clerkReady ? (
-              <>
-                <SignedOut>
-                  <SignInButton mode="modal">
-                    <button className="rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:text-ink">
-                      Sign in
-                    </button>
-                  </SignInButton>
-                  <SignUpButton mode="modal">
-                    <button className="rounded-md bg-ink px-2.5 py-1.5 text-xs font-medium text-canvas">
-                      Sign up
-                    </button>
-                  </SignUpButton>
-                </SignedOut>
-                <SignedIn>
-                  <UserButton />
-                </SignedIn>
-              </>
-            ) : (
-              <Link
-                href="/sign-in"
-                className="rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:text-ink"
-              >
-                Dev account
-              </Link>
-            )}
+            <AuthControls />
           </div>
         </div>
       </header>

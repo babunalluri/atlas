@@ -36,7 +36,7 @@ def platform_admin(tenant_a) -> TenantContext:
         tenant_id=tenant_a.tenant_id,
         user_id="platform-owner",
         role=Role.platform_admin,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
 
 
@@ -144,7 +144,7 @@ async def test_import_copies_graph_without_credentials(
         tenant_id=tenant_b.tenant_id,
         user_id=platform_admin.user_id,
         role=Role.platform_admin,
-        clerk_org_id=tenant_b.clerk_org_id,
+        auth_org_id=tenant_b.auth_org_id,
     )
     result = await materialize_import_bundle(session, dest_context, bundle)
 

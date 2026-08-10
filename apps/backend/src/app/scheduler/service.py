@@ -424,15 +424,15 @@ class SchedulerWorker:
         async with SessionFactory() as session:
             tenants = (
                 await session.execute(
-                    select(Tenant.id, Tenant.clerk_org_id).where(Tenant.is_active.is_(True))
+                    select(Tenant.id, Tenant.auth_org_id).where(Tenant.is_active.is_(True))
                 )
             ).all()
-        for tenant_id, clerk_org_id in tenants:
+        for tenant_id, auth_org_id in tenants:
             context = TenantContext(
                 tenant_id=tenant_id,
                 user_id="atlas-scheduler",
                 role=Role.tenant_admin,
-                clerk_org_id=clerk_org_id,
+                auth_org_id=auth_org_id,
                 principal_type="scheduler",
             )
             async with SessionFactory() as session, session.begin():

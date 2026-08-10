@@ -86,13 +86,11 @@ disabled; Atlas owns schedules, approvals, sessions, and channel interfaces.
 
 ## Staff user invites
 
-- Atlas tenant ↔ identity organization (`tenants.clerk_org_id`)
-- Atlas user ↔ identity user: create/invite under `/admin/users` provisions both
-  - Existing account → added to the org and stored with real account id
-  - New email → create account + org membership (real id); email invite for first sign-in
-  - Fallback → org invitation + `invite pending` until first sign-in bind
+- Atlas tenant ↔ identity organization (`tenants.auth_org_id`)
+- Atlas user ↔ identity user: create/invite under `/admin/users` provisions a
+  **pending** membership until first sign-in binds by email
 - Role changes sync org role (`org:admin` / `org:member`); delete removes org membership
-- Requires `CLERK_SECRET_KEY`
+- Keycloak (or your IdP) handles user creation and org group assignment
 
 ## Isolation trade-offs
 

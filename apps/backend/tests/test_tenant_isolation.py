@@ -23,8 +23,8 @@ async def session_factory() -> async_sessionmaker[AsyncSession]:
 async def test_repository_never_returns_another_tenants_agents(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_a = Tenant(clerk_org_id="org_a", slug="a", name="A")
-    tenant_b = Tenant(clerk_org_id="org_b", slug="b", name="B")
+    tenant_a = Tenant(auth_org_id="org_a", slug="a", name="A")
+    tenant_b = Tenant(auth_org_id="org_b", slug="b", name="B")
     async with session_factory() as setup, setup.begin():
         setup.add_all([tenant_a, tenant_b])
         await setup.flush()

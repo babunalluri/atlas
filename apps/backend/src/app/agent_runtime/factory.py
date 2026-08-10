@@ -799,7 +799,7 @@ async def build_tenant_agent_from_request(ctx: Any, session: AsyncSession) -> An
     # Never trust tenant_id from client input — only from middleware context / claims.
     context = current_tenant()
     claim_org = claims.get("org_id")
-    if claim_org and claim_org != context.clerk_org_id and context.clerk_org_id != "dev":
+    if claim_org and claim_org != context.auth_org_id and context.auth_org_id != "dev":
         raise PermissionError("Tenant claim mismatch")
 
     version_raw = client_input.get("version_id") or client_input.get("agent_version_id")

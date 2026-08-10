@@ -61,13 +61,14 @@ def test_response_raise_for_status(requests_shim):
 def test_get_routes_through_http_proxy(requests_shim):
     captured: dict = {}
 
-    def fake_proxy(method, url, *, params=None, json_body=None, headers=None):
+    def fake_proxy(method, url, *, params=None, json_body=None, form_body=None, headers=None):
         captured.update(
             {
                 "method": method,
                 "url": url,
                 "params": params,
                 "json_body": json_body,
+                "form_body": form_body,
                 "headers": headers,
             }
         )
@@ -93,8 +94,10 @@ def test_get_routes_through_http_proxy(requests_shim):
 def test_post_json_and_dict_data(requests_shim):
     calls: list[dict] = []
 
-    def fake_proxy(method, url, *, params=None, json_body=None, headers=None):
-        calls.append({"method": method, "url": url, "json_body": json_body})
+    def fake_proxy(method, url, *, params=None, json_body=None, form_body=None, headers=None):
+        calls.append(
+            {"method": method, "url": url, "json_body": json_body, "form_body": form_body}
+        )
         return {"ok": True, "status_code": 201, "body": {"created": True}}
 
     requests_shim.http_proxy = fake_proxy
@@ -105,3 +108,34 @@ def test_post_json_and_dict_data(requests_shim):
     assert r2.json() == {"created": True}
     assert calls[0]["json_body"] == {"name": "n"}
     assert calls[1]["json_body"] == {"name": "n"}
+    assert calls[0]["form_body"] is None
+    assert calls[1]["form_body"] is None
+
+
+def test_post_form_urlencoded_dict_data(requests_shim):
+    calls: list[dict] = []
+
+    def fake_proxy(method, url, *, params=None, json_body=None, form_body=None, headers=None):
+        calls.append(
+            {
+                "method": method,
+                "json_body": json_body,
+                "form_body": form_body,
+                "headers": headers,
+            }
+        )
+        return {"ok": True, "status_code": 200, "body": {"status": "success"}}
+
+    requests_shim.http_proxy = fake_proxy
+    resp = requests_shim.post(
+        "https://api.kite.trade/orders/regular",
+        data={"tradingsymbol": "INFY", "exchange": "NSE", "quantity": 1},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.ok
+    assert calls[0]["json_body"] is None
+    assert calls[0]["form_body"] == {
+        "tradingsymbol": "INFY",
+        "exchange": "NSE",
+        "quantity": 1,
+    }

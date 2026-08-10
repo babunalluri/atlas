@@ -60,13 +60,13 @@ async def test_send_to_one_user(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id=alice.user_id,
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     bob_ctx = TenantContext(
         tenant_id=tenant_a.tenant_id,
         user_id=bob.user_id,
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     assert len(await UserNotificationRepository(session, alice_ctx).list_for_user(alice.user_id)) == 1
     assert len(await UserNotificationRepository(session, bob_ctx).list_for_user(bob.user_id)) == 0
@@ -102,7 +102,7 @@ async def test_mark_read_and_unread_count(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id=alice.user_id,
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     notes = UserNotificationRepository(session, alice_ctx)
     _, rows = await notes.create_batch(
@@ -144,7 +144,7 @@ async def test_recipient_cannot_read_other_users_notification(session, tenant_a)
         tenant_id=tenant_a.tenant_id,
         user_id=bob.user_id,
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     bob_notes = UserNotificationRepository(session, bob_ctx)
     assert await bob_notes.get_for_user(bob.user_id, rows[0].id) is None

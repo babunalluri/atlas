@@ -25,7 +25,7 @@ async def test_grant_and_debit_user_wallet(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id="user_billing",
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     await billing.provision_tenant_wallets(tenant_a.tenant_id)
     wallet = await billing.provision_user_wallet(tenant_a.tenant_id, user_ctx.user_id)
@@ -54,7 +54,7 @@ async def test_hard_stop_when_no_credits(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id="user_empty",
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     tenant_wallet = await billing.provision_tenant_wallets(tenant_a.tenant_id)
     tenant_wallet.balance_credits = 0
@@ -78,7 +78,7 @@ async def test_require_credits_raises_http_402(session, tenant_a):
         tenant_id=tenant_a.tenant_id,
         user_id="user_http",
         role=Role.end_user,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     tenant_wallet = await billing.provision_tenant_wallets(tenant_a.tenant_id)
     tenant_wallet.balance_credits = 0

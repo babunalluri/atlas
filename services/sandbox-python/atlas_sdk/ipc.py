@@ -35,6 +35,7 @@ def http_proxy(
     *,
     params: dict[str, Any] | None = None,
     json_body: Any = None,
+    form_body: Any = None,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Call host HttpProxy; returns the raw result dict (ok/status_code/body/error)."""
@@ -45,6 +46,7 @@ def http_proxy(
             "url": url,
             "params": params or {},
             "json": json_body,
+            "form": form_body,
             "headers": headers or {},
         },
     )

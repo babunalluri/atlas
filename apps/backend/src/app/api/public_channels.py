@@ -102,7 +102,7 @@ async def _load_binding(
             tenant_id=tenant.id,
             user_id=f"guest:{provider}",
             role=Role.end_user,
-            clerk_org_id=tenant.clerk_org_id,
+            auth_org_id=tenant.auth_org_id,
             principal_type="guest",
         )
         set_tenant_context(context)

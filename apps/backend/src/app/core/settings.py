@@ -46,21 +46,43 @@ class Settings(BaseSettings):
         default=["http://localhost:3000"],
         validation_alias=AliasChoices("CORS_ORIGINS", "BACKEND_CORS_ORIGINS"),
     )
-    clerk_issuer: str = Field(
-        default="", validation_alias=AliasChoices("CLERK_ISSUER", "BACKEND_CLERK_ISSUER")
+    auth_issuer: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "AUTH_ISSUER",
+            "BACKEND_AUTH_ISSUER",
+        ),
+        description="OIDC issuer (Keycloak realm URL).",
     )
-    clerk_audience: str | None = Field(
-        default="agent-saas",
-        validation_alias=AliasChoices("CLERK_AUDIENCE", "BACKEND_CLERK_AUDIENCE"),
+    auth_audience: str | None = Field(
+        default="atlas-web",
+        validation_alias=AliasChoices(
+            "AUTH_AUDIENCE",
+            "BACKEND_AUTH_AUDIENCE",
+        ),
     )
-    clerk_jwks_url: str | None = Field(
+    auth_jwks_url: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("CLERK_JWKS_URL", "BACKEND_CLERK_JWKS_URL"),
+        validation_alias=AliasChoices(
+            "AUTH_JWKS_URL",
+            "BACKEND_AUTH_JWKS_URL",
+        ),
     )
-    clerk_secret_key: SecretStr = Field(
+    auth_admin_secret: SecretStr = Field(
         default=SecretStr(""),
-        validation_alias=AliasChoices("CLERK_SECRET_KEY", "BACKEND_CLERK_SECRET_KEY"),
-        description="Backend API secret used to invite users into the tenant organization.",
+        validation_alias=AliasChoices(
+            "AUTH_ADMIN_SECRET",
+            "BACKEND_AUTH_ADMIN_SECRET",
+        ),
+        description=(
+            "Optional IdP admin API secret. Unused for local pending invites; "
+            "reserved for a future Keycloak Admin client."
+        ),
+    )
+    auth_provider: str = Field(
+        default="oidc",
+        validation_alias=AliasChoices("AUTH_PROVIDER", "BACKEND_AUTH_PROVIDER"),
+        description="oidc (Keycloak/Zitadel/…). JWT verification uses JWKS.",
     )
     encryption_key: SecretStr = Field(
         default=SecretStr(""),
@@ -373,11 +395,11 @@ class Settings(BaseSettings):
 
     @property
     def effective_jwks_url(self) -> str:
-        if self.clerk_jwks_url:
-            return self.clerk_jwks_url
-        if not self.clerk_issuer:
+        if self.auth_jwks_url:
+            return self.auth_jwks_url
+        if not self.auth_issuer:
             return ""
-        return f"{self.clerk_issuer.rstrip('/')}/.well-known/jwks.json"
+        return f"{self.auth_issuer.rstrip('/')}/.well-known/jwks.json"
 
     @property
     def is_development(self) -> bool:

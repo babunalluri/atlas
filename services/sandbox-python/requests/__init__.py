@@ -108,23 +108,33 @@ def _apply_auth(headers: dict[str, str], auth: Any) -> None:
     raise TypeError("auth must be a (username, password) tuple")
 
 
-def _normalize_json_body(*, json_body: Any, data: Any) -> Any:
+def _split_body(
+    *, json_body: Any, data: Any, headers: dict[str, str]
+) -> tuple[Any, Any]:
+    """Return (json_body, form_body). Form when Content-Type is urlencoded + dict data."""
     if json_body is not None:
-        return json_body
+        return json_body, None
     if data is None:
-        return None
+        return None, None
+    ctype = ""
+    for key, value in headers.items():
+        if key.lower() == "content-type":
+            ctype = value.lower()
+            break
+    if isinstance(data, dict) and "application/x-www-form-urlencoded" in ctype:
+        return None, data
     if isinstance(data, dict):
-        # Host proxy currently accepts JSON bodies only; dict data → JSON.
-        return data
+        # Default: dict data → JSON (existing sandbox behaviour).
+        return data, None
     if isinstance(data, (bytes, bytearray)):
         data = data.decode("utf-8", errors="replace")
     if isinstance(data, str):
         try:
-            return json.loads(data)
+            return json.loads(data), None
         except json.JSONDecodeError as exc:
             raise NotImplementedError(
-                "requests shim only supports json= or dict/JSON-string data= "
-                "(form/raw bodies are not proxied)"
+                "requests shim only supports json=, dict data=, or "
+                "form-urlencoded dict data= (raw bodies are not proxied)"
             ) from exc
     raise TypeError("data must be a dict, JSON string, or bytes")
 
@@ -143,7 +153,7 @@ def request(
 ) -> Response:
     hdrs = {str(k): str(v) for k, v in dict(headers or {}).items()}
     _apply_auth(hdrs, auth)
-    json_body = _normalize_json_body(json_body=json, data=data)
+    json_body, form_body = _split_body(json_body=json, data=data, headers=hdrs)
 
     # Append params to URL for display; host also applies params from IPC.
     display_url = url
@@ -156,6 +166,7 @@ def request(
         url,
         params=params,
         json_body=json_body,
+        form_body=form_body,
         headers=hdrs,
     )
     status = int(result.get("status_code") or (200 if result.get("ok") else 502))

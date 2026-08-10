@@ -36,7 +36,7 @@ async def _public_tenant_context(tenant_slug: str):  # type: ignore[no-untyped-d
         tenant_id=tenant.id,
         user_id="public-surface",
         role=Role.end_user,
-        clerk_org_id=tenant.clerk_org_id,
+        auth_org_id=tenant.auth_org_id,
     )
     return session, tenant, context
 

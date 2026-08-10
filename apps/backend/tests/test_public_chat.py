@@ -33,14 +33,14 @@ async def public_db(monkeypatch):
 
     tenant_a = Tenant(
         id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
-        clerk_org_id="org_demo_acme",
+        auth_org_id="org_demo_acme",
         slug="acme",
         name="Acme Corp",
         branding={"primaryColor": "#0f766e"},
     )
     tenant_b = Tenant(
         id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
-        clerk_org_id="org_demo_globex",
+        auth_org_id="org_demo_globex",
         slug="globex",
         name="Globex Inc",
         branding={},
@@ -66,13 +66,13 @@ async def public_db(monkeypatch):
         tenant_id=tenant_a.id,
         user_id="user-a",
         role=Role.tenant_admin,
-        clerk_org_id=tenant_a.clerk_org_id,
+        auth_org_id=tenant_a.auth_org_id,
     )
     ctx_b = TenantContext(
         tenant_id=tenant_b.id,
         user_id="user-b",
         role=Role.tenant_admin,
-        clerk_org_id=tenant_b.clerk_org_id,
+        auth_org_id=tenant_b.auth_org_id,
     )
     yield {"factory": factory, "tenant_a": ctx_a, "tenant_b": ctx_b}
     await eng.dispose()

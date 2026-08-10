@@ -45,7 +45,7 @@ PlatformSession = Annotated[AsyncSession, Depends(platform_session)]
 class TenantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
-    clerk_org_id: str = Field(min_length=1, max_length=255)
+    auth_org_id: str = Field(min_length=1, max_length=255)
     branding: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -59,7 +59,7 @@ class TenantOut(BaseModel):
     id: uuid.UUID
     name: str
     slug: str
-    clerk_org_id: str
+    auth_org_id: str
     branding: dict[str, Any]
     is_active: bool
     created_at: datetime
@@ -117,7 +117,7 @@ def _scoped_context(actor: TenantContext, tenant: Tenant) -> TenantContext:
         tenant_id=tenant.id,
         user_id=actor.user_id,
         role=Role.platform_admin,
-        clerk_org_id=tenant.clerk_org_id,
+        auth_org_id=tenant.auth_org_id,
     )
 
 
@@ -173,7 +173,7 @@ async def create_tenant(
         id=new_id(),
         name=payload.name.strip(),
         slug=validate_slug(payload.slug),
-        clerk_org_id=payload.clerk_org_id.strip(),
+        auth_org_id=payload.auth_org_id.strip(),
         branding=payload.branding,
         is_active=True,
     )
@@ -183,14 +183,14 @@ async def create_tenant(
     except IntegrityError as exc:
         raise HTTPException(
             status_code=409,
-            detail="A tenant with this slug or Clerk organization already exists",
+            detail="A tenant with this slug or organization already exists",
         ) from exc
     await audit(
         session,
         context,
         "tenant.create",
         tenant.id,
-        {"slug": tenant.slug, "clerk_org_id": tenant.clerk_org_id},
+        {"slug": tenant.slug, "auth_org_id": tenant.auth_org_id},
     )
     from sqlalchemy import text
 
