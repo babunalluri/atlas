@@ -2,8 +2,6 @@ import type { Metadata } from "next";
 import { SessionProvider } from "next-auth/react";
 import { IBM_Plex_Mono, IBM_Plex_Sans, Syne } from "next/font/google";
 
-import { auth } from "@/auth";
-
 import "./globals.css";
 
 const syne = Syne({
@@ -31,23 +29,21 @@ export const metadata: Metadata = {
   description: "Multi-tenant agent configuration and branded customer chat",
 };
 
-export default async function RootLayout({
+/**
+ * Do not call `auth()` here — that would force every public/embed route dynamic.
+ * SessionProvider fetches the session on the client; middleware still protects admin.
+ */
+export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const session = await auth();
-
   return (
     <html lang="en">
       <body
         className={`${syne.variable} ${plexSans.variable} ${plexMono.variable} font-sans`}
       >
-        <SessionProvider
-          session={session}
-          refetchInterval={4 * 60}
-          refetchOnWindowFocus
-        >
+        <SessionProvider refetchInterval={4 * 60} refetchOnWindowFocus>
           {children}
         </SessionProvider>
       </body>

@@ -12,7 +12,6 @@ import { Input, Label, Select } from "@/components/ui/Field";
 import { SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createTenantUser,
-  createTenantUserDevSignInLink,
   deleteTenantUser,
   syncTenantUserIdentity,
   updateTenantUser,
@@ -64,14 +63,15 @@ export function UserEditor({
           teamIds: [],
         },
   );
-  const [busy, setBusy] = useState<
-    "save" | "delete" | "sync" | "signin" | null
-  >(null);
+  const [busy, setBusy] = useState<"save" | "delete" | "sync" | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const needsIdentitySync =
     mode === "edit" &&
     Boolean(initial?.email) &&
-    (!form.userId || !form.userId.startsWith("user_"));
+    (Boolean(initial?.invitePending) ||
+      !form.userId ||
+      form.userId.startsWith("pending:") ||
+      form.userId.startsWith("invite:"));
 
   const publishedWorkflows = useMemo(
     () => workflows.filter((workflow) => workflow.status === "published"),
@@ -169,30 +169,6 @@ export function UserEditor({
     }
   }
 
-  async function openDevSignIn() {
-    if (!initial || mode !== "edit") return;
-    setBusy("signin");
-    setBanner(null);
-    try {
-      const updated = await createTenantUserDevSignInLink(
-        await getAccessToken(),
-        initial.id,
-      );
-      if (!updated.signInUrl) {
-        setBanner("Could not create a development sign-in link");
-        return;
-      }
-      window.open(updated.signInUrl, "_blank", "noopener,noreferrer");
-      setBanner("Opened one-click sign-in (skips email code)");
-    } catch (reason) {
-      setBanner(
-        reason instanceof Error ? reason.message : "Sign-in link failed",
-      );
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function syncIdentity() {
     if (!initial || mode !== "edit") return;
     setBusy("sync");
@@ -214,10 +190,10 @@ export function UserEditor({
       });
       setBanner(
         updated.temporaryPassword
-          ? `Synced. Dev password: ${updated.temporaryPassword} (Use another method → Password)`
-          : updated.userId.startsWith("user_")
-            ? "Synced to sign-in provider"
-            : "Invite pending — check email",
+          ? `Synced. Temporary password: ${updated.temporaryPassword}`
+          : updated.invitePending || updated.userId.startsWith("pending:")
+            ? "Pending membership ready — create/link the user in Keycloak, then have them sign in"
+            : "Identity sync recorded",
       );
       router.refresh();
     } catch (reason) {
@@ -286,16 +262,6 @@ export function UserEditor({
                 Grant credits
               </Link>
             </>
-          ) : null}
-          {mode === "edit" && form.userId?.startsWith("user_") ? (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void openDevSignIn()}
-              disabled={busy !== null}
-            >
-              {busy === "signin" ? "Opening…" : "Dev sign-in (skip OTP)"}
-            </Button>
           ) : null}
           {mode === "edit" && needsIdentitySync ? (
             <Button

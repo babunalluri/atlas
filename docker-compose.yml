@@ -69,7 +69,12 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HTTP_PORT: "8080"
+      # Pin public hostname so token `iss` stays browser-reachable (localhost),
+      # even when the web container talks to Keycloak over the Docker network.
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8080"
       KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HEALTH_ENABLED: "true"
     ports:
       - "8080:8080"
@@ -203,7 +208,10 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:-dev-only-auth-secret-change-me-please}
       AUTH_KEYCLOAK_ID: atlas-web
       AUTH_KEYCLOAK_SECRET: atlas-web-dev-secret-change-me
+      # Browser-facing issuer (authorization redirect + token `iss`).
       AUTH_KEYCLOAK_ISSUER: http://localhost:8080/realms/atlas
+      # In-network issuer for Auth.js token/userinfo/jwks inside the web container.
+      AUTH_KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/atlas
       NEXT_PUBLIC_AUTH_PROVIDER: keycloak
       NEXT_PUBLIC_DEV_AUTH: "false"
       NEXT_PUBLIC_DEV_TENANT_ID: "11111111-1111-1111-1111-111111111111"

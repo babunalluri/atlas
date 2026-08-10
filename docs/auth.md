@@ -56,24 +56,47 @@ AUTH_SECRET=<random 32+ chars>
 AUTH_KEYCLOAK_ID=atlas-web
 AUTH_KEYCLOAK_SECRET=<from Keycloak client>
 AUTH_KEYCLOAK_ISSUER=http://localhost:8080/realms/atlas
+# Docker Compose web container also sets:
+# AUTH_KEYCLOAK_INTERNAL_ISSUER=http://keycloak:8080/realms/atlas
 NEXT_PUBLIC_AUTH_PROVIDER=keycloak
 ```
 
 Set `AUTH_DISABLED=false` and `NEXT_PUBLIC_DEV_AUTH=false` for real OIDC locally.
+
+**Production fail-closed:** the web app refuses committed placeholder values for
+`AUTH_SECRET` / `AUTH_KEYCLOAK_SECRET` when `NODE_ENV=production`. Missing or
+placeholder config returns **503** on non-public routes instead of minting
+sessions with a known secret.
+
+**Compose split-horizon:** browsers use `localhost:8080` (authorization + `iss`);
+the `web` service talks to Keycloak via `AUTH_KEYCLOAK_INTERNAL_ISSUER`
+(`http://keycloak:8080/...`) for token exchange. `KC_HOSTNAME=localhost` keeps
+token `iss` aligned with `AUTH_ISSUER`.
 
 Access tokens are short-lived; Auth.js refreshes them via the Keycloak refresh
 token before calling the Atlas API. Access tokens must include `org_id`,
 `org_role`, `platform_admin` (optional), `email` (for invite binding), and
 audience `atlas-web` (realm client mappers in `infra/keycloak/atlas-realm.json`).
 
+`org_id` / `org_role` mappers aggregate **user and group** attributes. Add staff
+to the org group matching `tenants.auth_org_id`, and set `org_role` on the user
+(or on the group). Unmanaged attributes are enabled so the Admin Console can
+edit `org_id` / `org_role` / `platform_admin`.
+
+Sign-out uses Keycloak RP-initiated logout (`end_session_endpoint`) so the SSO
+session ends — not only the Auth.js cookie.
+
 If you already imported the realm before mapper updates, either delete the
 `keycloak_data` volume and re-import, or add the mappers manually in the Admin UI.
 
 ## Invites
 
-1. Create the user (or send Keycloak execute-actions email) in Keycloak Admin.
-2. Put them in the org group matching `tenants.auth_org_id`.
-3. Atlas `/admin/users` can still create a **pending** membership row bound on
+1. Create the user (or enable registration) in Keycloak Admin.
+2. Add them to the org group matching `tenants.auth_org_id` (provides `org_id`
+   via aggregated group attributes).
+3. Set user attribute `org_role` (`org:admin` or `org:member`) and optional
+   `platform_admin=true` for platform operators.
+4. Atlas `/admin/users` can still create a **pending** membership row bound on
    first login by email (`pending:…` → real `sub`).
 
 Optional later: Keycloak Admin REST client behind the same `IdentityAdminClient`

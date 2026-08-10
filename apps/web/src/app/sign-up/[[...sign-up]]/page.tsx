@@ -1,7 +1,26 @@
 "use client";
 
+import { Suspense } from "react";
 import { signIn } from "next-auth/react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+
+import { safeAuthCallbackUrl } from "@/lib/auth/callback-url";
+
+function SignUpActions() {
+  const searchParams = useSearchParams();
+  const callbackUrl = safeAuthCallbackUrl(searchParams.get("callbackUrl"));
+
+  return (
+    <button
+      type="button"
+      onClick={() => signIn("keycloak", { callbackUrl, redirect: true })}
+      className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
+    >
+      Register via Keycloak
+    </button>
+  );
+}
 
 export default function SignUpPage() {
   return (
@@ -14,15 +33,19 @@ export default function SignUpPage() {
           attach your user to a workspace organization/group.
         </p>
       </div>
-      <button
-        type="button"
-        onClick={() =>
-          signIn("keycloak", { callbackUrl: "/admin", redirect: true })
+      <Suspense
+        fallback={
+          <button
+            type="button"
+            disabled
+            className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas opacity-70"
+          >
+            Register via Keycloak
+          </button>
         }
-        className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
       >
-        Register via Keycloak
-      </button>
+        <SignUpActions />
+      </Suspense>
       <Link href="/sign-in" className="text-sm text-accent underline">
         Already have an account? Sign in
       </Link>

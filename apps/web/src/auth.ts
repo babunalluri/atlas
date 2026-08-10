@@ -1,19 +1,26 @@
 import NextAuth from "next-auth";
 import Keycloak from "next-auth/providers/keycloak";
 
-const keycloakIssuer =
-  process.env.AUTH_KEYCLOAK_ISSUER || "http://localhost:8080/realms/atlas";
-const keycloakId = process.env.AUTH_KEYCLOAK_ID || "atlas-web";
-const keycloakSecret =
-  process.env.AUTH_KEYCLOAK_SECRET || "atlas-web-dev-secret-change-me";
+import {
+  resolveAuthSecret,
+  resolveKeycloakClientId,
+  resolveKeycloakInternalIssuer,
+  resolveKeycloakIssuer,
+  resolveKeycloakSecret,
+} from "@/lib/auth/staff-auth-config";
+
+const keycloakIssuer = resolveKeycloakIssuer();
+const keycloakInternalIssuer = resolveKeycloakInternalIssuer();
+const keycloakId = resolveKeycloakClientId();
+const keycloakSecret = resolveKeycloakSecret();
 
 type RefreshableToken = {
   accessToken?: string;
   refreshToken?: string;
+  idToken?: string;
   expiresAt?: number;
   orgId?: string;
   orgRole?: string;
-  platformAdmin?: unknown;
   error?: string;
 };
 
@@ -25,7 +32,7 @@ async function refreshAccessToken(
   }
   try {
     const response = await fetch(
-      `${keycloakIssuer}/protocol/openid-connect/token`,
+      `${keycloakInternalIssuer}/protocol/openid-connect/token`,
       {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -40,6 +47,7 @@ async function refreshAccessToken(
     const refreshed = (await response.json()) as {
       access_token?: string;
       refresh_token?: string;
+      id_token?: string;
       expires_in?: number;
       error?: string;
     };
@@ -50,6 +58,7 @@ async function refreshAccessToken(
       ...token,
       accessToken: refreshed.access_token,
       refreshToken: refreshed.refresh_token ?? token.refreshToken,
+      idToken: refreshed.id_token ?? token.idToken,
       expiresAt:
         Math.floor(Date.now() / 1000) + Number(refreshed.expires_in ?? 300),
       error: undefined,
@@ -61,8 +70,10 @@ async function refreshAccessToken(
 
 /**
  * Atlas staff auth via self-hosted Keycloak (OIDC).
- * Access token is forwarded to the Atlas API (same JWKS verify path as before).
- * Refresh keeps API calls working after the short-lived Keycloak access token expires.
+ *
+ * Split-horizon: browser uses the public issuer (authorization redirect + iss);
+ * the Next.js server uses AUTH_KEYCLOAK_INTERNAL_ISSUER for token/userinfo/jwks
+ * when running in Docker Compose.
  */
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
@@ -70,6 +81,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       clientId: keycloakId,
       clientSecret: keycloakSecret,
       issuer: keycloakIssuer,
+      // Avoid discovery returning unreachable localhost endpoints inside Compose.
+      authorization: `${keycloakIssuer}/protocol/openid-connect/auth`,
+      token: `${keycloakInternalIssuer}/protocol/openid-connect/token`,
+      userinfo: `${keycloakInternalIssuer}/protocol/openid-connect/userinfo`,
+      jwks_endpoint: `${keycloakInternalIssuer}/protocol/openid-connect/certs`,
     }),
   ],
   session: { strategy: "jwt" },
@@ -83,6 +99,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (account?.access_token) {
         current.accessToken = account.access_token;
         current.refreshToken = account.refresh_token;
+        current.idToken = account.id_token;
         current.expiresAt = account.expires_at;
         current.error = undefined;
       }
@@ -90,12 +107,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (profile && typeof profile === "object") {
         const p = profile as Record<string, unknown>;
         if (typeof p.org_id === "string") current.orgId = p.org_id;
+        else if (Array.isArray(p.org_id) && typeof p.org_id[0] === "string") {
+          current.orgId = p.org_id[0];
+        }
         if (typeof p.org_role === "string") current.orgRole = p.org_role;
-        if (p.platform_admin != null) current.platformAdmin = p.platform_admin;
+        else if (Array.isArray(p.org_role) && typeof p.org_role[0] === "string") {
+          current.orgRole = p.org_role[0];
+        }
       }
 
       const expiresAt = current.expiresAt ?? 0;
-      // Refresh 60s before expiry so API calls do not race the clock.
       if (current.accessToken && Date.now() < expiresAt * 1000 - 60_000) {
         return current;
       }
@@ -108,15 +129,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       const t = token as RefreshableToken;
       const s = session as typeof session & {
         accessToken?: string;
+        idToken?: string;
         orgId?: string;
         error?: string;
+        endSessionUrl?: string;
       };
       s.accessToken = t.accessToken;
+      s.idToken = t.idToken;
       s.orgId = t.orgId;
       s.error = t.error;
+      s.endSessionUrl = `${keycloakIssuer}/protocol/openid-connect/logout`;
       return s;
     },
   },
   trustHost: true,
-  secret: process.env.AUTH_SECRET || "dev-only-auth-secret-change-me-please",
+  secret: resolveAuthSecret(),
 });

@@ -178,22 +178,6 @@ async def sync_user_identity(
     )
 
 
-@router.post("/{membership_id}/dev-sign-in-link", response_model=TenantUserOut)
-async def create_dev_sign_in_link(
-    membership_id: uuid.UUID,
-    context: AdminContext,
-    session: TenantSession,
-) -> TenantUserOut:
-    """Development-only one-click sign-in (not available with Keycloak local flow)."""
-    settings = get_settings()
-    if not settings.is_development:
-        raise HTTPException(status_code=404, detail="Not found")
-    raise HTTPException(
-        status_code=501,
-        detail="Dev sign-in links are not used with Keycloak; sign in at /sign-in",
-    )
-
-
 @router.get("/{membership_id}", response_model=TenantUserOut)
 async def get_user(
     membership_id: uuid.UUID,

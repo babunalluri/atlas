@@ -91,18 +91,34 @@ def _role(claims: AuthClaims) -> Role:
     return Role.end_user
 
 
+def _first_str_claim(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    return None
+
+
 def _flatten_oidc_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize org claims from Keycloak mappers or nested `o` shapes."""
     org_from_o: str | None = None
     org_role_from_o: str | None = None
     if "o" in payload and isinstance(payload["o"], dict):
-        org_from_o = payload["o"].get("id") or payload["o"].get("org_id")
-        org_role_from_o = payload["o"].get("rol") or payload["o"].get("role")
-    next_payload = payload
-    if not payload.get("org_id") and org_from_o:
-        next_payload = {**next_payload, "org_id": org_from_o}
-    if not payload.get("org_role") and org_role_from_o:
-        next_payload = {**next_payload, "org_role": org_role_from_o}
+        org_from_o = _first_str_claim(
+            payload["o"].get("id") or payload["o"].get("org_id")
+        )
+        org_role_from_o = _first_str_claim(
+            payload["o"].get("rol") or payload["o"].get("role")
+        )
+    next_payload = dict(payload)
+    org_id = _first_str_claim(payload.get("org_id")) or org_from_o
+    org_role = _first_str_claim(payload.get("org_role")) or org_role_from_o
+    if org_id:
+        next_payload["org_id"] = org_id
+    if org_role:
+        next_payload["org_role"] = org_role
     return next_payload
 
 

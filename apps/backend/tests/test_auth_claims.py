@@ -22,6 +22,14 @@ def test_flatten_nested_org_claims():
     assert flat["org_role"] == "admin"
 
 
+def test_flatten_multivalued_org_claims():
+    flat = _flatten_oidc_payload(
+        {"sub": "u1", "org_id": ["org_demo_acme", "org_other"], "org_role": ["org:admin"]}
+    )
+    assert flat["org_id"] == "org_demo_acme"
+    assert flat["org_role"] == "org:admin"
+
+
 def test_email_from_preferred_username():
     assert (
         _email_from_payload({"preferred_username": "ops@acme.atlas.local"})

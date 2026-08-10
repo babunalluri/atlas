@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { signIn, signOut, useSession } from "next-auth/react";
+import { signIn, useSession } from "next-auth/react";
+
+import { signOutFederated } from "@/lib/auth/federated-signout";
 
 /**
  * Compact account control for hosted chat.
@@ -24,7 +26,9 @@ export function ChatAccountBar({
       <button
         type="button"
         onClick={() =>
-          signIn("keycloak", { callbackUrl: signInRedirect || `/t/${tenantSlug}/chat` })
+          signIn("keycloak", {
+            callbackUrl: signInRedirect || `/t/${tenantSlug}/chat`,
+          })
         }
         className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10"
       >
@@ -36,7 +40,7 @@ export function ChatAccountBar({
   return (
     <button
       type="button"
-      onClick={() => signOut({ callbackUrl: `/t/${tenantSlug}/chat` })}
+      onClick={() => void signOutFederated(`/t/${tenantSlug}/chat`)}
       className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10"
       title={session.user?.email || "Signed in"}
     >

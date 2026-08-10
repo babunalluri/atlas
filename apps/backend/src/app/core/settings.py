@@ -399,7 +399,11 @@ class Settings(BaseSettings):
             return self.auth_jwks_url
         if not self.auth_issuer:
             return ""
-        return f"{self.auth_issuer.rstrip('/')}/.well-known/jwks.json"
+        issuer = self.auth_issuer.rstrip("/")
+        # Keycloak (and compatible realm IdPs) serve JWKS at the OIDC certs path.
+        if "/realms/" in issuer:
+            return f"{issuer}/protocol/openid-connect/certs"
+        return f"{issuer}/.well-known/jwks.json"
 
     @property
     def is_development(self) -> bool:

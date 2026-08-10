@@ -1136,21 +1136,6 @@ export async function updateTenantUser(
   );
 }
 
-export async function createTenantUserDevSignInLink(
-  accessToken: string,
-  membershipId: string,
-): Promise<TenantUser> {
-  return mapTenantUser(
-    await apiFetch<BackendTenantUser>(
-      `/admin/users/${membershipId}/dev-sign-in-link`,
-      {
-        accessToken,
-        method: "POST",
-      },
-    ),
-  );
-}
-
 export async function syncTenantUserIdentity(
   accessToken: string,
   membershipId: string,

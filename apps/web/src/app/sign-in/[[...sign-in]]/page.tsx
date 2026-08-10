@@ -1,7 +1,26 @@
 "use client";
 
+import { Suspense } from "react";
 import { signIn } from "next-auth/react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+
+import { safeAuthCallbackUrl } from "@/lib/auth/callback-url";
+
+function SignInActions() {
+  const searchParams = useSearchParams();
+  const callbackUrl = safeAuthCallbackUrl(searchParams.get("callbackUrl"));
+
+  return (
+    <button
+      type="button"
+      onClick={() => signIn("keycloak", { callbackUrl })}
+      className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
+    >
+      Continue with Keycloak
+    </button>
+  );
+}
 
 export default function SignInPage() {
   return (
@@ -14,13 +33,19 @@ export default function SignInPage() {
           subscription required.
         </p>
       </div>
-      <button
-        type="button"
-        onClick={() => signIn("keycloak", { callbackUrl: "/admin" })}
-        className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
+      <Suspense
+        fallback={
+          <button
+            type="button"
+            disabled
+            className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas opacity-70"
+          >
+            Continue with Keycloak
+          </button>
+        }
       >
-        Continue with Keycloak
-      </button>
+        <SignInActions />
+      </Suspense>
       <p className="text-xs text-slate-muted">
         Dev users: <code>admin@atlas.local</code> / <code>atlas-admin</code> ·{" "}
         <code>ops@acme.atlas.local</code> / <code>atlas-acme</code>

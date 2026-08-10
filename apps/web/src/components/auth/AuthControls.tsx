@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { signIn, signOut, useSession } from "next-auth/react";
+import { signIn, useSession } from "next-auth/react";
+
+import { signOutFederated } from "@/lib/auth/federated-signout";
 
 export function AuthControls() {
   const { data: session, status } = useSession();
@@ -41,7 +43,7 @@ export function AuthControls() {
       </span>
       <button
         type="button"
-        onClick={() => signOut({ callbackUrl: "/" })}
+        onClick={() => void signOutFederated("/")}
         className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
       >
         Sign out

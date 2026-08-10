@@ -31,8 +31,11 @@ function shortUser(userId: string) {
     if (rest.startsWith("ip:")) return "Guest (anonymous)";
     return `Guest · ${rest.slice(0, 8)}`;
   }
-  if (userId.startsWith("user_") && userId.length > 16) {
-    return `User · ${userId.slice(5, 13)}…`;
+  if (userId.startsWith("pending:") || userId.startsWith("invite:")) {
+    return "Pending invite";
+  }
+  if (userId.length > 16) {
+    return `User · ${userId.slice(0, 8)}…`;
   }
   return userId;
 }
