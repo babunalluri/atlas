@@ -316,6 +316,9 @@ class SchedulerService:
         return run
 
     async def _run_target(self, schedule: Schedule, session_id: str) -> dict[str, Any]:
+        from app.billing.enforcement import record_output_billing, require_credits_for_run
+
+        await require_credits_for_run(self.session, self.context, scheduler=True)
         factory = AgentFactoryService(self.session, self.context)
         message = schedule.message
         if schedule.input_payload:
@@ -350,12 +353,16 @@ class SchedulerService:
         if hasattr(output, "to_dict"):
             value = output.to_dict()
             if isinstance(value, dict):
+                await record_output_billing(self.session, self.context, value)
                 return value
         if hasattr(output, "model_dump"):
             value = output.model_dump(mode="json")
             if isinstance(value, dict):
+                await record_output_billing(self.session, self.context, value)
                 return value
-        return {"content": str(output)}
+        result = {"content": str(output)}
+        await record_output_billing(self.session, self.context, result)
+        return result
 
 
 class SchedulerWorker:

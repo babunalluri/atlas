@@ -192,6 +192,18 @@ async def create_tenant(
         tenant.id,
         {"slug": tenant.slug, "clerk_org_id": tenant.clerk_org_id},
     )
+    from sqlalchemy import text
+
+    from app.billing.service import BillingService
+
+    if session.bind and session.bind.dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+            {"tenant_id": str(tenant.id)},
+        )
+    session.info["tenant_id"] = tenant.id
+    billing = BillingService(session)
+    await billing.provision_tenant_wallets(tenant.id)
     await session.refresh(tenant)
     return tenant_out(tenant)
 
@@ -419,3 +431,134 @@ async def catalog_active_sandbox_packages(
     return [
         PlatformPythonPackageOut.model_validate(row, from_attributes=True) for row in rows
     ]
+
+
+class PlatformPlanUpsertIn(BaseModel):
+    slug: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    description: str = ""
+    monthly_price_cents: int = Field(ge=0, default=0)
+    included_credits_monthly: int = Field(ge=0, default=0)
+    credits_per_1k_input_tokens: int = Field(ge=1, default=10)
+    credits_per_1k_output_tokens: int = Field(ge=1, default=30)
+    credit_pack_credits: int = Field(ge=1, default=1000)
+    credit_pack_price_cents: int = Field(ge=0, default=1000)
+    is_active: bool = True
+
+
+class PlatformWalletOut(BaseModel):
+    tenant_id: uuid.UUID
+    balance_credits: int
+    allowance_remaining: int
+    available_credits: int
+    subscription_status: str
+    plan_id: uuid.UUID | None
+
+
+class PlatformGrantIn(BaseModel):
+    credits: int = Field(ge=1, le=10_000_000)
+    description: str = Field(default="Platform credit grant", max_length=500)
+
+
+@router.get("/billing/plans")
+async def list_platform_billing_plans(
+    context: PlatformContext,
+    session: PlatformSession,
+) -> list[dict[str, Any]]:
+    del context
+    from app.api.billing import _plan_out
+    from app.billing.service import BillingService
+
+    billing = BillingService(session)
+    await billing.ensure_default_platform_plan()
+    plans = await billing.list_plans(scope="platform")
+    return [_plan_out(plan).model_dump() for plan in plans]
+
+
+@router.put("/billing/plans/{slug}")
+async def upsert_platform_billing_plan(
+    slug: str,
+    payload: PlatformPlanUpsertIn,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> dict[str, Any]:
+    from app.api.billing import _plan_out
+    from app.billing.service import BillingService
+
+    billing = BillingService(session)
+    plan = await billing.upsert_plan(
+        {
+            "scope": "platform",
+            "tenant_id": None,
+            "slug": slug,
+            **payload.model_dump(),
+        }
+    )
+    await audit(
+        session,
+        context,
+        "billing.plan.upsert",
+        None,
+        {"slug": slug, "name": plan.name},
+    )
+    return _plan_out(plan).model_dump()
+
+
+@router.get("/billing/tenants/{tenant_id}/wallet", response_model=PlatformWalletOut)
+async def get_tenant_platform_wallet(
+    tenant_id: uuid.UUID,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> PlatformWalletOut:
+    del context, session
+    from app.billing.service import BillingService, wallet_available
+
+    async for tenant_session in _tenant_rls_session(tenant_id):
+        billing = BillingService(tenant_session)
+        wallet = await billing.provision_tenant_wallets(tenant_id)
+        return PlatformWalletOut(
+            tenant_id=tenant_id,
+            balance_credits=wallet.balance_credits,
+            allowance_remaining=wallet.allowance_remaining,
+            available_credits=wallet_available(wallet),
+            subscription_status=wallet.subscription_status,
+            plan_id=wallet.plan_id,
+        )
+    raise HTTPException(status_code=404, detail="Tenant not found")
+
+
+@router.post("/billing/tenants/{tenant_id}/grant", response_model=PlatformWalletOut)
+async def grant_tenant_platform_credits(
+    tenant_id: uuid.UUID,
+    payload: PlatformGrantIn,
+    context: PlatformContext,
+    session: PlatformSession,
+) -> PlatformWalletOut:
+    from app.billing.service import BillingService, wallet_available
+
+    async for tenant_session in _tenant_rls_session(tenant_id):
+        billing = BillingService(tenant_session)
+        wallet = await billing.grant_credits(
+            tenant_id=tenant_id,
+            owner_type="tenant",
+            owner_id=str(tenant_id),
+            credits=payload.credits,
+            created_by=context.user_id,
+            description=payload.description,
+        )
+        await audit(
+            session,
+            context,
+            "billing.tenant.grant",
+            tenant_id,
+            {"credits": payload.credits, "description": payload.description},
+        )
+        return PlatformWalletOut(
+            tenant_id=tenant_id,
+            balance_credits=wallet.balance_credits,
+            allowance_remaining=wallet.allowance_remaining,
+            available_credits=wallet_available(wallet),
+            subscription_status=wallet.subscription_status,
+            plan_id=wallet.plan_id,
+        )
+    raise HTTPException(status_code=404, detail="Tenant not found")

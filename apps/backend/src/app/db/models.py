@@ -1208,3 +1208,86 @@ class PlatformAuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
+
+
+class BillingPlan(Base, TimestampMixin):
+    """Configurable subscription + usage rates (platform → tenant or tenant → user)."""
+
+    __tablename__ = "billing_plans"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    monthly_price_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    included_credits_monthly: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    credits_per_1k_input_tokens: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    credits_per_1k_output_tokens: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    credit_pack_credits: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    credit_pack_price_cents: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    stripe_monthly_price_id: Mapped[str | None] = mapped_column(String(255))
+    stripe_credit_pack_price_id: Mapped[str | None] = mapped_column(String(255))
+    razorpay_monthly_plan_id: Mapped[str | None] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    __table_args__ = (
+        CheckConstraint("scope IN ('platform', 'tenant')", name="ck_billing_plans_scope"),
+        UniqueConstraint("scope", "tenant_id", "slug", name="uq_billing_plan_scope_slug"),
+    )
+
+
+class BillingWallet(Base, TenantScoped, TimestampMixin):
+    __tablename__ = "billing_wallets"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    balance_credits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    allowance_remaining: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("billing_plans.id", ondelete="SET NULL"), nullable=True
+    )
+    subscription_status: Mapped[str] = mapped_column(String(32), default="none", nullable=False)
+    period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255))
+    razorpay_customer_id: Mapped[str | None] = mapped_column(String(255))
+    __table_args__ = (
+        CheckConstraint(
+            "owner_type IN ('tenant', 'user')", name="ck_billing_wallets_owner_type"
+        ),
+        UniqueConstraint(
+            "tenant_id", "owner_type", "owner_id", name="uq_billing_wallet_owner"
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_billing_wallet_tenant_id"),
+    )
+
+
+class BillingLedgerEntry(Base, TenantScoped):
+    __tablename__ = "billing_ledger"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    wallet_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount_credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    reference_type: Mapped[str | None] = mapped_column(String(32))
+    reference_id: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), default="system", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_billing_ledger_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "wallet_id"],
+            ["billing_wallets.tenant_id", "billing_wallets.id"],
+            ondelete="CASCADE",
+            name="fk_billing_ledger_wallet",
+        ),
+        Index("ix_billing_ledger_wallet", "tenant_id", "wallet_id"),
+        Index("ix_billing_ledger_created", "tenant_id", "created_at"),
+    )

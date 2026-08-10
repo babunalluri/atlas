@@ -63,6 +63,7 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/public/t/")
             or path.startswith("/public/webhooks/")
             or path.startswith("/public/email/")
+            or path.startswith("/api/billing/webhooks/")
             or path.startswith("/admin/onboarding")
             or path.startswith("/internal/sandbox/")
         ):
@@ -117,6 +118,7 @@ class TenantAuthMiddleware(BaseHTTPMiddleware):
                 "/admin/users",
                 "/admin/notifications",
                 "/admin/vault",
+                "/admin/billing",
                 "/admin/customers",
                 "/admin/credentials",
                 "/admin/channels",

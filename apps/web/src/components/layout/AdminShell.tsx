@@ -189,6 +189,13 @@ const icons = {
       <path d="M10 19a2 2 0 0 0 4 0" />
     </>,
   ),
+  billing: icon(
+    <>
+      <rect x="3" y="6" width="18" height="14" rx="2" />
+      <path d="M3 10h18" />
+      <path d="M7 15h2" />
+    </>,
+  ),
 };
 
 const navGroups: Array<{
@@ -297,6 +304,12 @@ const navGroups: Array<{
         label: "Notifications",
         hint: "Message one user or everyone",
         icon: icons.notifications,
+      },
+      {
+        href: "/admin/billing",
+        label: "Billing",
+        hint: "Credits, plans, and usage limits",
+        icon: icons.billing,
       },
       {
         href: "/admin/credentials",

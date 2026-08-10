@@ -294,6 +294,42 @@ class Settings(BaseSettings):
         validation_alias="PUBLIC_EMAIL_RUN_WALL_SECONDS",
         description="Wall-clock limit for inbound email → team/workflow runs.",
     )
+    billing_provider: str = Field(
+        default="dummy",
+        validation_alias=AliasChoices("BILLING_PROVIDER", "BACKEND_BILLING_PROVIDER"),
+        description="Billing checkout provider: dummy (instant), razorpay, or stripe.",
+    )
+    billing_currency: str = Field(
+        default="INR",
+        validation_alias=AliasChoices("BILLING_CURRENCY", "BACKEND_BILLING_CURRENCY"),
+        description="ISO currency for Razorpay amounts (INR uses paise).",
+    )
+    razorpay_key_id: str = Field(
+        default="",
+        validation_alias=AliasChoices("RAZORPAY_KEY_ID", "BACKEND_RAZORPAY_KEY_ID"),
+    )
+    razorpay_key_secret: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices(
+            "RAZORPAY_KEY_SECRET", "BACKEND_RAZORPAY_KEY_SECRET"
+        ),
+    )
+    razorpay_webhook_secret: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices(
+            "RAZORPAY_WEBHOOK_SECRET", "BACKEND_RAZORPAY_WEBHOOK_SECRET"
+        ),
+    )
+    stripe_secret_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("STRIPE_SECRET_KEY", "BACKEND_STRIPE_SECRET_KEY"),
+    )
+    stripe_webhook_secret: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices(
+            "STRIPE_WEBHOOK_SECRET", "BACKEND_STRIPE_WEBHOOK_SECRET"
+        ),
+    )
 
     @field_validator("document_bucket", "aws_endpoint_url", "aws_access_key_id", mode="before")
     @classmethod

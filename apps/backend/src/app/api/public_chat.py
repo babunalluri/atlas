@@ -255,6 +255,9 @@ async def run_public_team(
             context = await _with_verified_identity(
                 session, context, session_id=session_id
             )
+            from app.billing.enforcement import require_credits_for_run
+
+            await require_credits_for_run(session, context)
             _attach_identity(team, session, context)
             await session.commit()
 
@@ -291,6 +294,7 @@ async def run_public_team(
                             trace_id=trace_id,
                             external_session_id=session_id,
                             initial_title=message[:255],
+                            preview=False,
                         ),
                     ):
                         yield item
@@ -388,6 +392,9 @@ async def run_public_workflow(
             context = await _with_verified_identity(
                 session, context, session_id=session_id
             )
+            from app.billing.enforcement import require_credits_for_run
+
+            await require_credits_for_run(session, context)
             _attach_identity(workflow, session, context)
             await session.commit()
 
@@ -424,6 +431,7 @@ async def run_public_workflow(
                             trace_id=trace_id,
                             external_session_id=session_id,
                             initial_title=message[:255],
+                            preview=False,
                         ),
                     ):
                         yield item

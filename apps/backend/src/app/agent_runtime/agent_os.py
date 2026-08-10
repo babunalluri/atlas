@@ -49,6 +49,8 @@ from app.api import knowledge as knowledge_api
 from app.api import learnings as learnings_api
 from app.api import mcp as mcp_api
 from app.api import metrics as metrics_api
+from app.api import billing as billing_api
+from app.api import billing_webhooks as billing_webhooks_api
 from app.api import notifications as notifications_api
 from app.api import platform as platform_api
 from app.api import onboarding as onboarding_api
@@ -432,9 +434,13 @@ async def _persist_runtime_event(
     trace_id: uuid.UUID,
     external_session_id: str,
     initial_title: str,
+    preview: bool = False,
+    scheduler: bool = False,
 ) -> dict[str, Any]:
     """Link native run state to the tenant product session and approval queue."""
     from sqlalchemy import text
+
+    from app.billing.enforcement import record_run_billing
 
     async with SessionFactory() as session:
         if session.bind and session.bind.dialect.name == "postgresql":
@@ -488,6 +494,14 @@ async def _persist_runtime_event(
                     )
                     approval_ids.append(str(approval.id))
                 payload["approval_ids"] = approval_ids
+        if event_name == "RunCompleted":
+            await record_run_billing(
+                session,
+                context,
+                payload,
+                preview=preview,
+                scheduler=scheduler,
+            )
         await session.commit()
     return payload
 
@@ -610,6 +624,9 @@ def create_app() -> FastAPI:
     base_app.include_router(users_api.router)
     base_app.include_router(notifications_api.admin_router)
     base_app.include_router(notifications_api.me_router)
+    base_app.include_router(billing_api.admin_router)
+    base_app.include_router(billing_api.me_router)
+    base_app.include_router(billing_webhooks_api.router)
     base_app.include_router(customers_api.router)
 
     @base_app.post("/v1/agents/tenant-agent/runs")
@@ -654,6 +671,9 @@ def create_app() -> FastAPI:
                     {"tenant_id": str(context.tenant_id)},
                 )
             session.info["tenant_id"] = context.tenant_id
+            from app.billing.enforcement import require_credits_for_run
+
+            await require_credits_for_run(session, context, preview=preview)
             factory = AgentFactoryService(session, context)
             session_repo = SessionRepository(session, context)
             try:
@@ -727,6 +747,7 @@ def create_app() -> FastAPI:
                         trace_id=trace_id,
                         external_session_id=session_id,
                         initial_title=message[:255],
+                        preview=preview,
                     ),
                 ):
                     if chunk.startswith(b"data: "):
@@ -760,6 +781,7 @@ def create_app() -> FastAPI:
                             trace_id=trace_id,
                             external_session_id=session_id,
                             initial_title=message[:255],
+                            preview=preview,
                         ),
                     ):
                         yield item
@@ -803,6 +825,9 @@ def create_app() -> FastAPI:
                     {"tenant_id": str(context.tenant_id)},
                 )
             session.info["tenant_id"] = context.tenant_id
+            from app.billing.enforcement import require_credits_for_run
+
+            await require_credits_for_run(session, context, preview=preview)
             repo = TeamRepository(session, context)
             session_repo = SessionRepository(session, context)
             try:
@@ -890,6 +915,7 @@ def create_app() -> FastAPI:
                             trace_id=trace_id,
                             external_session_id=session_id,
                             initial_title=message[:255],
+                            preview=preview,
                         ),
                     ):
                         yield item
@@ -933,6 +959,9 @@ def create_app() -> FastAPI:
                     {"tenant_id": str(context.tenant_id)},
                 )
             session.info["tenant_id"] = context.tenant_id
+            from app.billing.enforcement import require_credits_for_run
+
+            await require_credits_for_run(session, context, preview=preview)
             repo = WorkflowRepository(session, context)
             session_repo = SessionRepository(session, context)
             try:
@@ -1027,6 +1056,7 @@ def create_app() -> FastAPI:
                             trace_id=trace_id,
                             external_session_id=session_id,
                             initial_title=message[:255],
+                            preview=preview,
                         ),
                     ):
                         yield item
@@ -1089,6 +1119,9 @@ def create_app() -> FastAPI:
                     {"tenant_id": str(context.tenant_id)},
                 )
             session.info["tenant_id"] = context.tenant_id
+            from app.billing.enforcement import require_credits_for_run
+
+            await require_credits_for_run(session, context)
             workflows = WorkflowRepository(session, context)
             teams = TeamRepository(session, context)
             session_repo = SessionRepository(session, context)
@@ -1180,6 +1213,7 @@ def create_app() -> FastAPI:
                             trace_id=trace_id,
                             external_session_id=external_session_id,
                             initial_title=message[:255],
+                            preview=False,
                         ),
                     ):
                         yield item

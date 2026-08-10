@@ -557,6 +557,55 @@ export interface NotificationSendResult {
   title: string;
 }
 
+export interface BillingPlan {
+  id: string;
+  scope: "platform" | "tenant";
+  slug: string;
+  name: string;
+  description: string;
+  monthlyPriceCents: number;
+  includedCreditsMonthly: number;
+  creditsPer1kInputTokens: number;
+  creditsPer1kOutputTokens: number;
+  creditPackCredits: number;
+  creditPackPriceCents: number;
+  isActive: boolean;
+}
+
+export interface BillingWallet {
+  id: string;
+  ownerType: "tenant" | "user";
+  ownerId: string;
+  balanceCredits: number;
+  allowanceRemaining: number;
+  availableCredits: number;
+  planId: string | null;
+  subscriptionStatus: string;
+  periodStart: string | null;
+  periodEnd: string | null;
+}
+
+export interface BillingLedgerEntry {
+  id: string;
+  entryType: string;
+  amountCredits: number;
+  balanceAfter: number;
+  description: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface PlatformTenantWallet {
+  tenantId: string;
+  balanceCredits: number;
+  allowanceRemaining: number;
+  availableCredits: number;
+  subscriptionStatus: string;
+  planId: string | null;
+}
+
 /** Verified public customer (OTP / inbound email), not Clerk staff. */
 export interface EndCustomer {
   id: string;

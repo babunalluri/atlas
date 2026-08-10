@@ -34,6 +34,10 @@ import type {
   NotificationBatch,
   NotificationSendResult,
   UserNotification,
+  BillingPlan,
+  BillingWallet,
+  BillingLedgerEntry,
+  PlatformTenantWallet,
   ToolBinding,
   ToolCapability,
   ToolDefinition,
@@ -3842,4 +3846,263 @@ export async function listPlatformAudit(
     details: row.details,
     createdAt: row.created_at,
   }));
+}
+
+function mapBillingPlan(row: {
+  id: string;
+  scope: "platform" | "tenant";
+  slug: string;
+  name: string;
+  description: string;
+  monthly_price_cents: number;
+  included_credits_monthly: number;
+  credits_per_1k_input_tokens: number;
+  credits_per_1k_output_tokens: number;
+  credit_pack_credits: number;
+  credit_pack_price_cents: number;
+  is_active: boolean;
+}): BillingPlan {
+  return {
+    id: row.id,
+    scope: row.scope,
+    slug: row.slug,
+    name: row.name,
+    description: row.description,
+    monthlyPriceCents: row.monthly_price_cents,
+    includedCreditsMonthly: row.included_credits_monthly,
+    creditsPer1kInputTokens: row.credits_per_1k_input_tokens,
+    creditsPer1kOutputTokens: row.credits_per_1k_output_tokens,
+    creditPackCredits: row.credit_pack_credits,
+    creditPackPriceCents: row.credit_pack_price_cents,
+    isActive: row.is_active,
+  };
+}
+
+function mapBillingWallet(row: {
+  id: string;
+  owner_type: "tenant" | "user";
+  owner_id: string;
+  balance_credits: number;
+  allowance_remaining: number;
+  available_credits: number;
+  plan_id: string | null;
+  subscription_status: string;
+  period_start: string | null;
+  period_end: string | null;
+}): BillingWallet {
+  return {
+    id: row.id,
+    ownerType: row.owner_type,
+    ownerId: row.owner_id,
+    balanceCredits: row.balance_credits,
+    allowanceRemaining: row.allowance_remaining,
+    availableCredits: row.available_credits,
+    planId: row.plan_id,
+    subscriptionStatus: row.subscription_status,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+  };
+}
+
+export async function getTenantBillingWallet(
+  accessToken: string,
+): Promise<BillingWallet> {
+  const row = await apiFetch<Parameters<typeof mapBillingWallet>[0]>(
+    "/admin/billing/wallet",
+    { accessToken },
+  );
+  return mapBillingWallet(row);
+}
+
+export async function listTenantBillingPlans(
+  accessToken: string,
+): Promise<BillingPlan[]> {
+  const rows = await apiFetch<Parameters<typeof mapBillingPlan>[0][]>(
+    "/admin/billing/plans",
+    { accessToken },
+  );
+  return rows.map(mapBillingPlan);
+}
+
+export async function upsertTenantBillingPlan(
+  accessToken: string,
+  slug: string,
+  body: {
+    name: string;
+    description?: string;
+    monthlyPriceCents?: number;
+    includedCreditsMonthly?: number;
+    creditsPer1kInputTokens?: number;
+    creditsPer1kOutputTokens?: number;
+    creditPackCredits?: number;
+    creditPackPriceCents?: number;
+    isActive?: boolean;
+  },
+): Promise<BillingPlan> {
+  const row = await apiFetch<Parameters<typeof mapBillingPlan>[0]>(
+    `/admin/billing/plans/${encodeURIComponent(slug)}`,
+    {
+      accessToken,
+      method: "PUT",
+      body: {
+        slug,
+        name: body.name,
+        description: body.description ?? "",
+        monthly_price_cents: body.monthlyPriceCents ?? 0,
+        included_credits_monthly: body.includedCreditsMonthly ?? 0,
+        credits_per_1k_input_tokens: body.creditsPer1kInputTokens ?? 10,
+        credits_per_1k_output_tokens: body.creditsPer1kOutputTokens ?? 30,
+        credit_pack_credits: body.creditPackCredits ?? 1000,
+        credit_pack_price_cents: body.creditPackPriceCents ?? 1000,
+        is_active: body.isActive ?? true,
+      },
+    },
+  );
+  return mapBillingPlan(row);
+}
+
+export async function grantBillingCredits(
+  accessToken: string,
+  body: {
+    ownerType: "tenant" | "user";
+    ownerId: string;
+    credits: number;
+    description?: string;
+  },
+): Promise<BillingWallet> {
+  const row = await apiFetch<Parameters<typeof mapBillingWallet>[0]>(
+    "/admin/billing/grant",
+    {
+      accessToken,
+      method: "POST",
+      body: {
+        owner_type: body.ownerType,
+        owner_id: body.ownerId,
+        credits: body.credits,
+        description: body.description ?? "Admin credit grant",
+      },
+    },
+  );
+  return mapBillingWallet(row);
+}
+
+export async function purchaseTenantCreditPack(
+  accessToken: string,
+  body?: { planId?: string | null },
+): Promise<{
+  wallet: BillingWallet;
+  checkoutUrl: string | null;
+  status: "completed" | "pending";
+}> {
+  const row = await apiFetch<{
+    wallet: Parameters<typeof mapBillingWallet>[0];
+    checkout_url: string | null;
+    status: "completed" | "pending";
+  }>("/admin/billing/checkout/credit-pack", {
+    accessToken,
+    method: "POST",
+    body: {
+      owner_type: "tenant",
+      plan_id: body?.planId ?? null,
+      success_url: "/admin/billing",
+      cancel_url: "/admin/billing",
+    },
+  });
+  return {
+    wallet: mapBillingWallet(row.wallet),
+    checkoutUrl: row.checkout_url,
+    status: row.status,
+  };
+}
+
+export async function listTenantBillingLedger(
+  accessToken: string,
+  limit = 50,
+): Promise<BillingLedgerEntry[]> {
+  const rows = await apiFetch<
+    Array<{
+      id: string;
+      entry_type: string;
+      amount_credits: number;
+      balance_after: number;
+      description: string;
+      reference_type: string | null;
+      reference_id: string | null;
+      created_by: string;
+      created_at: string;
+    }>
+  >(`/admin/billing/ledger?limit=${limit}`, { accessToken });
+  return rows.map((row) => ({
+    id: row.id,
+    entryType: row.entry_type,
+    amountCredits: row.amount_credits,
+    balanceAfter: row.balance_after,
+    description: row.description,
+    referenceType: row.reference_type,
+    referenceId: row.reference_id,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function listPlatformBillingPlans(
+  accessToken: string,
+): Promise<BillingPlan[]> {
+  const rows = await apiFetch<Parameters<typeof mapBillingPlan>[0][]>(
+    "/admin/platform/billing/plans",
+    { accessToken },
+  );
+  return rows.map(mapBillingPlan);
+}
+
+export async function getPlatformTenantWallet(
+  accessToken: string,
+  tenantId: string,
+): Promise<PlatformTenantWallet> {
+  const row = await apiFetch<{
+    tenant_id: string;
+    balance_credits: number;
+    allowance_remaining: number;
+    available_credits: number;
+    subscription_status: string;
+    plan_id: string | null;
+  }>(`/admin/platform/billing/tenants/${tenantId}/wallet`, { accessToken });
+  return {
+    tenantId: row.tenant_id,
+    balanceCredits: row.balance_credits,
+    allowanceRemaining: row.allowance_remaining,
+    availableCredits: row.available_credits,
+    subscriptionStatus: row.subscription_status,
+    planId: row.plan_id,
+  };
+}
+
+export async function grantPlatformTenantCredits(
+  accessToken: string,
+  tenantId: string,
+  body: { credits: number; description?: string },
+): Promise<PlatformTenantWallet> {
+  const row = await apiFetch<{
+    tenant_id: string;
+    balance_credits: number;
+    allowance_remaining: number;
+    available_credits: number;
+    subscription_status: string;
+    plan_id: string | null;
+  }>(`/admin/platform/billing/tenants/${tenantId}/grant`, {
+    accessToken,
+    method: "POST",
+    body: {
+      credits: body.credits,
+      description: body.description ?? "Platform credit grant",
+    },
+  });
+  return {
+    tenantId: row.tenant_id,
+    balanceCredits: row.balance_credits,
+    allowanceRemaining: row.allowance_remaining,
+    availableCredits: row.available_credits,
+    subscriptionStatus: row.subscription_status,
+    planId: row.plan_id,
+  };
 }
