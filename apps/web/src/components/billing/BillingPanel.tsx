@@ -1,12 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+import Link from "next/link";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label } from "@/components/ui/Field";
+import { Input, Label, Select } from "@/components/ui/Field";
+import { GrantCreditsForm } from "@/components/billing/GrantCreditsForm";
 import {
   getTenantBillingWallet,
+  getTenantUserBillingWallet,
   grantBillingCredits,
   listTenantBillingLedger,
   listTenantBillingPlans,
@@ -26,27 +30,88 @@ function formatCredits(value: number): string {
   return value.toLocaleString();
 }
 
+function userLabel(user: TenantUser): string {
+  const name = user.displayName?.trim();
+  const email = user.email?.trim();
+  if (name && email) return `${name} (${email})`;
+  return name || email || user.userId;
+}
+
 export function BillingPanel({
   initialWallet,
   initialPlans,
   initialLedger,
   users,
+  prefillUserId = null,
 }: {
   initialWallet: BillingWallet;
   initialPlans: BillingPlan[];
   initialLedger: BillingLedgerEntry[];
   users: TenantUser[];
+  prefillUserId?: string | null;
 }) {
   const { getAccessToken } = useAgentOsToken();
+  const selectableUsers = useMemo(
+    () =>
+      users.filter(
+        (user) =>
+          user.isActive &&
+          user.userId &&
+          !user.userId.startsWith("invite:") &&
+          !user.invitePending,
+      ),
+    [users],
+  );
   const [wallet, setWallet] = useState(initialWallet);
   const [plans, setPlans] = useState(initialPlans);
   const [ledger, setLedger] = useState(initialLedger);
   const [plan, setPlan] = useState(initialPlans[0] ?? null);
-  const [grantUserId, setGrantUserId] = useState(users[0]?.userId ?? "");
-  const [grantCredits, setGrantCredits] = useState("1000");
+  const [grantUserId, setGrantUserId] = useState(
+    prefillUserId && selectableUsers.some((u) => u.userId === prefillUserId)
+      ? prefillUserId
+      : selectableUsers[0]?.userId ?? "",
+  );
+  const selectedUser = useMemo(
+    () => selectableUsers.find((user) => user.userId === grantUserId) ?? null,
+    [grantUserId, selectableUsers],
+  );
+  const [userWalletCredits, setUserWalletCredits] = useState<number | null>(null);
+  const [userWalletLoading, setUserWalletLoading] = useState(false);
+  const [grantBusy, setGrantBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!prefillUserId) return;
+    const node = document.getElementById("grant-credits");
+    node?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [prefillUserId]);
+
+  useEffect(() => {
+    if (!grantUserId) {
+      setUserWalletCredits(null);
+      return;
+    }
+    let cancelled = false;
+    setUserWalletLoading(true);
+    void (async () => {
+      try {
+        const row = await getTenantUserBillingWallet(
+          await getAccessToken(),
+          grantUserId,
+        );
+        if (!cancelled) setUserWalletCredits(row.availableCredits);
+      } catch {
+        if (!cancelled) setUserWalletCredits(null);
+      } finally {
+        if (!cancelled) setUserWalletLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getAccessToken, grantUserId]);
 
   async function refresh() {
     const token = await getAccessToken();
@@ -87,28 +152,28 @@ export function BillingPanel({
     }
   }
 
-  async function onGrantUser() {
-    const credits = Number.parseInt(grantCredits, 10);
-    if (!grantUserId || !Number.isFinite(credits) || credits <= 0) {
-      setError("Enter a user and positive credit amount");
-      return;
+  async function onGrantUser(credits: number, description: string) {
+    if (!grantUserId) {
+      throw new Error("Select a user first");
     }
-    setBusy(true);
+    setGrantBusy(true);
     setError(null);
     try {
       const token = await getAccessToken();
-      await grantBillingCredits(token, {
+      const updated = await grantBillingCredits(token, {
         ownerType: "user",
         ownerId: grantUserId,
         credits,
-        description: "Admin grant",
+        description,
       });
-      setBanner(`Granted ${formatCredits(credits)} credits`);
+      setUserWalletCredits(updated.availableCredits);
+      const who = selectedUser ? userLabel(selectedUser) : "user";
+      setBanner(`Granted ${formatCredits(credits)} credits to ${who}`);
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Grant failed");
+    } catch (reason) {
+      throw reason instanceof Error ? reason : new Error("Grant failed");
     } finally {
-      setBusy(false);
+      setGrantBusy(false);
     }
   }
 
@@ -137,69 +202,137 @@ export function BillingPanel({
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 pb-16">
       <header className="space-y-2">
-        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <p className="text-xs font-medium uppercase tracking-wider text-slate-muted">
           Configure
         </p>
-        <h1 className="font-display text-3xl font-semibold leading-snug py-0.5">
-          Billing & credits
-        </h1>
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          Prepaid credits for your organization and end users. Runs hard-stop at
-          zero balance. Local dev uses instant dummy checkout; production uses
-          Razorpay (INR) when configured.
-        </p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="font-display text-3xl font-semibold leading-snug py-0.5">
+              Billing & credits
+            </h1>
+            <p className="mt-1 max-w-2xl text-sm text-slate-muted">
+              Give users free credits, monitor your organization balance, and
+              configure usage rates. Runs stop when a wallet hits zero.
+            </p>
+          </div>
+          <Link
+            href="/admin/users"
+            className="text-xs font-medium text-slate-muted hover:text-ink"
+          >
+            Manage users
+          </Link>
+        </div>
       </header>
 
       {banner ? (
-        <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-700 dark:text-emerald-300">
+        <p className="rounded-lg border border-teal/30 bg-teal/10 px-4 py-2 text-sm text-teal">
           {banner}
         </p>
       ) : null}
       {error ? (
-        <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+        <p className="rounded-lg border border-rose/30 bg-rose/10 px-4 py-2 text-sm text-rose">
           {error}
         </p>
       ) : null}
 
+      <section
+        id="grant-credits"
+        className="rounded-xl border border-line bg-raised/40 p-5 scroll-mt-6"
+      >
+        <h2 className="font-display text-xl font-semibold">Grant free credits to a user</h2>
+        <p className="mt-1 text-sm text-slate-muted">
+          Top up someone&apos;s wallet instantly — no payment required. They need
+          credits before they can run workflows or chat.
+        </p>
+        {prefillUserId && selectedUser ? (
+          <p className="mt-3 rounded-md border border-teal/20 bg-teal/5 px-3 py-2 text-sm">
+            Granting credits to{" "}
+            <span className="font-medium text-ink">{userLabel(selectedUser)}</span>
+            {prefillUserId === grantUserId ? (
+              <Link
+                href={`/admin/users/${encodeURIComponent(grantUserId)}`}
+                className="ml-2 text-xs font-medium text-teal hover:underline"
+              >
+                Back to user
+              </Link>
+            ) : null}
+          </p>
+        ) : null}
+        <div className="mt-4 max-w-lg">
+          <Label htmlFor="grant-user">User</Label>
+          <Select
+            id="grant-user"
+            value={grantUserId}
+            onChange={(event) => setGrantUserId(event.target.value)}
+            disabled={selectableUsers.length === 0}
+          >
+            {selectableUsers.length === 0 ? (
+              <option value="">No active users — invite someone first</option>
+            ) : (
+              selectableUsers.map((user) => (
+                <option key={user.userId} value={user.userId}>
+                  {userLabel(user)}
+                </option>
+              ))
+            )}
+          </Select>
+        </div>
+        <div className="mt-4">
+          <GrantCreditsForm
+            label="Grant credits"
+            hint="Credits appear in the user's wallet immediately. User grants are not listed in the organization ledger below."
+            balanceLabel="This user's balance"
+            availableCredits={userWalletCredits}
+            balanceLoading={userWalletLoading}
+            defaultCredits="1000"
+            defaultDescription="Free credits from org admin"
+            presets={[500, 1_000, 5_000, 10_000]}
+            busy={grantBusy}
+            disabled={selectableUsers.length === 0 || !grantUserId}
+            onGrant={onGrantUser}
+          />
+        </div>
+      </section>
+
       <section className="grid gap-4 md:grid-cols-2">
-        <article className="rounded-xl border border-border bg-card p-5 shadow-sm">
+        <article className="rounded-xl border border-line bg-raised/40 p-5">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold">Organization wallet</h2>
-              <p className="text-sm text-muted-foreground">
-                Platform wholesale usage debited here on every run.
+              <p className="text-sm text-slate-muted">
+                Your org&apos;s balance for platform usage on every run.
               </p>
             </div>
             <Badge tone="neutral">{wallet.subscriptionStatus}</Badge>
           </div>
           <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
             <div>
-              <dt className="text-muted-foreground">Available</dt>
+              <dt className="text-slate-muted">Available</dt>
               <dd className="text-2xl font-semibold tabular-nums">
                 {formatCredits(wallet.availableCredits)}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Monthly allowance left</dt>
+              <dt className="text-slate-muted">Monthly allowance left</dt>
               <dd className="text-lg font-medium tabular-nums">
                 {formatCredits(wallet.allowanceRemaining)}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Balance</dt>
+              <dt className="text-slate-muted">Purchased balance</dt>
               <dd className="tabular-nums">{formatCredits(wallet.balanceCredits)}</dd>
             </div>
           </dl>
           <Button className="mt-4" disabled={busy} onClick={() => void onBuyOrgPack()}>
-            Buy org credit pack
+            Buy credit pack
           </Button>
         </article>
 
         {plan ? (
-          <article className="rounded-xl border border-border bg-card p-5 shadow-sm">
+          <article className="rounded-xl border border-line bg-raised/40 p-5">
             <h2 className="text-lg font-semibold">End-user plan</h2>
-            <p className="text-sm text-muted-foreground">
-              Rates charged to users on top of org wholesale.
+            <p className="text-sm text-slate-muted">
+              Usage rates charged to users when they run agents.
             </p>
             <div className="mt-4 space-y-3">
               <div>
@@ -250,43 +383,15 @@ export function BillingPanel({
         ) : null}
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
-        <h2 className="text-lg font-semibold">Grant user credits</h2>
-        <div className="mt-4 flex flex-wrap items-end gap-3">
-          <div className="min-w-[200px] flex-1">
-            <Label htmlFor="grant-user">User</Label>
-            <select
-              id="grant-user"
-              className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={grantUserId}
-              onChange={(e) => setGrantUserId(e.target.value)}
-            >
-              {users.map((user) => (
-                <option key={user.userId} value={user.userId}>
-                  {user.displayName || user.email || user.userId}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="w-36">
-            <Label htmlFor="grant-amount">Credits</Label>
-            <Input
-              id="grant-amount"
-              value={grantCredits}
-              onChange={(e) => setGrantCredits(e.target.value)}
-            />
-          </div>
-          <Button disabled={busy} onClick={() => void onGrantUser()}>
-            Grant
-          </Button>
-        </div>
-      </section>
-
-      <section className="rounded-xl border border-border bg-card p-5 shadow-sm">
+      <section className="rounded-xl border border-line bg-raised/40 p-5">
         <h2 className="text-lg font-semibold">Organization ledger</h2>
-        <ul className="mt-4 divide-y divide-border">
+        <p className="mt-1 text-sm text-slate-muted">
+          Platform usage and org-level grants. To audit a user&apos;s credits, grant
+          from their profile or check their balance above.
+        </p>
+        <ul className="mt-4 divide-y divide-line">
           {ledger.length === 0 ? (
-            <li className="py-4 text-sm text-muted-foreground">No entries yet.</li>
+            <li className="py-4 text-sm text-slate-muted">No entries yet.</li>
           ) : (
             ledger.map((entry) => (
               <li
@@ -295,14 +400,14 @@ export function BillingPanel({
               >
                 <div>
                   <p className="font-medium">{entry.description}</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs text-slate-muted">
                     {entry.entryType} · {formatRelative(entry.createdAt)}
                   </p>
                 </div>
                 <span
                   className={
                     entry.amountCredits >= 0
-                      ? "font-medium text-emerald-600 dark:text-emerald-400"
+                      ? "font-medium text-teal"
                       : "font-medium text-amber-700 dark:text-amber-300"
                   }
                 >

@@ -272,12 +272,20 @@ export function UserEditor({
         </div>
         <EditorActions>
           {mode === "edit" && form.userId && !form.userId.startsWith("invite:") ? (
-            <Link
-              href={`/admin/notifications?userId=${encodeURIComponent(form.userId)}`}
-              className={buttonClassName({ variant: "secondary", size: "sm" })}
-            >
-              Notify
-            </Link>
+            <>
+              <Link
+                href={`/admin/notifications?userId=${encodeURIComponent(form.userId)}`}
+                className={buttonClassName({ variant: "secondary", size: "sm" })}
+              >
+                Notify
+              </Link>
+              <Link
+                href={`/admin/billing?userId=${encodeURIComponent(form.userId)}`}
+                className={buttonClassName({ variant: "secondary", size: "sm" })}
+              >
+                Grant credits
+              </Link>
+            </>
           ) : null}
           {mode === "edit" && form.userId?.startsWith("user_") ? (
             <Button

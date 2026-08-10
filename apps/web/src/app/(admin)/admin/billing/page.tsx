@@ -9,8 +9,13 @@ import { getServerAgentOsToken } from "@/lib/auth/server-token";
 
 export const dynamic = "force-dynamic";
 
-export default async function BillingPage() {
+export default async function BillingPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ userId?: string }>;
+}) {
   const token = await getServerAgentOsToken();
+  const params = await searchParams;
   const [wallet, plans, ledger, users] = await Promise.all([
     getTenantBillingWallet(token),
     listTenantBillingPlans(token),
@@ -23,6 +28,7 @@ export default async function BillingPage() {
       initialPlans={plans}
       initialLedger={ledger}
       users={users}
+      prefillUserId={params.userId ?? null}
     />
   );
 }

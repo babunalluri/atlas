@@ -3986,6 +3986,17 @@ export async function grantBillingCredits(
   return mapBillingWallet(row);
 }
 
+export async function getTenantUserBillingWallet(
+  accessToken: string,
+  userId: string,
+): Promise<BillingWallet> {
+  const row = await apiFetch<Parameters<typeof mapBillingWallet>[0]>(
+    `/admin/billing/wallets/users/${encodeURIComponent(userId)}`,
+    { accessToken },
+  );
+  return mapBillingWallet(row);
+}
+
 export async function purchaseTenantCreditPack(
   accessToken: string,
   body?: { planId?: string | null },

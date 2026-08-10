@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { PlatformGrantCreditsPanel } from "@/components/platform/PlatformGrantCreditsPanel";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select } from "@/components/ui/Field";
@@ -334,6 +335,8 @@ export function PlatformTenantsPanel({
           </div>
         </div>
       </section>
+
+      <PlatformGrantCreditsPanel tenants={tenants} />
 
       <section className="rounded-xl border border-line bg-raised/40 p-5">
         <h2 className="font-display text-2xl font-semibold">

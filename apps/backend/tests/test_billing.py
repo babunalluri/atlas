@@ -113,6 +113,38 @@ async def test_dummy_credit_pack_purchase(session, tenant_a):
 
 
 @pytest.mark.asyncio
+async def test_org_admin_grants_user_credits(session, tenant_a):
+    billing = BillingService(session, tenant_a)
+    await billing.provision_tenant_wallets(tenant_a.tenant_id)
+    wallet = await billing.grant_credits(
+        tenant_id=tenant_a.tenant_id,
+        owner_type="user",
+        owner_id="user_grantee",
+        credits=2500,
+        created_by=tenant_a.user_id,
+        description="Org admin credit grant",
+    )
+    assert wallet.balance_credits >= 2500
+    assert wallet.owner_type == "user"
+    assert wallet.owner_id == "user_grantee"
+
+
+@pytest.mark.asyncio
+async def test_platform_grants_tenant_org_credits(session, tenant_a):
+    billing = BillingService(session)
+    wallet = await billing.grant_credits(
+        tenant_id=tenant_a.tenant_id,
+        owner_type="tenant",
+        owner_id=str(tenant_a.tenant_id),
+        credits=10_000,
+        created_by="platform-owner",
+        description="Platform credit grant",
+    )
+    assert wallet.balance_credits >= 10_000
+    assert wallet.owner_type == "tenant"
+
+
+@pytest.mark.asyncio
 async def test_scheduler_only_debits_tenant_wallet(session, tenant_a):
     billing = BillingService(session, tenant_a)
     await billing.provision_tenant_wallets(tenant_a.tenant_id)
