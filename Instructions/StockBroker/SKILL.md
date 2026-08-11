@@ -1,14 +1,14 @@
-# TradeForge — Skill Reference
+# Stock Broker — Skill Reference
 
-Atlas skill pack for TradeForge Academy ops + customer assistance.
+Atlas skill pack for Stock Broker ops + customer assistance.
 
-- **Toolkit (TradeForge APIs):** `tools/tradeforge_toolkit.py` (`TradeForgeToolkit`) — platform mocks until TF API is live
+- **Toolkit (Stock Broker APIs):** `tools/stock_broker_toolkit.py` (`StockBrokerToolkit`) — platform mocks until Stock Broker API is live
 - **Toolkit (Groww demat/live):** `tools/groww_toolkit.py` — Groww Trading API (`api.groww.in`); see `tools/GROWW.md`
 - **Toolkit (Zerodha Kite):** `tools/kite_toolkit.py` — Kite Connect v3 (`api.kite.trade`); see `tools/KITE.md` (optional / multi-broker)
 - **Teams:** `teams/learning.md` (end-user Learn via KB), `teams/customer_support.md`, `teams/ops_desk.md`
 - **Agents:** see table below
 - **Workflows:** learn (KB) → publish → paper → live approval → kill switch
-- **PRD:** TradeForge Academy v2.1 (modules A–E, UC-1 / UC-2 / UC-3)
+- **PRD:** Stock Broker v2.1 (modules A–E, UC-1 / UC-2 / UC-3)
 - **Learn policy:** Do **not** rebuild Classplus; end-user education uses **Atlas Knowledge Base**.
 
 ---

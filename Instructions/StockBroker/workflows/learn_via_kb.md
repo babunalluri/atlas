@@ -2,7 +2,7 @@
 
 ## Trigger
 
-End user asks about concepts, plans, onboarding, risk disclosure, or “how do I learn trading on TradeForge?”
+End user asks about concepts, plans, onboarding, risk disclosure, or “how do I learn trading on Stock Broker?”
 
 ## Actors
 

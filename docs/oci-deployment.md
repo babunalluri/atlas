@@ -6,7 +6,7 @@ equivalents. There is no one-click OCI stack in-repo yet — treat this as the
 recommended production shape.
 
 Prefer region **Mumbai (`ap-mumbai-1`)** for India-facing workloads (e.g.
-TradeForge tenants); use the home region that matches data-residency needs.
+Stock Broker tenants); use the home region that matches data-residency needs.
 
 ## Recommended first production shape
 

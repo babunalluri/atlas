@@ -1,12 +1,12 @@
-"""TradeForge Academy toolkit (Atlas tenant_python starter).
+"""Stock Broker toolkit (Atlas tenant_python starter).
 
-Contracts follow PRD canonical APIs. Wire `base_url` to the TradeForge API host
+Contracts follow PRD canonical APIs. Wire `base_url` to the Stock Broker API host
 (must be allowlisted). Bind a service credential (Bearer) via tool settings.
 
 Customer live demat broker: Groww.
 Mutating methods should be marked mutating in Atlas (HITL).
 
-Until the TradeForge API is live, methods return structured stubs when
+Until the Stock Broker API is live, methods return structured stubs when
 `settings.mock=true` (default) so agents can be rehearsed safely.
 """
 
@@ -37,11 +37,11 @@ def _err(message: str) -> dict[str, Any]:
     return {"ok": False, "error": message}
 
 
-class TradeForgeToolkit(BaseToolkit):
-    """Ops + customer assistance tools for TradeForge."""
+class StockBrokerToolkit(BaseToolkit):
+    """Ops + customer assistance tools for Stock Broker."""
 
     def __init__(self, name: str | None = None, tools: list[Any] | None = None, **kwargs: Any) -> None:
-        super().__init__(name=name or "tradeforge", tools=tools, **kwargs)
+        super().__init__(name=name or "stock_broker", tools=tools, **kwargs)
 
     async def _get(self, path: str) -> Any:
         cfg = _cfg(self)

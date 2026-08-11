@@ -1,6 +1,6 @@
 """Groww Trading API toolkit (Atlas tenant_python starter).
 
-Customer demat / live broker for TradeForge.
+Customer demat / live broker for Stock Broker.
 
 Docs: https://groww.in/trade-api/docs/curl
 Host (allowlist): api.groww.in

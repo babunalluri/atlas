@@ -57,7 +57,7 @@ Prefer binding secrets via a tenant credential (JSON) merged into settings — n
 
 ## Agent usage notes
 
-- Customer broker is **Groww only** for TradeForge live.
+- Customer broker is **Groww only** for Stock Broker live.
 - On 401 / auth failure → treat as auto-disarm condition; ask user to refresh Access Token (daily).
 - Always pass `order_reference_id` on `place_order` when retrying (maps to Groww idempotency / GA007 duplicate).
 - Segments: `CASH`, `FNO`. Products: e.g. `CNC`, `MIS`, `NRML` per Groww rules.

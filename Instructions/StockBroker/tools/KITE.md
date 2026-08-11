@@ -4,7 +4,7 @@ Source: `tools/kite_toolkit.py`
 API docs: https://kite.trade/docs/connect/v3/  
 Host to allowlist: `api.kite.trade`
 
-TradeForge default customer broker remains **Groww**; use this toolkit when Zerodha/Kite is enabled for a user or for Ops multi-broker support.
+Stock Broker default customer broker remains **Groww**; use this toolkit when Zerodha/Kite is enabled for a user or for Ops multi-broker support.
 
 ## Load into Atlas
 
