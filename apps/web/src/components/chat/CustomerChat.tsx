@@ -774,6 +774,7 @@ export function CustomerChat({
             <ChatMessageList
               messages={messages}
               dark={dark}
+              markdown={!embedded}
               targetName={activeTargetName}
               starters={[
                 "What can you help me with?",

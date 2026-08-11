@@ -3,16 +3,20 @@
 import type { ChatMessage } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
+import { ChatMarkdown } from "@/components/chat/ChatMarkdown";
 
 export function ChatMessageList({
   messages,
   dark = false,
+  markdown = false,
   starters,
   onStarter,
   targetName,
 }: {
   messages: ChatMessage[];
   dark?: boolean;
+  /** Render assistant replies as markdown (workspace chat only). */
+  markdown?: boolean;
   starters?: string[];
   onStarter?: (text: string) => void;
   targetName?: string;
@@ -70,10 +74,14 @@ export function ChatMessageList({
                     {targetName || "Assistant"}
                   </p>
                 ) : null}
-                <p className="whitespace-pre-wrap">
-                  {message.content ||
-                    (message.status === "streaming" ? "…" : "")}
-                </p>
+                {!isUser && markdown && message.content ? (
+                  <ChatMarkdown content={message.content} dark={dark} />
+                ) : (
+                  <p className="whitespace-pre-wrap">
+                    {message.content ||
+                      (message.status === "streaming" ? "…" : "")}
+                  </p>
+                )}
                 {(message.toolSpans?.length || message.status) && !isUser ? (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {message.toolSpans?.map((span) => (
