@@ -10,9 +10,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
+from app.billing.service import BillingService
 from app.db.models import PlatformAuditEvent, Role, Tenant
 from app.db.repositories import PlatformPythonPackageRepository
 from app.db.session import SessionFactory
+from app.domains.setup import apply_tenant_domain
+from app.domains.types import normalize_domain
 from app.platform.tenant_import import (
     collect_import_bundle,
     list_tenant_catalog,
@@ -48,6 +51,7 @@ class TenantCreate(BaseModel):
     auth_org_id: str = Field(min_length=1, max_length=255)
     branding: dict[str, Any] = Field(default_factory=dict)
     timezone: str = Field(default="UTC", max_length=100)
+    domain: str = Field(default="generic", max_length=50)
 
     @field_validator("timezone")
     @classmethod
@@ -55,6 +59,11 @@ class TenantCreate(BaseModel):
         from app.core.timezones import normalize_timezone
 
         return normalize_timezone(value)
+
+    @field_validator("domain")
+    @classmethod
+    def validate_domain(cls, value: str) -> str:
+        return normalize_domain(value)
 
 
 class TenantUpdate(BaseModel):
@@ -78,6 +87,7 @@ class TenantOut(BaseModel):
     name: str
     slug: str
     auth_org_id: str
+    domain: str
     branding: dict[str, Any]
     timezone: str = "UTC"
     is_active: bool
@@ -193,7 +203,8 @@ async def create_tenant(
         name=payload.name.strip(),
         slug=validate_slug(payload.slug),
         auth_org_id=payload.auth_org_id.strip(),
-        branding=payload.branding,
+        domain=payload.domain,
+        branding={},
         timezone=payload.timezone,
         is_active=True,
     )
@@ -205,17 +216,26 @@ async def create_tenant(
             status_code=409,
             detail="A tenant with this slug or organization already exists",
         ) from exc
+
+    provision = await apply_tenant_domain(
+        session,
+        tenant=tenant,
+        actor_user_id=context.user_id,
+        domain=payload.domain,
+        branding=payload.branding,
+    )
     await audit(
         session,
         context,
         "tenant.create",
         tenant.id,
-        {"slug": tenant.slug, "auth_org_id": tenant.auth_org_id},
+        {
+            "slug": tenant.slug,
+            "auth_org_id": tenant.auth_org_id,
+            "domain": payload.domain,
+            "provision": provision,
+        },
     )
-    from sqlalchemy import text
-
-    from app.billing.service import BillingService
-
     if session.bind and session.bind.dialect.name == "postgresql":
         await session.execute(
             text("SELECT set_config('app.tenant_id', :tenant_id, true)"),

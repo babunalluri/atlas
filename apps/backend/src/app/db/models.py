@@ -69,6 +69,7 @@ class Tenant(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     branding: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    domain: Mapped[str] = mapped_column(String(50), default="generic", nullable=False)
     timezone: Mapped[str] = mapped_column(String(100), default="UTC", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

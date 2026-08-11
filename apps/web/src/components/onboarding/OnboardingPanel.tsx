@@ -5,19 +5,31 @@ import { useRouter } from "@/i18n/navigation";
 
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   createSelfServeWorkspace,
   getOnboardingStatus,
+  listWorkspaceDomains,
 } from "@/lib/api/admin";
+import type { WorkspaceDomain, WorkspaceDomainOption } from "@/lib/api/types";
 import { clearPlatformTenantSelection } from "@/lib/auth/access-context";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { slugifyName } from "@/lib/validation/agent-form";
+
+const FALLBACK_DOMAINS: WorkspaceDomainOption[] = [
+  { id: "generic", label: "General" },
+  { id: "stock_broker", label: "Stock Broker" },
+  { id: "dental_clinic", label: "Dental Clinic" },
+];
 
 export function OnboardingPanel() {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const router = useRouter();
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+  const [domain, setDomain] = useState<WorkspaceDomain>("generic");
+  const [domainOptions, setDomainOptions] =
+    useState<WorkspaceDomainOption[]>(FALLBACK_DOMAINS);
   const [orgId, setOrgId] = useState<string | null>(null);
   const [canCreate, setCanCreate] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -33,7 +45,8 @@ export function OnboardingPanel() {
     let cancelled = false;
     void (async () => {
       try {
-        const status = await getOnboardingStatus(await getAccessToken());
+        const token = await getAccessToken();
+        const status = await getOnboardingStatus(token);
         if (cancelled) return;
         if (status.provisioned) {
           router.replace("/admin/agents");
@@ -42,6 +55,14 @@ export function OnboardingPanel() {
         setOrgId(status.org_id);
         setCanCreate(status.can_create);
         setError(null);
+        try {
+          const options = await listWorkspaceDomains(token);
+          if (!cancelled && options.length > 0) {
+            setDomainOptions(options);
+          }
+        } catch {
+          // Fall back to static domain list when catalog endpoint is unavailable.
+        }
       } catch (reason) {
         if (!cancelled) {
           setError(
@@ -66,6 +87,7 @@ export function OnboardingPanel() {
       await createSelfServeWorkspace(await getAccessToken(), {
         name: name.trim(),
         slug: slug.trim(),
+        domain,
       });
       clearPlatformTenantSelection();
       router.replace("/admin/agents");
@@ -100,10 +122,9 @@ export function OnboardingPanel() {
           Create your workspace
         </h1>
         <p className="mt-1 text-sm text-slate-muted">
-          Your organization is signed in but not linked to an Atlas
-          tenant yet. As the first org admin you can create a workspace with
-          sensible defaults, then publish teams or workflows and share a
-          customer chat widget.
+          Choose a domain for your organization. Atlas will provision agents,
+          teams, and workflows tailored to that industry for every member of
+          your org.
         </p>
         {orgId ? (
           <p className="mt-2 mono-cell text-xs text-slate-muted">
@@ -131,7 +152,7 @@ export function OnboardingPanel() {
                   setSlug(slugifyName(next));
                 }
               }}
-              placeholder="Acme Support"
+              placeholder="Acme Trading"
             />
           </div>
           <div>
@@ -140,11 +161,27 @@ export function OnboardingPanel() {
               id="workspace-slug"
               value={slug}
               onChange={(event) => setSlug(slugifyName(event.target.value))}
-              placeholder="acme"
+              placeholder="acme-trading"
             />
             <p className="mt-1 text-xs text-slate-muted">
               Customer chat will live at /t/{slug || "your-slug"}/teams/… or
               /workflows/…
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="workspace-domain">Industry domain</Label>
+            <SearchableSelect
+              id="workspace-domain"
+              value={domain}
+              onChange={(value) => setDomain(value as WorkspaceDomain)}
+              placeholder="Select domain"
+              options={domainOptions.map((option) => ({
+                value: option.id,
+                label: option.label,
+              }))}
+            />
+            <p className="mt-1 text-xs text-slate-muted">
+              All users in this organization inherit the selected domain workspace.
             </p>
           </div>
           <Button

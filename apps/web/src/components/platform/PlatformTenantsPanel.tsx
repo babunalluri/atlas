@@ -25,6 +25,7 @@ import {
 import type {
   PlatformAuditEvent,
   PlatformTenant,
+  WorkspaceDomain,
 } from "@/lib/api/types";
 import {
   PLATFORM_TENANT_COOKIE,
@@ -47,6 +48,7 @@ export function PlatformTenantsPanel({
   const [slug, setSlug] = useState("");
   const [authOrgId, setAuthOrgId] = useState("");
   const [timezone, setTimezone] = useState(browserTimezone);
+  const [domain, setDomain] = useState<WorkspaceDomain>("generic");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +118,7 @@ export function PlatformTenantsPanel({
         slug: slugifyName(slug || name),
         authOrgId: authOrgId.trim(),
         timezone,
+        domain,
       });
       setTenants((current) =>
         [...current, created].sort((a, b) => a.name.localeCompare(b.name)),
@@ -124,6 +127,7 @@ export function PlatformTenantsPanel({
       setSlug("");
       setAuthOrgId("");
       setTimezone(browserTimezone);
+      setDomain("generic");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Tenant creation failed");
     } finally {
@@ -269,6 +273,20 @@ export function PlatformTenantsPanel({
                 />
               </div>
               <div className="sm:col-span-2">
+                <Label htmlFor="tenant-domain">Industry domain</Label>
+                <SearchableSelect
+                  id="tenant-domain"
+                  value={domain}
+                  onChange={(value) => setDomain(value as WorkspaceDomain)}
+                  placeholder="Select domain"
+                  options={[
+                    { value: "generic", label: "General" },
+                    { value: "stock_broker", label: "Stock Broker" },
+                    { value: "dental_clinic", label: "Dental Clinic" },
+                  ]}
+                />
+              </div>
+              <div className="sm:col-span-2">
                 <TimezoneSelect
                   id="tenant-timezone"
                   value={timezone}
@@ -306,9 +324,10 @@ export function PlatformTenantsPanel({
           </div>
         </div>
         <div className="table-shell overflow-x-auto rounded-xl">
-          <div className="min-w-[760px]">
-            <div className="grid grid-cols-[1.3fr_1fr_0.7fr_0.7fr_1fr] gap-3 border-b border-line px-4 py-2.5">
+          <div className="min-w-[920px]">
+            <div className="grid grid-cols-[1.3fr_0.8fr_1fr_0.7fr_0.7fr_1fr] gap-3 border-b border-line px-4 py-2.5">
               <span className="th-label">Tenant</span>
+              <span className="th-label">Domain</span>
               <span className="th-label">Organization ID</span>
               <span className="th-label">Timezone</span>
               <span className="th-label">Status</span>
@@ -317,7 +336,7 @@ export function PlatformTenantsPanel({
             {tenants.map((tenant) => (
               <div
                 key={tenant.id}
-                className="grid grid-cols-[1.3fr_1fr_0.7fr_0.7fr_1fr] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0"
+                className="grid grid-cols-[1.3fr_0.8fr_1fr_0.7fr_0.7fr_1fr] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0"
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{tenant.name}</p>
@@ -325,6 +344,13 @@ export function PlatformTenantsPanel({
                     /{tenant.slug}
                   </p>
                 </div>
+                <Badge tone="info">
+                  {tenant.domain === "stock_broker"
+                    ? "Stock Broker"
+                    : tenant.domain === "dental_clinic"
+                      ? "Dental Clinic"
+                      : "General"}
+                </Badge>
                 <p className="mono-cell truncate text-slate-muted">
                   {tenant.authOrgId}
                 </p>

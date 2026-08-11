@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.auth.dependencies import AuthClaims, resolve_auth_identity
 from app.db.models import PlatformAuditEvent, Tenant
 from app.db.session import SessionFactory
+from app.domains.setup import apply_tenant_domain
+from app.domains.types import WORKSPACE_DOMAINS, normalize_domain
 from app.tenancy.ids import new_id, validate_slug
 
 router = APIRouter(prefix="/admin/onboarding", tags=["onboarding"])
@@ -21,6 +23,12 @@ router = APIRouter(prefix="/admin/onboarding", tags=["onboarding"])
 class WorkspaceCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
+    domain: Literal["generic", "stock_broker", "dental_clinic"] = "generic"
+
+    @field_validator("domain")
+    @classmethod
+    def validate_domain(cls, value: str) -> str:
+        return normalize_domain(value)
 
 
 class OnboardingStatusOut(BaseModel):
@@ -31,6 +39,7 @@ class OnboardingStatusOut(BaseModel):
     tenant_id: UUID | None = None
     tenant_slug: str | None = None
     tenant_name: str | None = None
+    tenant_domain: str | None = None
 
 
 class WorkspaceOut(BaseModel):
@@ -38,6 +47,7 @@ class WorkspaceOut(BaseModel):
     name: str
     slug: str
     auth_org_id: str
+    domain: str
     branding: dict[str, Any]
     is_active: bool
 
@@ -72,7 +82,15 @@ async def onboarding_status(
         tenant_id=tenant.id if tenant else None,
         tenant_slug=tenant.slug if tenant else None,
         tenant_name=tenant.name if tenant else None,
+        tenant_domain=getattr(tenant, "domain", None) if tenant else None,
     )
+
+
+@router.get("/domains")
+async def list_onboarding_domains() -> list[dict[str, str]]:
+    from app.domains.types import DOMAIN_LABELS
+
+    return [{"id": domain, "label": DOMAIN_LABELS[domain]} for domain in WORKSPACE_DOMAINS]
 
 
 @router.post(
@@ -99,6 +117,7 @@ async def create_workspace(
 
     try:
         slug = validate_slug(payload.slug)
+        domain = normalize_domain(payload.domain)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -122,16 +141,11 @@ async def create_workspace(
             name=payload.name.strip(),
             slug=slug,
             auth_org_id=claims.org_id,
-            branding={
-                "primaryColor": "#0f766e",
-                "accentColor": "#5eead4",
-                "tagline": "AI agents for your customers",
-            },
+            domain=domain,
+            branding={},
             is_active=True,
         )
         session.add(tenant)
-        # Flush tenant first so platform_audit_events.tenant_id FK is satisfied.
-        # Without a mapper relationship, SQLAlchemy may insert the audit row first.
         try:
             await session.flush()
         except IntegrityError as exc:
@@ -141,13 +155,25 @@ async def create_workspace(
                 detail="A workspace with this slug or organization already exists",
             ) from exc
 
+        provision = await apply_tenant_domain(
+            session,
+            tenant=tenant,
+            actor_user_id=claims.sub,
+            domain=domain,
+        )
+
         session.add(
             PlatformAuditEvent(
                 id=new_id(),
                 actor_id=claims.sub,
                 action="tenant.self_serve.create",
                 tenant_id=tenant.id,
-                details={"slug": tenant.slug, "auth_org_id": tenant.auth_org_id},
+                details={
+                    "slug": tenant.slug,
+                    "auth_org_id": tenant.auth_org_id,
+                    "domain": domain,
+                    "provision": provision,
+                },
             )
         )
         await session.commit()
@@ -157,6 +183,7 @@ async def create_workspace(
             name=tenant.name,
             slug=tenant.slug,
             auth_org_id=tenant.auth_org_id,
+            domain=tenant.domain,
             branding=tenant.branding or {},
             is_active=tenant.is_active,
         )

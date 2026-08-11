@@ -23,6 +23,7 @@ class WorkspaceInfoOut(BaseModel):
     id: UUID
     name: str
     slug: str
+    domain: str = "generic"
     branding: dict[str, Any]
     email_inbound_domain: str | None = None
     user_id: str
@@ -59,6 +60,7 @@ async def get_workspace(
         id=tenant.id,
         name=tenant.name,
         slug=tenant.slug,
+        domain=getattr(tenant, "domain", None) or "generic",
         branding=tenant.branding or {},
         email_inbound_domain=domain,
         user_id=context.user_id,

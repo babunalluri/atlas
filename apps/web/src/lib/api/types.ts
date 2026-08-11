@@ -7,11 +7,19 @@ export interface PlatformTenant {
   name: string;
   slug: string;
   authOrgId: string;
+  domain: string;
   branding: Record<string, unknown>;
   timezone: string;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export type WorkspaceDomain = "generic" | "stock_broker" | "dental_clinic";
+
+export interface WorkspaceDomainOption {
+  id: WorkspaceDomain;
+  label: string;
 }
 
 export interface PlatformAuditEvent {

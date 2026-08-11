@@ -72,6 +72,7 @@ from app.api import traces as traces_api
 from app.api import workflows as workflows_api
 from app.api import workflow_access as workflow_access_api
 from app.api import customers as customers_api
+from app.api import domains as domains_api
 from app.api import users as users_api
 from app.auth.dependencies import require_tenant
 from app.auth.middleware import TenantAuthMiddleware
@@ -611,6 +612,7 @@ def create_app() -> FastAPI:
     base_app.include_router(public_identity_api.router)
     base_app.include_router(interfaces_api.router)
     base_app.include_router(onboarding_api.router)
+    base_app.include_router(domains_api.router)
     base_app.include_router(workspace_api.router)
     base_app.include_router(schedules_api.router)
     base_app.include_router(sessions_api.router)

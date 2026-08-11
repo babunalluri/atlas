@@ -47,6 +47,8 @@ import type {
   WorkflowAssignments,
   WorkflowDraftInput,
   WorkflowSummary,
+  WorkspaceDomain,
+  WorkspaceDomainOption,
 } from "./types";
 import { TOOL_CATALOG, toBackendModelId } from "./types";
 import {
@@ -3294,6 +3296,7 @@ export interface WorkspaceInfo {
   id: string;
   name: string;
   slug: string;
+  domain?: string;
   branding: Record<string, unknown>;
   email_inbound_domain?: string | null;
   user_id?: string;
@@ -3329,12 +3332,56 @@ export async function getOnboardingStatus(
 
 export async function createSelfServeWorkspace(
   accessToken: string,
-  input: { name: string; slug: string },
-): Promise<WorkspaceInfo & { auth_org_id: string; is_active: boolean }> {
+  input: { name: string; slug: string; domain?: WorkspaceDomain },
+): Promise<WorkspaceInfo & { auth_org_id: string; is_active: boolean; domain: string }> {
   return apiFetch("/admin/onboarding/workspace", {
     accessToken,
     method: "POST",
     body: input,
+  });
+}
+
+export interface DomainDashboardWidget {
+  id: string;
+  label: string;
+  value: string;
+  hint: string;
+}
+
+export interface DomainDashboard {
+  domain: WorkspaceDomain;
+  domain_label: string;
+  range_days: number;
+  widgets: DomainDashboardWidget[];
+  quick_links: Array<{ label: string; href: string }>;
+  metrics: MetricsDashboard;
+  catalog: {
+    agents: number;
+    teams: number;
+    workflows: number;
+    published_agents: number;
+    published_teams: number;
+    published_workflows: number;
+    pending_approvals: number;
+    team_slugs: string[];
+    workflow_slugs: string[];
+  };
+}
+
+export async function listWorkspaceDomains(
+  accessToken: string,
+): Promise<WorkspaceDomainOption[]> {
+  return apiFetch<WorkspaceDomainOption[]>("/admin/onboarding/domains", {
+    accessToken,
+  });
+}
+
+export async function getDomainDashboard(
+  accessToken: string,
+  days = 30,
+): Promise<DomainDashboard> {
+  return apiFetch<DomainDashboard>(`/admin/domains/dashboard?days=${days}`, {
+    accessToken,
   });
 }
 
@@ -3660,6 +3707,7 @@ interface BackendPlatformTenant {
   name: string;
   slug: string;
   auth_org_id: string;
+  domain?: string;
   branding: Record<string, unknown>;
   timezone?: string;
   is_active: boolean;
@@ -3682,6 +3730,7 @@ function mapPlatformTenant(row: BackendPlatformTenant): PlatformTenant {
     name: row.name,
     slug: row.slug,
     authOrgId: row.auth_org_id,
+    domain: row.domain || "generic",
     branding: row.branding,
     timezone: row.timezone || "UTC",
     isActive: row.is_active,
@@ -3702,7 +3751,13 @@ export async function listPlatformTenants(
 
 export async function createPlatformTenant(
   accessToken: string,
-  input: { name: string; slug: string; authOrgId: string; timezone?: string },
+  input: {
+    name: string;
+    slug: string;
+    authOrgId: string;
+    timezone?: string;
+    domain?: WorkspaceDomain;
+  },
 ): Promise<PlatformTenant> {
   const row = await apiFetch<BackendPlatformTenant>(
     "/admin/platform/tenants",
@@ -3714,6 +3769,7 @@ export async function createPlatformTenant(
         slug: input.slug,
         auth_org_id: input.authOrgId,
         timezone: input.timezone || "UTC",
+        domain: input.domain || "generic",
       },
     },
   );
