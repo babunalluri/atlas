@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Label, Select } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   getWorkspaceInfo,
   listTeamCatalog,
@@ -136,24 +137,24 @@ export function PublicApiShareEmbed() {
         </div>
         <div>
           <Label htmlFor="share-resource">Published {kind}</Label>
-          <Select
+          <SearchableSelect
             id="share-resource"
             value={selectedId}
             disabled={loading || items.length === 0}
-            onChange={(event) => setSelectedId(event.target.value)}
-          >
-            {loading ? (
-              <option value="">Loading…</option>
-            ) : items.length === 0 ? (
-              <option value="">No published {kind}s</option>
-            ) : (
-              items.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} ({item.slug})
-                </option>
-              ))
-            )}
-          </Select>
+            onChange={setSelectedId}
+            placeholder={
+              loading
+                ? "Loading…"
+                : items.length === 0
+                  ? `No published ${kind}s`
+                  : `Select ${kind}`
+            }
+            emptyMessage={`No matching ${kind}s`}
+            options={items.map((item) => ({
+              value: item.id,
+              label: `${item.name} (${item.slug})`,
+            }))}
+          />
         </div>
       </div>
 

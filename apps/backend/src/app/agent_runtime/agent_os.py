@@ -36,6 +36,7 @@ from app.agent_runtime.factory import (
     build_tenant_agent_from_request,
 )
 from app.agent_runtime.persistence import get_agno_db, runtime_session_id, runtime_user_id
+from app.agent_runtime.run_control import new_run_id
 from app.api import agents as agents_api
 from app.api import approvals as approvals_api
 from app.api import channels as channels_api

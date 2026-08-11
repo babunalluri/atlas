@@ -40,6 +40,7 @@ async def _user_out(
         phone=membership.phone,
         role=membership.role.value,
         is_active=membership.is_active,
+        timezone=membership.timezone or "UTC",
         invite_pending=is_pending_user_id(membership.user_id),
         temporary_password=temporary_password,
         sign_in_url=sign_in_url,
@@ -121,6 +122,7 @@ async def create_user(
             phone=body.phone,
             role=Role(body.role),
             is_active=body.is_active,
+            timezone=body.timezone,
         )
         if body.workflow_ids:
             await workflows.replace_user_assignments(membership.user_id, body.workflow_ids)
@@ -220,6 +222,7 @@ async def update_user(
             clear_phone="phone" in dump and not dump.get("phone"),
             role=Role(body.role) if body.role else None,
             is_active=body.is_active,
+            timezone=body.timezone,
         )
         if membership is None:
             raise HTTPException(status_code=404, detail="User not found")

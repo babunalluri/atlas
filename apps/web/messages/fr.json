@@ -1,0 +1,81 @@
+{
+  "common": {
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "signIn": "Se connecter",
+    "signOut": "Se déconnecter",
+    "signUp": "S'inscrire",
+    "loading": "Chargement…",
+    "language": "Langue",
+    "admin": "Admin",
+    "backToWorkspace": "Retour à l'espace de travail",
+    "exitTenant": "Quitter"
+  },
+  "auth": {
+    "signInTitle": "Se connecter",
+    "signInSubtitle": "L'authentification du personnel utilise Keycloak auto-hébergé (open source). Aucun abonnement Clerk requis.",
+    "continueWithKeycloak": "Continuer avec Keycloak",
+    "signUpTitle": "S'inscrire",
+    "backToHome": "Retour à l'accueil",
+    "devUsers": "Utilisateurs de développement"
+  },
+  "nav": {
+    "brandSubtitle": "CONTRÔLE MULTI-LOCATAIRE",
+    "groups": {
+      "build": "Créer",
+      "monitor": "Surveiller",
+      "configure": "Configurer",
+      "platform": "Plateforme"
+    },
+    "items": {
+      "workflows": "Workflows",
+      "workflowsHint": "Ce que les utilisateurs et les API peuvent exécuter",
+      "teams": "Équipes",
+      "teamsHint": "Coordonner plusieurs agents",
+      "agents": "Agents",
+      "agentsHint": "Spécialistes avec prompts et outils",
+      "tools": "Outils",
+      "toolsHint": "API, Python, MCP et toolkits",
+      "toolkitCatalog": "Catalogue de toolkits",
+      "toolkitCatalogHint": "Activer les toolkits intégrés comme outils",
+      "traces": "Traces",
+      "tracesHint": "Journaux de chat, exécutions et erreurs",
+      "approvals": "Approbations",
+      "approvalsHint": "Actions d'outils en pause en attente de vous",
+      "schedules": "Planifications",
+      "schedulesHint": "Exécutions planifiées et récurrentes",
+      "metrics": "Métriques",
+      "metricsHint": "Utilisation et taux d'erreur",
+      "evaluations": "Évaluations",
+      "evaluationsHint": "Suites de tests de qualité",
+      "knowledge": "Connaissances",
+      "knowledgeHint": "Documents utilisables par les agents",
+      "memories": "Mémoires",
+      "memoriesHint": "Lignes de mémoire utilisateur persistantes",
+      "learnings": "Apprentissages",
+      "learningsHint": "Enregistrements du magasin d'apprentissage",
+      "users": "Utilisateurs",
+      "usersHint": "Personnes et accès aux workflows",
+      "notifications": "Notifications",
+      "notificationsHint": "Message à un utilisateur ou à tout le monde",
+      "billing": "Facturation",
+      "billingHint": "Crédits, forfaits et limites d'utilisation",
+      "credentials": "Identifiants",
+      "credentialsHint": "Clés API pour les modèles et outils",
+      "publicApi": "API publique",
+      "publicApiHint": "Jetons et liens de partage",
+      "serviceAccounts": "Comptes de service",
+      "serviceAccountsHint": "Identifiants machine",
+      "mcpServer": "Serveur MCP",
+      "mcpServerHint": "Point de terminaison Model Context Protocol",
+      "superAdmin": "Super admin",
+      "superAdminHint": "Locataires et audit de la plateforme",
+      "sandboxPackages": "Paquets sandbox",
+      "sandboxPackagesHint": "Paquets Python autorisés"
+    }
+  },
+  "home": {
+    "title": "Atlas Agents",
+    "tagline": "Configuration d'agents multi-locataire et chat client de marque"
+  }
+}

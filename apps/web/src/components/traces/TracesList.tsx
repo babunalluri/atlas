@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { useMemo, useState, type CSSProperties } from "react";
 
 import {
@@ -11,7 +11,8 @@ import {
 } from "@/lib/activities";
 import type { ActivityChannel, ActivityRow } from "@/lib/api/types";
 import { Badge } from "@/components/ui/Badge";
-import { Input, Select } from "@/components/ui/Field";
+import { Input } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 
 type TabKey = "live_chat" | "scheduled" | "api" | "email" | "all";
 
@@ -70,8 +71,10 @@ function targetTypeBadgeTone(
 
 export function TracesList({
   initialActivities,
+  timeZone = "UTC",
 }: {
   initialActivities: ActivityRow[];
+  timeZone?: string;
 }) {
   const [tab, setTab] = useState<TabKey>("live_chat");
   const [user, setUser] = useState("all");
@@ -141,7 +144,8 @@ export function TracesList({
   }, [initialActivities, tab, user, target, status, startDate, endDate]);
 
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0];
-  const timeZoneHint = formatActivityTime(new Date().toISOString()).zone;
+  const timeZoneHint = formatActivityTime(new Date().toISOString(), timeZone)
+    .zone;
 
   return (
     <div className="space-y-6">
@@ -210,43 +214,44 @@ export function TracesList({
       </div>
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <Select
-          aria-label="Filter by user"
+        <SearchableSelect
+          id="traces-filter-user"
           value={user}
-          onChange={(event) => setUser(event.target.value)}
-        >
-          <option value="all">All users</option>
-          {users.map(([id, label]) => (
-            <option key={id} value={id}>
-              {label}
-            </option>
-          ))}
-        </Select>
-        <Select
-          aria-label="Filter by target"
+          onChange={setUser}
+          placeholder="All users"
+          options={[
+            { value: "all", label: "All users" },
+            ...users.map(([id, label]) => ({ value: id, label })),
+          ]}
+        />
+        <SearchableSelect
+          id="traces-filter-target"
           value={target}
-          onChange={(event) => setTarget(event.target.value)}
-        >
-          <option value="all">All teams / workflows</option>
-          {targets.map((row) => (
-            <option key={targetFilterKey(row)} value={targetFilterKey(row)}>
-              {row.personaName} ({activityTargetTypeLabel(row.personaType)})
-            </option>
-          ))}
-        </Select>
-        <Select
-          aria-label="Filter by status"
+          onChange={setTarget}
+          placeholder="All teams / workflows"
+          options={[
+            { value: "all", label: "All teams / workflows" },
+            ...targets.map((row) => ({
+              value: targetFilterKey(row),
+              label: `${row.personaName} (${activityTargetTypeLabel(row.personaType)})`,
+            })),
+          ]}
+        />
+        <SearchableSelect
+          id="traces-filter-status"
           value={status}
-          onChange={(event) => setStatus(event.target.value)}
-        >
-          <option value="all">All statuses</option>
-          <option value="completed">Completed</option>
-          <option value="running">Running</option>
-          <option value="active">Active</option>
-          <option value="paused">Paused</option>
-          <option value="error">Error</option>
-          <option value="cancelled">Cancelled</option>
-        </Select>
+          onChange={setStatus}
+          placeholder="All statuses"
+          options={[
+            { value: "all", label: "All statuses" },
+            { value: "completed", label: "Completed" },
+            { value: "running", label: "Running" },
+            { value: "active", label: "Active" },
+            { value: "paused", label: "Paused" },
+            { value: "error", label: "Error" },
+            { value: "cancelled", label: "Cancelled" },
+          ]}
+        />
         <Input
           type="date"
           aria-label="Start date"
@@ -271,7 +276,7 @@ export function TracesList({
             <span className="th-label text-right">Status</span>
           </div>
           {filtered.map((row) => {
-            const time = formatActivityTime(row.updatedAt);
+            const time = formatActivityTime(row.updatedAt, timeZone);
             return (
               <Link
                 key={row.id}

@@ -1,0 +1,81 @@
+{
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "signIn": "Sign in",
+    "signOut": "Sign out",
+    "signUp": "Sign up",
+    "loading": "Loading…",
+    "language": "Language",
+    "admin": "Admin",
+    "backToWorkspace": "Back to workspace",
+    "exitTenant": "Exit"
+  },
+  "auth": {
+    "signInTitle": "Sign in",
+    "signInSubtitle": "Staff authentication uses self-hosted Keycloak (open source). No Clerk subscription required.",
+    "continueWithKeycloak": "Continue with Keycloak",
+    "signUpTitle": "Sign up",
+    "backToHome": "Back to home",
+    "devUsers": "Dev users"
+  },
+  "nav": {
+    "brandSubtitle": "MULTI-TENANT CONTROL",
+    "groups": {
+      "build": "Build",
+      "monitor": "Monitor",
+      "configure": "Configure",
+      "platform": "Platform"
+    },
+    "items": {
+      "workflows": "Workflows",
+      "workflowsHint": "What users and APIs can run",
+      "teams": "Teams",
+      "teamsHint": "Coordinate multiple agents",
+      "agents": "Agents",
+      "agentsHint": "Specialists with prompts and tools",
+      "tools": "Tools",
+      "toolsHint": "API, Python, MCP, and toolkits",
+      "toolkitCatalog": "Toolkit catalog",
+      "toolkitCatalogHint": "Enable built-in toolkits as tools",
+      "traces": "Traces",
+      "tracesHint": "Chat logs, runs, and errors",
+      "approvals": "Approvals",
+      "approvalsHint": "Paused tool actions waiting on you",
+      "schedules": "Schedules",
+      "schedulesHint": "Timed and recurring runs",
+      "metrics": "Metrics",
+      "metricsHint": "Usage and error rates",
+      "evaluations": "Evaluations",
+      "evaluationsHint": "Quality test suites",
+      "knowledge": "Knowledge",
+      "knowledgeHint": "Documents agents can use",
+      "memories": "Memories",
+      "memoriesHint": "Persistent user memory rows",
+      "learnings": "Learnings",
+      "learningsHint": "Learning store records",
+      "users": "Users",
+      "usersHint": "People and workflow access",
+      "notifications": "Notifications",
+      "notificationsHint": "Message one user or everyone",
+      "billing": "Billing",
+      "billingHint": "Credits, plans, and usage limits",
+      "credentials": "Credentials",
+      "credentialsHint": "API keys for models and tools",
+      "publicApi": "Public API",
+      "publicApiHint": "Tokens and share links",
+      "serviceAccounts": "Service accounts",
+      "serviceAccountsHint": "Machine credentials",
+      "mcpServer": "MCP server",
+      "mcpServerHint": "Model Context Protocol endpoint",
+      "superAdmin": "Super admin",
+      "superAdminHint": "Tenants and platform audit",
+      "sandboxPackages": "Sandbox packages",
+      "sandboxPackagesHint": "Allowed Python packages"
+    }
+  },
+  "home": {
+    "title": "Atlas Agents",
+    "tagline": "Multi-tenant agent configuration and branded customer chat"
+  }
+}

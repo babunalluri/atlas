@@ -8,6 +8,7 @@ export interface PlatformTenant {
   slug: string;
   authOrgId: string;
   branding: Record<string, unknown>;
+  timezone: string;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -507,6 +508,7 @@ export interface TenantUser {
   phone: string | null;
   role: "tenant_admin" | "end_user";
   isActive: boolean;
+  timezone: string;
   invitePending?: boolean;
   temporaryPassword?: string | null;
   signInUrl?: string | null;
@@ -523,6 +525,7 @@ export interface TenantUserInput {
   phone?: string;
   role: "tenant_admin" | "end_user";
   isActive: boolean;
+  timezone: string;
   workflowIds: string[];
   teamIds: string[];
 }

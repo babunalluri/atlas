@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select } from "@/components/ui/Field";
+import { Input, Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { GrantCreditsForm } from "@/components/billing/GrantCreditsForm";
 import {
   getTenantBillingWallet,
@@ -260,22 +261,22 @@ export function BillingPanel({
         ) : null}
         <div className="mt-4 max-w-lg">
           <Label htmlFor="grant-user">User</Label>
-          <Select
+          <SearchableSelect
             id="grant-user"
             value={grantUserId}
-            onChange={(event) => setGrantUserId(event.target.value)}
+            onChange={setGrantUserId}
             disabled={selectableUsers.length === 0}
-          >
-            {selectableUsers.length === 0 ? (
-              <option value="">No active users — invite someone first</option>
-            ) : (
-              selectableUsers.map((user) => (
-                <option key={user.userId} value={user.userId}>
-                  {userLabel(user)}
-                </option>
-              ))
-            )}
-          </Select>
+            placeholder={
+              selectableUsers.length === 0
+                ? "No active users — invite someone first"
+                : "Search users…"
+            }
+            emptyMessage="No matching users"
+            options={selectableUsers.map((user) => ({
+              value: user.userId,
+              label: userLabel(user),
+            }))}
+          />
         </div>
         <div className="mt-4">
           <GrantCreditsForm

@@ -1,8 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { signIn, useSession } from "next-auth/react";
+import { useLocale } from "next-intl";
 
+import { Link } from "@/i18n/navigation";
 import { signOutFederated } from "@/lib/auth/federated-signout";
 
 /**
@@ -15,6 +16,7 @@ export function ChatAccountBar({
   tenantSlug: string;
   signInRedirect: string;
 }) {
+  const locale = useLocale();
   const { data: session, status } = useSession();
 
   if (status === "loading") {
@@ -40,7 +42,7 @@ export function ChatAccountBar({
   return (
     <button
       type="button"
-      onClick={() => void signOutFederated(`/t/${tenantSlug}/chat`)}
+      onClick={() => void signOutFederated(`/${locale}/sign-in`)}
       className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/85 hover:bg-white/10"
       title={session.user?.email || "Signed in"}
     >

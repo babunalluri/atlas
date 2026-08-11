@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { GrantCreditsForm } from "@/components/billing/GrantCreditsForm";
-import { Label, Select } from "@/components/ui/Field";
+import { Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   getPlatformTenantWallet,
   grantPlatformTenantCredits,
@@ -88,21 +89,22 @@ export function PlatformGrantCreditsPanel({
       ) : null}
       <div className="mt-4 max-w-md">
         <Label htmlFor="grant-tenant">Organization</Label>
-        <Select
+        <SearchableSelect
           id="grant-tenant"
           value={tenantId}
-          onChange={(event) => setTenantId(event.target.value)}
-        >
-          {activeTenants.length === 0 ? (
-            <option value="">No active tenants</option>
-          ) : (
-            activeTenants.map((tenant) => (
-              <option key={tenant.id} value={tenant.id}>
-                {tenant.name} (/{tenant.slug})
-              </option>
-            ))
-          )}
-        </Select>
+          onChange={setTenantId}
+          disabled={activeTenants.length === 0}
+          placeholder={
+            activeTenants.length === 0
+              ? "No active tenants"
+              : "Search organizations…"
+          }
+          emptyMessage="No matching organizations"
+          options={activeTenants.map((tenant) => ({
+            value: tenant.id,
+            label: `${tenant.name} (/${tenant.slug})`,
+          }))}
+        />
       </div>
       <div className="mt-4">
         <GrantCreditsForm

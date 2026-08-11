@@ -1,5 +1,8 @@
 import path from "node:path";
 import type { NextConfig } from "next";
+import createNextIntlPlugin from "next-intl/plugin";
+
+const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -7,37 +10,37 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [
       {
-        source: "/admin/activities",
-        destination: "/admin/traces",
+        source: "/:locale/admin/activities",
+        destination: "/:locale/admin/traces",
         permanent: false,
       },
       {
-        source: "/admin/activities/:id",
-        destination: "/admin/traces/:id",
+        source: "/:locale/admin/activities/:id",
+        destination: "/:locale/admin/traces/:id",
         permanent: false,
       },
       {
-        source: "/admin/activities/:path*",
-        destination: "/admin/traces",
+        source: "/:locale/admin/activities/:path*",
+        destination: "/:locale/admin/traces",
         permanent: false,
       },
       {
-        source: "/admin/sessions",
-        destination: "/admin/traces",
+        source: "/:locale/admin/sessions",
+        destination: "/:locale/admin/traces",
         permanent: false,
       },
       {
-        source: "/admin/sessions/:id",
-        destination: "/admin/traces/:id",
+        source: "/:locale/admin/sessions/:id",
+        destination: "/:locale/admin/traces/:id",
         permanent: false,
       },
       {
-        source: "/admin/sessions/:path*",
-        destination: "/admin/traces",
+        source: "/:locale/admin/sessions/:path*",
+        destination: "/:locale/admin/traces",
         permanent: false,
       },
     ];
   },
 };
 
-export default nextConfig;
+export default withNextIntl(nextConfig);

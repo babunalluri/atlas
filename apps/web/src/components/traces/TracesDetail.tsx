@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -47,12 +47,14 @@ function displayUser(activity: ActivityRow) {
 function MessageTurn({
   message,
   tokens,
+  timeZone,
 }: {
   message: ChatMessage;
   tokens?: { input: number | null; output: number | null };
+  timeZone: string;
 }) {
   const isUser = message.role === "user";
-  const time = formatActivityTime(message.createdAt);
+  const time = formatActivityTime(message.createdAt, timeZone);
   if (message.role === "system") {
     return (
       <p className="rounded-lg bg-fog px-3 py-2 text-xs text-slate-muted">
@@ -112,12 +114,14 @@ export function TracesDetail({
   traces,
   initialTrace,
   preferredTraceId = null,
+  timeZone = "UTC",
 }: {
   activity: ActivityRow;
   messages: ChatMessage[];
   traces: TraceSummary[];
   initialTrace: TraceDetail | null;
   preferredTraceId?: string | null;
+  timeZone?: string;
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [showRawError, setShowRawError] = useState(false);
@@ -166,7 +170,7 @@ export function TracesDetail({
     () => extractTokenCounts(detail?.output ?? detail?.metadata),
     [detail],
   );
-  const created = formatActivityTime(activity.createdAt);
+  const created = formatActivityTime(activity.createdAt, timeZone);
   const lastAssistantIndex = [...messages]
     .map((message, index) => (message.role === "assistant" ? index : -1))
     .filter((index) => index >= 0)
@@ -225,7 +229,7 @@ export function TracesDetail({
             `${activity.personaName} · ${activityTargetTypeLabel(activity.personaType)}`,
           ],
           [activity.scheduleName ? "Schedule" : "Slug", activity.taskName],
-          ["Created", created.absolute],
+          ["Created", `${created.absolute} ${created.zone}`],
           [
             "Tokens in / out",
             tokens.input != null || tokens.output != null
@@ -284,6 +288,7 @@ export function TracesDetail({
               key={message.id}
               message={message}
               tokens={index === lastAssistantIndex ? tokens : undefined}
+              timeZone={timeZone}
             />
           ))}
           {messages.length === 0 ? (
@@ -371,7 +376,11 @@ export function TracesDetail({
                   </div>
                 </div>
 
-                <TraceSpanPanel key={detail.id} detail={detail} />
+                <TraceSpanPanel
+                  key={detail.id}
+                  detail={detail}
+                  timeZone={timeZone}
+                />
               </>
             )}
           </div>

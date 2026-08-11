@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "@/i18n/navigation";
 
 import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
@@ -15,6 +15,7 @@ import {
   Textarea,
 } from "@/components/ui/Field";
 import { ModelSelect } from "@/components/ui/ModelSelect";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
 import { ToolAttachmentSection } from "@/components/tools/ToolAttachmentSection";
 import {
@@ -329,22 +330,23 @@ export function AgentEditor({
                 </p>
                 <div className="mt-3 max-w-sm">
                   <Label htmlFor="framework-adapter">Framework adapter</Label>
-                  <Select
+                  <SearchableSelect
                     id="framework-adapter"
                     value={form.frameworkAdapter}
-                    onChange={(e) =>
-                      update(
-                        "frameworkAdapter",
-                        e.target.value as FrameworkAdapter,
-                      )
+                    onChange={(value) =>
+                      update("frameworkAdapter", value as FrameworkAdapter)
                     }
-                  >
-                    <option value="agno">Native (default)</option>
-                    <option value="langgraph">LangGraph</option>
-                    <option value="dspy">DSPy</option>
-                    <option value="claude_agent_sdk">Claude Agent SDK</option>
-                    <option value="antigravity">Antigravity</option>
-                  </Select>
+                    options={[
+                      { value: "agno", label: "Native (default)" },
+                      { value: "langgraph", label: "LangGraph" },
+                      { value: "dspy", label: "DSPy" },
+                      {
+                        value: "claude_agent_sdk",
+                        label: "Claude Agent SDK",
+                      },
+                      { value: "antigravity", label: "Antigravity" },
+                    ]}
+                  />
                 </div>
                 <p className="mt-4 text-sm font-semibold">Guardrails</p>
                 <p className="mt-1 text-xs text-slate-muted">

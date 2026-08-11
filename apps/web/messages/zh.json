@@ -1,0 +1,81 @@
+{
+  "common": {
+    "save": "保存",
+    "cancel": "取消",
+    "signIn": "登录",
+    "signOut": "退出登录",
+    "signUp": "注册",
+    "loading": "加载中…",
+    "language": "语言",
+    "admin": "管理",
+    "backToWorkspace": "返回工作区",
+    "exitTenant": "退出"
+  },
+  "auth": {
+    "signInTitle": "登录",
+    "signInSubtitle": "员工身份验证使用自托管的 Keycloak（开源）。无需 Clerk 订阅。",
+    "continueWithKeycloak": "使用 Keycloak 继续",
+    "signUpTitle": "注册",
+    "backToHome": "返回首页",
+    "devUsers": "开发用户"
+  },
+  "nav": {
+    "brandSubtitle": "多租户控制",
+    "groups": {
+      "build": "构建",
+      "monitor": "监控",
+      "configure": "配置",
+      "platform": "平台"
+    },
+    "items": {
+      "workflows": "工作流",
+      "workflowsHint": "用户和 API 可运行的内容",
+      "teams": "团队",
+      "teamsHint": "协调多个智能体",
+      "agents": "智能体",
+      "agentsHint": "带提示词和工具的专家",
+      "tools": "工具",
+      "toolsHint": "API、Python、MCP 和工具包",
+      "toolkitCatalog": "工具包目录",
+      "toolkitCatalogHint": "将内置工具包启用为工具",
+      "traces": "追踪",
+      "tracesHint": "聊天日志、运行记录和错误",
+      "approvals": "审批",
+      "approvalsHint": "等待你处理的已暂停工具操作",
+      "schedules": "计划任务",
+      "schedulesHint": "定时和周期性运行",
+      "metrics": "指标",
+      "metricsHint": "使用情况和错误率",
+      "evaluations": "评估",
+      "evaluationsHint": "质量测试套件",
+      "knowledge": "知识库",
+      "knowledgeHint": "智能体可使用的文档",
+      "memories": "记忆",
+      "memoriesHint": "持久化用户记忆记录",
+      "learnings": "学习记录",
+      "learningsHint": "学习存储记录",
+      "users": "用户",
+      "usersHint": "人员与工作流访问权限",
+      "notifications": "通知",
+      "notificationsHint": "向单个用户或所有人发送消息",
+      "billing": "账单",
+      "billingHint": "额度、套餐和使用限额",
+      "credentials": "凭证",
+      "credentialsHint": "模型和工具的 API 密钥",
+      "publicApi": "公共 API",
+      "publicApiHint": "令牌和分享链接",
+      "serviceAccounts": "服务账户",
+      "serviceAccountsHint": "机器凭证",
+      "mcpServer": "MCP 服务器",
+      "mcpServerHint": "Model Context Protocol 端点",
+      "superAdmin": "超级管理员",
+      "superAdminHint": "租户与平台审计",
+      "sandboxPackages": "沙箱软件包",
+      "sandboxPackagesHint": "允许的 Python 软件包"
+    }
+  },
+  "home": {
+    "title": "Atlas Agents",
+    "tagline": "多租户智能体配置与品牌化客户聊天"
+  }
+}

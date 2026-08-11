@@ -1,0 +1,81 @@
+{
+  "common": {
+    "save": "حفظ",
+    "cancel": "إلغاء",
+    "signIn": "تسجيل الدخول",
+    "signOut": "تسجيل الخروج",
+    "signUp": "إنشاء حساب",
+    "loading": "جارٍ التحميل…",
+    "language": "اللغة",
+    "admin": "المسؤول",
+    "backToWorkspace": "العودة إلى مساحة العمل",
+    "exitTenant": "خروج"
+  },
+  "auth": {
+    "signInTitle": "تسجيل الدخول",
+    "signInSubtitle": "مصادقة الموظفين تستخدم Keycloak المستضاف ذاتيًا (مفتوح المصدر). لا يلزم اشتراك Clerk.",
+    "continueWithKeycloak": "المتابعة مع Keycloak",
+    "signUpTitle": "إنشاء حساب",
+    "backToHome": "العودة إلى الصفحة الرئيسية",
+    "devUsers": "مستخدمو التطوير"
+  },
+  "nav": {
+    "brandSubtitle": "تحكم متعدد المستأجرين",
+    "groups": {
+      "build": "البناء",
+      "monitor": "المراقبة",
+      "configure": "الإعداد",
+      "platform": "المنصة"
+    },
+    "items": {
+      "workflows": "سير العمل",
+      "workflowsHint": "ما يمكن للمستخدمين وواجهات API تشغيله",
+      "teams": "الفرق",
+      "teamsHint": "تنسيق عدة وكلاء",
+      "agents": "الوكلاء",
+      "agentsHint": "متخصصون مع مطالبات وأدوات",
+      "tools": "الأدوات",
+      "toolsHint": "API وPython وMCP ومجموعات الأدوات",
+      "toolkitCatalog": "كتالوج مجموعات الأدوات",
+      "toolkitCatalogHint": "تفعيل مجموعات الأدوات المدمجة كأدوات",
+      "traces": "التتبعات",
+      "tracesHint": "سجلات الدردشة والتشغيل والأخطاء",
+      "approvals": "الموافقات",
+      "approvalsHint": "إجراءات أدوات متوقفة بانتظارك",
+      "schedules": "الجداول",
+      "schedulesHint": "تشغيلات مجدولة ومتكررة",
+      "metrics": "المقاييس",
+      "metricsHint": "معدلات الاستخدام والأخطاء",
+      "evaluations": "التقييمات",
+      "evaluationsHint": "مجموعات اختبار الجودة",
+      "knowledge": "المعرفة",
+      "knowledgeHint": "مستندات يمكن للوكلاء استخدامها",
+      "memories": "الذكريات",
+      "memoriesHint": "صفوف ذاكرة المستخدم الدائمة",
+      "learnings": "التعلمات",
+      "learningsHint": "سجلات مخزن التعلم",
+      "users": "المستخدمون",
+      "usersHint": "الأشخاص والوصول إلى سير العمل",
+      "notifications": "الإشعارات",
+      "notificationsHint": "مراسلة مستخدم واحد أو الجميع",
+      "billing": "الفوترة",
+      "billingHint": "الأرصدة والخطط وحدود الاستخدام",
+      "credentials": "بيانات الاعتماد",
+      "credentialsHint": "مفاتيح API للنماذج والأدوات",
+      "publicApi": "واجهة API العامة",
+      "publicApiHint": "الرموز وروابط المشاركة",
+      "serviceAccounts": "حسابات الخدمة",
+      "serviceAccountsHint": "بيانات اعتماد الآلة",
+      "mcpServer": "خادم MCP",
+      "mcpServerHint": "نقطة نهاية Model Context Protocol",
+      "superAdmin": "المسؤول الأعلى",
+      "superAdminHint": "المستأجرون وتدقيق المنصة",
+      "sandboxPackages": "حزم البيئة المعزولة",
+      "sandboxPackagesHint": "حزم Python المسموح بها"
+    }
+  },
+  "home": {
+    "title": "Atlas Agents",
+    "tagline": "تكوين وكلاء متعدد المستأجرين ودردشة عملاء بعلامة تجارية"
+  }
+}

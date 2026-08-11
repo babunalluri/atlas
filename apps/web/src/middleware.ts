@@ -1,16 +1,11 @@
+import createMiddleware from "next-intl/middleware";
 import { NextResponse } from "next/server";
 
 import { auth } from "@/auth";
+import { routing } from "@/i18n/routing";
 import { staffAuthConfigured } from "@/lib/auth/staff-auth-config";
 
-const publicPrefixes = ["/", "/sign-in", "/sign-up", "/t/", "/embed/", "/api/auth"];
-
-function isPublic(pathname: string): boolean {
-  if (pathname === "/") return true;
-  return publicPrefixes.some(
-    (prefix) => prefix !== "/" && pathname.startsWith(prefix),
-  );
-}
+const intlMiddleware = createMiddleware(routing);
 
 const allowDevAuthBypass =
   process.env.NEXT_PUBLIC_DEV_AUTH === "true" &&
@@ -23,28 +18,67 @@ function denyMisconfiguredAuth() {
   );
 }
 
+function stripLocale(pathname: string): { locale: string | null; path: string } {
+  const parts = pathname.split("/");
+  const maybeLocale = parts[1] ?? "";
+  if ((routing.locales as readonly string[]).includes(maybeLocale)) {
+    const rest = `/${parts.slice(2).join("/")}` || "/";
+    return { locale: maybeLocale, path: rest.replace(/\/$/, "") || "/" };
+  }
+  return { locale: null, path: pathname };
+}
+
+function isPublicPath(pathWithoutLocale: string): boolean {
+  if (pathWithoutLocale === "/") return true;
+  const publicPrefixes = [
+    "/sign-in",
+    "/sign-up",
+    "/t/",
+    "/embed/",
+    "/chat",
+    "/api/auth",
+  ];
+  return publicPrefixes.some(
+    (prefix) =>
+      pathWithoutLocale === prefix.replace(/\/$/, "") ||
+      pathWithoutLocale.startsWith(prefix),
+  );
+}
+
 export default auth((request) => {
   const { pathname } = request.nextUrl;
-  if (isPublic(pathname) || allowDevAuthBypass) {
+
+  // Auth.js / API routes skip locale handling.
+  if (pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
-  // Fail closed outside development when IdP/session secrets are missing or
-  // still set to repo-committed placeholders (prevents forged session cookies).
+
+  const intlResponse = intlMiddleware(request);
+
+  const { locale, path } = stripLocale(pathname);
+  const pathForAuth = locale ? path : pathname;
+
+  if (isPublicPath(pathForAuth) || allowDevAuthBypass) {
+    return intlResponse;
+  }
+
   if (!staffAuthConfigured()) {
     return denyMisconfiguredAuth();
   }
+
   if (!request.auth) {
-    const signIn = new URL("/sign-in", request.nextUrl.origin);
+    const signInLocale = locale ?? routing.defaultLocale;
+    const signIn = new URL(`/${signInLocale}/sign-in`, request.nextUrl.origin);
     const returnTo = `${request.nextUrl.pathname}${request.nextUrl.search}`;
-    signIn.searchParams.set("callbackUrl", returnTo || "/admin");
+    signIn.searchParams.set("callbackUrl", returnTo || `/${signInLocale}/admin`);
     return NextResponse.redirect(signIn);
   }
-  return NextResponse.next();
+
+  return intlResponse;
 });
 
 export const config = {
   matcher: [
-    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
-    "/(api|trpc)(.*)",
+    "/((?!_next|.*\\..*).*)",
   ],
 };

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_tenant
 from app.db.models import Role, Tenant
+from app.db.repositories import MembershipRepository
 from app.db.session import tenant_session
 from app.tenancy.context import TenantContext
 
@@ -27,6 +28,8 @@ class WorkspaceInfoOut(BaseModel):
     user_id: str
     role: Role
     can_administer: bool
+    timezone: str = "UTC"
+    tenant_timezone: str = "UTC"
 
 
 @router.get("", response_model=WorkspaceInfoOut)
@@ -43,6 +46,15 @@ async def get_workspace(
     from app.core.settings import get_settings
 
     domain = get_settings().email_inbound_domain.strip() or None
+    tenant_tz = getattr(tenant, "timezone", None) or "UTC"
+    membership = await MembershipRepository(session, context).get_by_user_id(
+        context.user_id
+    )
+    user_tz = (
+        membership.timezone
+        if membership is not None and membership.timezone
+        else tenant_tz
+    )
     return WorkspaceInfoOut(
         id=tenant.id,
         name=tenant.name,
@@ -52,4 +64,6 @@ async def get_workspace(
         user_id=context.user_id,
         role=context.role,
         can_administer=context.can_administer(),
+        timezone=user_tz,
+        tenant_timezone=tenant_tz,
     )

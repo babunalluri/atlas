@@ -5,7 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 import { PlatformGrantCreditsPanel } from "@/components/platform/PlatformGrantCreditsPanel";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select } from "@/components/ui/Field";
+import { Input, Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
+import {
+  TimezoneSelect,
+  browserTimezone,
+} from "@/components/ui/TimezoneSelect";
 import {
   createPlatformTenant,
   enterPlatformTenant,
@@ -40,6 +45,7 @@ export function PlatformTenantsPanel({
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [authOrgId, setAuthOrgId] = useState("");
+  const [timezone, setTimezone] = useState(browserTimezone);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +113,7 @@ export function PlatformTenantsPanel({
         name: name.trim(),
         slug: slugifyName(slug || name),
         authOrgId: authOrgId.trim(),
+        timezone,
       });
       setTenants((current) =>
         [...current, created].sort((a, b) => a.name.localeCompare(b.name)),
@@ -114,6 +121,7 @@ export function PlatformTenantsPanel({
       setName("");
       setSlug("");
       setAuthOrgId("");
+      setTimezone(browserTimezone);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Tenant creation failed");
     } finally {
@@ -258,6 +266,14 @@ export function PlatformTenantsPanel({
                   onChange={(event) => setAuthOrgId(event.target.value)}
                 />
               </div>
+              <div className="sm:col-span-2">
+                <TimezoneSelect
+                  id="tenant-timezone"
+                  value={timezone}
+                  onChange={setTimezone}
+                  hint="Default for traces and new users"
+                />
+              </div>
             </div>
             <Button
               className="mt-3 w-full"
@@ -289,16 +305,17 @@ export function PlatformTenantsPanel({
         </div>
         <div className="table-shell overflow-x-auto rounded-xl">
           <div className="min-w-[760px]">
-            <div className="grid grid-cols-[1.3fr_1fr_0.7fr_1fr] gap-3 border-b border-line px-4 py-2.5">
+            <div className="grid grid-cols-[1.3fr_1fr_0.7fr_0.7fr_1fr] gap-3 border-b border-line px-4 py-2.5">
               <span className="th-label">Tenant</span>
               <span className="th-label">Organization ID</span>
+              <span className="th-label">Timezone</span>
               <span className="th-label">Status</span>
               <span className="th-label text-right">Actions</span>
             </div>
             {tenants.map((tenant) => (
               <div
                 key={tenant.id}
-                className="grid grid-cols-[1.3fr_1fr_0.7fr_1fr] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0"
+                className="grid grid-cols-[1.3fr_1fr_0.7fr_0.7fr_1fr] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0"
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{tenant.name}</p>
@@ -308,6 +325,9 @@ export function PlatformTenantsPanel({
                 </div>
                 <p className="mono-cell truncate text-slate-muted">
                   {tenant.authOrgId}
+                </p>
+                <p className="mono-cell truncate text-slate-muted">
+                  {tenant.timezone || "UTC"}
                 </p>
                 <Badge dot tone={tenant.isActive ? "success" : "danger"}>
                   {tenant.isActive ? "Active" : "Suspended"}
@@ -350,35 +370,33 @@ export function PlatformTenantsPanel({
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <div>
             <Label htmlFor="import-source">Source tenant</Label>
-            <Select
+            <SearchableSelect
               id="import-source"
               value={sourceTenantId}
-              onChange={(event) => setSourceTenantId(event.target.value)}
-            >
-              <option value="">Select source…</option>
-              {activeTenants.map((tenant) => (
-                <option key={tenant.id} value={tenant.id}>
-                  {tenant.name}
-                </option>
-              ))}
-            </Select>
+              onChange={setSourceTenantId}
+              placeholder="Select source…"
+              emptyMessage="No matching tenants"
+              options={activeTenants.map((tenant) => ({
+                value: tenant.id,
+                label: tenant.name,
+              }))}
+            />
           </div>
           <div>
             <Label htmlFor="import-dest">Destination tenant</Label>
-            <Select
+            <SearchableSelect
               id="import-dest"
               value={destTenantId}
-              onChange={(event) => setDestTenantId(event.target.value)}
-            >
-              <option value="">Select destination…</option>
-              {activeTenants
+              onChange={setDestTenantId}
+              placeholder="Select destination…"
+              emptyMessage="No matching tenants"
+              options={activeTenants
                 .filter((tenant) => tenant.id !== sourceTenantId)
-                .map((tenant) => (
-                  <option key={tenant.id} value={tenant.id}>
-                    {tenant.name}
-                  </option>
-                ))}
-            </Select>
+                .map((tenant) => ({
+                  value: tenant.id,
+                  label: tenant.name,
+                }))}
+            />
           </div>
         </div>
 
@@ -466,14 +484,15 @@ export function PlatformTenantsPanel({
             Recent provisioning and access changes
           </p>
         </div>
-        <div className="table-shell overflow-x-auto rounded-xl">
+        <div className="table-shell rounded-xl">
           {audit.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-slate-muted">
               No platform changes have been recorded yet.
             </p>
           ) : (
+            <div className="max-h-[min(28rem,70vh)] overflow-auto">
             <table className="min-w-full text-left text-sm">
-              <thead className="border-b border-line/70 text-[10px] uppercase tracking-[0.12em] text-slate-muted">
+              <thead className="sticky top-0 z-10 border-b border-line/70 bg-raised text-[10px] uppercase tracking-[0.12em] text-slate-muted">
                 <tr>
                   <th className="px-3 py-2 font-medium">Action</th>
                   <th className="px-3 py-2 font-medium">Actor</th>
@@ -518,6 +537,7 @@ export function PlatformTenantsPanel({
                 })}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       </section>

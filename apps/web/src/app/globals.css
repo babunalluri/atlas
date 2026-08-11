@@ -2,7 +2,8 @@
 
 @theme {
   --font-display: "Syne", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", var(--font-noto), var(--font-deva),
+    var(--font-arabic), var(--font-sc), ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 
@@ -284,4 +285,9 @@
   .portal-rise-delay-3 {
     animation-delay: 0.18s;
   }
+}
+
+html[dir="rtl"] .border-l-2 {
+  border-left-width: 0;
+  border-right-width: 2px;
 }

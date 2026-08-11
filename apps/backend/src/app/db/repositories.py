@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, delete, func, or_, select, update
+from sqlalchemy import Select, String, cast, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -871,9 +871,8 @@ class TeamRepository(TenantRepository):
             raise LookupError("Team version not found")
         if version.status != AgentStatus.draft:
             raise ValueError("Only draft team versions can be published")
+        # Members are optional: a team may run as leader-only with Team.tools.
         members = list(await self.members(version.id))
-        if len(members) < 1:
-            raise ValueError("Published teams require at least one agent")
 
         agent_repo = AgentRepository(self.session, self.context)
         for member in members:
@@ -1156,6 +1155,7 @@ class MembershipRepository(TenantRepository):
         role: Role,
         is_active: bool = True,
         phone: str | None = None,
+        timezone: str = "UTC",
     ) -> Membership:
         existing = await self.get_by_user_id(user_id)
         if existing is not None:
@@ -1169,6 +1169,7 @@ class MembershipRepository(TenantRepository):
             display_name=display_name.strip(),
             email=(email or "").strip() or None,
             phone=(phone or "").strip() or None,
+            timezone=timezone,
             role=role,
             is_active=is_active,
         )
@@ -1191,6 +1192,7 @@ class MembershipRepository(TenantRepository):
         phone: str | None = None,
         role: Role | None = None,
         is_active: bool | None = None,
+        timezone: str | None = None,
         clear_phone: bool = False,
     ) -> Membership | None:
         membership = await self.get(membership_id)
@@ -1204,6 +1206,8 @@ class MembershipRepository(TenantRepository):
             membership.phone = None
         elif phone is not None:
             membership.phone = phone.strip() or None
+        if timezone is not None:
+            membership.timezone = timezone
         if role is not None:
             if role not in {Role.tenant_admin, Role.end_user}:
                 raise ValueError("Tenant users must be tenant_admin or end_user")
@@ -2214,7 +2218,8 @@ class UserNotificationRepository(TenantRepository):
                 UserNotification.batch_id.label("batch_id"),
                 func.max(UserNotification.created_at).label("sent_at"),
                 func.count().label("recipient_count"),
-                func.min(UserNotification.id).label("sample_id"),
+                # Postgres has no min(uuid); use textual min for a stable sample row.
+                func.min(cast(UserNotification.id, String)).label("sample_id"),
             )
             .where(UserNotification.tenant_id == self.context.tenant_id)
             .group_by(UserNotification.batch_id)
@@ -2227,7 +2232,10 @@ class UserNotificationRepository(TenantRepository):
                     batch_agg.c.recipient_count,
                     batch_agg.c.sent_at,
                 )
-                .join(batch_agg, UserNotification.id == batch_agg.c.sample_id)
+                .join(
+                    batch_agg,
+                    cast(UserNotification.id, String) == batch_agg.c.sample_id,
+                )
                 .order_by(batch_agg.c.sent_at.desc())
                 .limit(capped)
             )

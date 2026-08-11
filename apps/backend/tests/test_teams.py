@@ -213,6 +213,47 @@ async def test_team_tool_bindings_persist_and_factory_attaches(session, tenant_a
 
 
 @pytest.mark.asyncio
+async def test_leader_only_team_publish_and_factory(session, tenant_a, monkeypatch):
+    repo = TeamRepository(session, tenant_a)
+    config = await repo.create_config(slug="leader-only", name="Leader only")
+    version = await repo.create_draft(
+        config_id=config.id,
+        instructions="Call tools directly",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[],
+        tools=[{"tool_key": "web_search", "config": {"max_results": 2}}],
+    )
+    await repo.publish(version.id)
+    assert (await repo.get_config(config.id)).published_version_id == version.id
+    assert list(await repo.members(version.id)) == []
+
+    class FakeTeam:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.id = kwargs["id"]
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    async def fake_build_tool(self, binding):
+        return {"name": binding.tool_key, "config": binding.config}
+
+    monkeypatch.setattr("app.agent_runtime.factory.Team", FakeTeam)
+    monkeypatch.setattr("app.agent_runtime.factory.OpenAIChat", FakeModel)
+    monkeypatch.setattr(AgentFactoryService, "_build_tool", fake_build_tool)
+
+    factory = TeamFactoryService(AgentFactoryService(session, tenant_a, allowed_hosts=set()))
+    team = await factory.create(
+        TeamRuntimeRequest(version_id=version.id, session_id="leader-only-session")
+    )
+    assert team.kwargs["members"] == []
+    assert team.kwargs["tools"] == [{"name": "web_search", "config": {"max_results": 2}}]
+
+
+@pytest.mark.asyncio
 async def test_restore_as_draft_clones_new_version(session, tenant_a):
     first, _ = await _published_agent(session, tenant_a, "gamma")
     second, _ = await _published_agent(session, tenant_a, "delta")

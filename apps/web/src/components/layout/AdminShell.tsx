@@ -1,11 +1,11 @@
 "use client";
 
-import Link from "next/link";
 import { useSession } from "next-auth/react";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useId, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AuthControls } from "@/components/auth/AuthControls";
+import { LanguageSwitcher } from "@/components/i18n/LanguageSwitcher";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import {
@@ -19,6 +19,7 @@ import {
   ThemeToggle,
   useSurfaceTheme,
 } from "@/components/layout/ThemeToggle";
+import { Link, usePathname, useRouter } from "@/i18n/navigation";
 import { cn } from "@/lib/utils";
 
 type NavItem = {
@@ -192,164 +193,73 @@ const icons = {
   ),
 };
 
-const navGroups: Array<{
-  label: string;
-  items: NavItem[];
-}> = [
-  {
-    label: "Build",
-    items: [
+function useLocalizedNav(isPlatformAdmin: boolean) {
+  const t = useTranslations("nav");
+  return useMemo(() => {
+    const item = (
+      href: string,
+      key: string,
+      icon: React.ReactNode,
+    ): NavItem => ({
+      href,
+      label: t(`items.${key}`),
+      hint: t(`items.${key}Hint`),
+      icon,
+    });
+    const groups = [
       {
-        href: "/admin/workflows",
-        label: "Workflows",
-        hint: "What users and APIs can run",
-        icon: icons.workflows,
+        label: t("groups.build"),
+        items: [
+          item("/admin/workflows", "workflows", icons.workflows),
+          item("/admin/teams", "teams", icons.teams),
+          item("/admin/agents", "agents", icons.agents),
+          item("/admin/tools", "tools", icons.tools),
+          item("/admin/integrations", "toolkitCatalog", icons.integrations),
+        ],
       },
       {
-        href: "/admin/teams",
-        label: "Teams",
-        hint: "Coordinate multiple agents",
-        icon: icons.teams,
+        label: t("groups.monitor"),
+        items: [
+          item("/admin/traces", "traces", icons.traces),
+          item("/admin/approvals", "approvals", icons.approvals),
+          item("/admin/schedules", "schedules", icons.schedules),
+          item("/admin/metrics", "metrics", icons.metrics),
+          item("/admin/evals", "evaluations", icons.evals),
+        ],
       },
       {
-        href: "/admin/agents",
-        label: "Agents",
-        hint: "Specialists with prompts and tools",
-        icon: icons.agents,
+        label: t("groups.configure"),
+        items: [
+          item("/admin/knowledge", "knowledge", icons.knowledge),
+          item("/admin/memories", "memories", icons.memories),
+          item("/admin/learnings", "learnings", icons.learnings),
+          item("/admin/users", "users", icons.users),
+          item("/admin/notifications", "notifications", icons.notifications),
+          item("/admin/billing", "billing", icons.billing),
+          item("/admin/credentials", "credentials", icons.credentials),
+          item("/admin/public-api", "publicApi", icons.publicApi),
+          item("/admin/service-accounts", "serviceAccounts", icons.access),
+          item("/admin/mcp", "mcpServer", icons.mcp),
+        ],
       },
+    ];
+    if (!isPlatformAdmin) return groups;
+    return [
       {
-        href: "/admin/tools",
-        label: "Tools",
-        hint: "API, Python, MCP, and toolkits",
-        icon: icons.tools,
+        label: t("groups.platform"),
+        items: [
+          item("/admin/platform/tenants", "superAdmin", icons.platform),
+          item(
+            "/admin/platform/sandbox-packages",
+            "sandboxPackages",
+            icons.platform,
+          ),
+        ],
       },
-      {
-        href: "/admin/integrations",
-        label: "Toolkit catalog",
-        hint: "Enable built-in toolkits as tools",
-        icon: icons.integrations,
-      },
-    ],
-  },
-  {
-    label: "Monitor",
-    items: [
-      {
-        href: "/admin/traces",
-        label: "Traces",
-        hint: "Chat logs, runs, and errors",
-        icon: icons.traces,
-      },
-      {
-        href: "/admin/approvals",
-        label: "Approvals",
-        hint: "Paused tool actions waiting on you",
-        icon: icons.approvals,
-      },
-      {
-        href: "/admin/schedules",
-        label: "Schedules",
-        hint: "Timed and recurring runs",
-        icon: icons.schedules,
-      },
-      {
-        href: "/admin/metrics",
-        label: "Metrics",
-        hint: "Usage and error rates",
-        icon: icons.metrics,
-      },
-      {
-        href: "/admin/evals",
-        label: "Evaluations",
-        hint: "Quality test suites",
-        icon: icons.evals,
-      },
-    ],
-  },
-  {
-    label: "Configure",
-    items: [
-      {
-        href: "/admin/knowledge",
-        label: "Knowledge",
-        hint: "Documents agents can use",
-        icon: icons.knowledge,
-      },
-      {
-        href: "/admin/memories",
-        label: "Memories",
-        hint: "Persistent user memory rows",
-        icon: icons.memories,
-      },
-      {
-        href: "/admin/learnings",
-        label: "Learnings",
-        hint: "Learning store records",
-        icon: icons.learnings,
-      },
-      {
-        href: "/admin/users",
-        label: "Users",
-        hint: "People and workflow access",
-        icon: icons.users,
-      },
-      {
-        href: "/admin/notifications",
-        label: "Notifications",
-        hint: "Message one user or everyone",
-        icon: icons.notifications,
-      },
-      {
-        href: "/admin/billing",
-        label: "Billing",
-        hint: "Credits, plans, and usage limits",
-        icon: icons.billing,
-      },
-      {
-        href: "/admin/credentials",
-        label: "Credentials",
-        hint: "API keys kept server-side",
-        icon: icons.credentials,
-      },
-      {
-        href: "/admin/public-api",
-        label: "Public API",
-        hint: "Secret keys and try-it calls",
-        icon: icons.publicApi,
-      },
-      {
-        href: "/admin/service-accounts",
-        label: "Service accounts",
-        hint: "Scoped machine tokens",
-        icon: icons.access,
-      },
-      {
-        href: "/admin/mcp",
-        label: "MCP server",
-        hint: "Expose agents over MCP",
-        icon: icons.mcp,
-      },
-    ],
-  },
-];
-
-const platformGroup = {
-  label: "Platform",
-  items: [
-    {
-      href: "/admin/platform/tenants",
-      label: "Super admin",
-      hint: "Manage and enter tenant workspaces",
-      icon: icons.platform,
-    },
-    {
-      href: "/admin/platform/sandbox-packages",
-      label: "Sandbox packages",
-      hint: "Allowlist pins for editable Python",
-      icon: icons.platform,
-    },
-  ],
-};
+      ...groups,
+    ];
+  }, [isPlatformAdmin, t]);
+}
 
 function NavLinks({
   pathname,
@@ -360,7 +270,7 @@ function NavLinks({
   isPlatformAdmin: boolean;
   onNavigate?: () => void;
 }) {
-  const groups = isPlatformAdmin ? [platformGroup, ...navGroups] : navGroups;
+  const groups = useLocalizedNav(isPlatformAdmin);
   // Ignore repeat clicks while a navigation is still in flight (slow RSC).
   const pendingHref = useRef<string | null>(null);
 
@@ -424,6 +334,8 @@ function NavLinks({
 export function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const tNav = useTranslations("nav");
+  const tCommon = useTranslations("common");
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const { data: session } = useSession();
   const orgId = (session as { orgId?: string } | null)?.orgId;
@@ -576,7 +488,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   function leaveTenantWorkspace() {
     clearPlatformTenantSelection();
     setSelectedTenantName(null);
-    window.location.assign("/admin/platform/tenants");
+    router.replace("/admin/platform/tenants");
   }
 
   return (
@@ -598,7 +510,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             >
               Menu
             </button>
-            <BrandMark href="/admin/agents" />
+            <BrandMark href="/admin/agents" subtitle={tNav("brandSubtitle")} />
           </div>
           <div className="flex shrink-0 items-center gap-3">
             {workspaceHref && !onOnboardingRoute ? (
@@ -616,10 +528,11 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
                 title="Return to platform administration"
                 className="hidden max-w-[14rem] truncate rounded-md border border-teal/30 bg-teal/10 px-2.5 py-1.5 text-xs font-medium text-teal hover:bg-teal/15 sm:block"
               >
-                Tenant: {selectedTenantName} · Exit
+                Tenant: {selectedTenantName} · {tCommon("exitTenant")}
               </button>
             ) : null}
             <ThemeToggle theme={theme} onChange={changeTheme} />
+            <LanguageSwitcher />
             <NotificationBell />
             <AuthControls />
           </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "@/i18n/navigation";
 
 import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
@@ -136,10 +136,6 @@ export function TeamEditor({
   }
 
   async function publish() {
-    if (form.memberConfigIds.length < 1) {
-      setBanner("Add at least one agent before publishing");
-      return;
-    }
     setBusy("publish");
     setBanner(null);
     try {
@@ -308,19 +304,18 @@ export function TeamEditor({
       <section className="rounded-xl border border-line bg-raised/40 p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">Members</h2>
-          <Badge
-            tone={form.memberConfigIds.length >= 1 ? "success" : "warning"}
-          >
+          <Badge tone="neutral">
             {form.memberConfigIds.length} selected
           </Badge>
         </div>
         <p className="mb-3 text-xs text-slate-muted">
-          Need at least one published agent. Order is routing priority.
+          Optional specialists for routing. The leader can use team tools
+          without members. Order is routing priority.
         </p>
 
         {form.memberConfigIds.length === 0 ? (
           <p className="mb-3 rounded-md border border-dashed border-line px-3 py-4 text-center text-sm text-slate-muted">
-            No members yet — add agents below.
+            No members — leader-only team (tools on the leader still work).
           </p>
         ) : (
           <ul className="mb-3 space-y-1.5">

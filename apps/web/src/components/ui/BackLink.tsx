@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 
 import { ChevronLeftIcon } from "@/components/ui/icons";
 import { cn } from "@/lib/utils";

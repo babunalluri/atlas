@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select } from "@/components/ui/Field";
+import { Input, Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { TrashIcon } from "@/components/ui/icons";
 import {
   createCredential,
@@ -168,23 +169,19 @@ export function CredentialsPanel({
           </div>
           <div>
             <Label htmlFor="credential-provider">Provider</Label>
-            <Select
+            <SearchableSelect
               id="credential-provider"
               value={provider}
-              onChange={(event) =>
-                setProvider(event.target.value as CredentialSummary["provider"])
+              onChange={(value) =>
+                setProvider(value as CredentialSummary["provider"])
               }
-            >
-              {groups.map((group) => (
-                <optgroup key={group.label} label={group.label}>
-                  {group.providers.map((option) => (
-                    <option key={option} value={option}>
-                      {providerLabel(option)}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </Select>
+              options={groups.flatMap((group) =>
+                group.providers.map((option) => ({
+                  value: option,
+                  label: providerLabel(option),
+                })),
+              )}
+            />
           </div>
           <div>
             <Label htmlFor="credential-value">Secret</Label>

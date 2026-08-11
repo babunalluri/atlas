@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   createChannelBinding,
   deleteChannelBinding,
@@ -116,18 +117,17 @@ export function ChannelBindingsPanel({
         </div>
         <div>
           <Label htmlFor="channel-credential">Credential</Label>
-          <Select
+          <SearchableSelect
             id="channel-credential"
             value={credentialId}
-            onChange={(e) => setCredentialId(e.target.value)}
-          >
-            <option value="">Select credential</option>
-            {credentials.map((credential) => (
-              <option key={credential.id} value={credential.id}>
-                {credential.name} ({credential.provider})
-              </option>
-            ))}
-          </Select>
+            onChange={setCredentialId}
+            placeholder="Select credential"
+            emptyMessage="No matching credentials"
+            options={credentials.map((credential) => ({
+              value: credential.id,
+              label: `${credential.name} (${credential.provider})`,
+            }))}
+          />
         </div>
         <div>
           <Label htmlFor="channel-target-type">Target type</Label>
@@ -145,18 +145,17 @@ export function ChannelBindingsPanel({
         </div>
         <div className="md:col-span-2">
           <Label htmlFor="channel-target">Published target</Label>
-          <Select
+          <SearchableSelect
             id="channel-target"
             value={targetConfigId}
-            onChange={(e) => setTargetConfigId(e.target.value)}
-          >
-            <option value="">Select {targetType}</option>
-            {targets.map((target) => (
-              <option key={target.id} value={target.id}>
-                {target.name} (/{target.slug})
-              </option>
-            ))}
-          </Select>
+            onChange={setTargetConfigId}
+            placeholder={`Select ${targetType}`}
+            emptyMessage={`No matching ${targetType}s`}
+            options={targets.map((target) => ({
+              value: target.id,
+              label: `${target.name} (/${target.slug})`,
+            }))}
+          />
         </div>
         <div className="md:col-span-2 lg:col-span-3">
           <Label htmlFor="channel-external">external_config JSON</Label>

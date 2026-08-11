@@ -604,9 +604,8 @@ class TeamFactoryService:
         version = await self.repo.get_version(request.version_id, allow_draft=allow_draft)
         if version is None:
             raise LookupError("Team version not found for tenant")
+        # Empty members is valid: Agno Team can run leader-only with tools.
         member_rows = await self.repo.members(version.id)
-        if not member_rows:
-            raise ValueError("Team has no members")
         members = [
             await self.agent_factory.create(
                 RuntimeRequest(

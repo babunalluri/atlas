@@ -1,11 +1,12 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select, Textarea } from "@/components/ui/Field";
+import { Input, Label, Textarea } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   type AgentSchedule,
   createSchedule,
@@ -187,25 +188,27 @@ export function ScheduleManager({
               </div>
               <div>
                 <Label htmlFor="schedule-target">Published target</Label>
-                <Select
+                <SearchableSelect
                   id="schedule-target"
-                  value={targetIndex}
-                  onChange={(event) => setTargetIndex(Number(event.target.value))}
-                >
-                  {targetIndex < 0 ? (
-                    <option value={-1} disabled>
-                      Pinned target missing
-                    </option>
-                  ) : null}
-                  {runnableTargets.map((target, index) => (
-                    <option
-                      key={`${target.target_type}:${target.version_id}`}
-                      value={index}
-                    >
-                      {target.name} · {target.target_type}
-                    </option>
-                  ))}
-                </Select>
+                  value={String(targetIndex)}
+                  onChange={(value) => setTargetIndex(Number(value))}
+                  placeholder="Select target"
+                  options={[
+                    ...(targetIndex < 0
+                      ? [
+                          {
+                            value: "-1",
+                            label: "Pinned target missing",
+                            disabled: true,
+                          },
+                        ]
+                      : []),
+                    ...runnableTargets.map((target, index) => ({
+                      value: String(index),
+                      label: `${target.name} · ${target.target_type}`,
+                    })),
+                  ]}
+                />
               </div>
               <div>
                 <Label htmlFor="schedule-cron" hint="5-field cron">
@@ -220,15 +223,15 @@ export function ScheduleManager({
               </div>
               <div>
                 <Label htmlFor="schedule-timezone">Timezone</Label>
-                <Select
+                <SearchableSelect
                   id="schedule-timezone"
                   value={timezone}
-                  onChange={(event) => setTimezone(event.target.value)}
-                >
-                  {TIMEZONES.map((zone) => (
-                    <option key={zone}>{zone}</option>
-                  ))}
-                </Select>
+                  onChange={setTimezone}
+                  options={TIMEZONES.map((zone) => ({
+                    value: zone,
+                    label: zone,
+                  }))}
+                />
               </div>
             </div>
             <div>

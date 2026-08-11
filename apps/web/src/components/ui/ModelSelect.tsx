@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo } from "react";
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 
-import { Label, Select } from "@/components/ui/Field";
+import { Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import type { CredentialSummary } from "@/lib/api/admin";
 import {
   ALLOWED_MODELS,
@@ -45,6 +46,29 @@ export function ModelSelect({
   const selectedMissingCredential =
     Boolean(selected) && !availableProviders.has(selectedProvider);
 
+  const options = useMemo(() => {
+    const rows = availableModels.map((model) => ({
+      value: model.id,
+      label: model.label,
+    }));
+    if (
+      selectedMissingCredential &&
+      selected &&
+      !rows.some((row) => row.value === selected.id)
+    ) {
+      rows.unshift({
+        value: selected.id,
+        label: `${selected.label} (missing ${MODEL_PROVIDER_LABELS[selectedProvider]} credential)`,
+      });
+    }
+    return rows;
+  }, [
+    availableModels,
+    selected,
+    selectedMissingCredential,
+    selectedProvider,
+  ]);
+
   const allProviderLabels = (
     Object.keys(MODEL_PROVIDER_LABELS) as ModelProvider[]
   ).map((provider) => MODEL_PROVIDER_LABELS[provider]);
@@ -52,23 +76,14 @@ export function ModelSelect({
   return (
     <div>
       <Label htmlFor={id}>{label}</Label>
-      <Select
+      <SearchableSelect
         id={id}
         value={value}
-        onChange={(event) => onChange(event.target.value as ModelId)}
-      >
-        {selectedMissingCredential && selected ? (
-          <option value={selected.id}>
-            {selected.label} (missing{" "}
-            {MODEL_PROVIDER_LABELS[selectedProvider]} credential)
-          </option>
-        ) : null}
-        {availableModels.map((model) => (
-          <option key={model.id} value={model.id}>
-            {model.label}
-          </option>
-        ))}
-      </Select>
+        onChange={(next) => onChange(next as ModelId)}
+        options={options}
+        placeholder="Search models…"
+        emptyMessage="No matching models"
+      />
       {selectedMissingCredential ? (
         <p className="mt-1 text-xs text-amber">
           No {MODEL_PROVIDER_LABELS[selectedProvider]} credential for this

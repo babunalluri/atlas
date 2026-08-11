@@ -4,24 +4,13 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import type { TraceDetail, TraceSpan } from "@/lib/api/admin";
-import {
-  ACTIVITY_DISPLAY_TIMEZONE,
-  ACTIVITY_DISPLAY_ZONE_LABEL,
-} from "@/lib/activities";
+import { formatActivityTime } from "@/lib/activities";
 import { cn } from "@/lib/utils";
 
 function duration(value: number | null) {
   if (value === null) return "running";
   if (value < 1_000) return `${value} ms`;
   return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)} s`;
-}
-
-function formatAbsolute(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "short",
-    timeStyle: "medium",
-    timeZone: ACTIVITY_DISPLAY_TIMEZONE,
-  }).format(new Date(iso));
 }
 
 function depth(span: TraceSpan, spans: TraceSpan[]) {
@@ -45,7 +34,13 @@ function statusTone(status: string): "success" | "danger" | "warning" | "neutral
 }
 
 /** Span waterfall + inspector for a single loaded trace detail. */
-export function TraceSpanPanel({ detail }: { detail: TraceDetail }) {
+export function TraceSpanPanel({
+  detail,
+  timeZone = "UTC",
+}: {
+  detail: TraceDetail;
+  timeZone?: string;
+}) {
   const [selectedSpan, setSelectedSpan] = useState<TraceSpan | null>(
     detail.spans[0] ?? null,
   );
@@ -56,6 +51,8 @@ export function TraceSpanPanel({ detail }: { detail: TraceDetail }) {
       : Math.max(Date.now(), start + 1);
     return { start, width: Math.max(1, end - start) };
   }, [detail]);
+
+  const started = formatActivityTime(detail.startedAt, timeZone);
 
   // Keep selection in sync when the loaded trace changes.
   const activeSpan =
@@ -85,7 +82,7 @@ export function TraceSpanPanel({ detail }: { detail: TraceDetail }) {
             dateTime={detail.startedAt}
             className="text-xs text-slate-muted"
           >
-            {formatAbsolute(detail.startedAt)} {ACTIVITY_DISPLAY_ZONE_LABEL}
+            {started.absolute} {started.zone}
           </time>
         </div>
       </div>

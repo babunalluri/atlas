@@ -1,0 +1,81 @@
+{
+  "common": {
+    "save": "सहेजें",
+    "cancel": "रद्द करें",
+    "signIn": "साइन इन",
+    "signOut": "साइन आउट",
+    "signUp": "साइन अप",
+    "loading": "लोड हो रहा है…",
+    "language": "भाषा",
+    "admin": "एडमिन",
+    "backToWorkspace": "वर्कस्पेस पर वापस जाएँ",
+    "exitTenant": "बाहर निकलें"
+  },
+  "auth": {
+    "signInTitle": "साइन इन",
+    "signInSubtitle": "स्टाफ़ प्रमाणीकरण स्व-होस्टेड Keycloak (ओपन सोर्स) का उपयोग करता है। Clerk सब्सक्रिप्शन की आवश्यकता नहीं।",
+    "continueWithKeycloak": "Keycloak के साथ जारी रखें",
+    "signUpTitle": "साइन अप",
+    "backToHome": "होम पर वापस जाएँ",
+    "devUsers": "डेव उपयोगकर्ता"
+  },
+  "nav": {
+    "brandSubtitle": "मल्टी-टेनेंट नियंत्रण",
+    "groups": {
+      "build": "बनाएँ",
+      "monitor": "निगरानी",
+      "configure": "कॉन्फ़िगर करें",
+      "platform": "प्लेटफ़ॉर्म"
+    },
+    "items": {
+      "workflows": "वर्कफ़्लो",
+      "workflowsHint": "उपयोगकर्ता और API क्या चला सकते हैं",
+      "teams": "टीमें",
+      "teamsHint": "कई एजेंटों का समन्वय",
+      "agents": "एजेंट",
+      "agentsHint": "प्रॉम्प्ट और टूल वाले विशेषज्ञ",
+      "tools": "टूल्स",
+      "toolsHint": "API, Python, MCP और टूलकिट",
+      "toolkitCatalog": "टूलकिट कैटलॉग",
+      "toolkitCatalogHint": "बिल्ट-इन टूलकिट को टूल के रूप में सक्षम करें",
+      "traces": "ट्रेस",
+      "tracesHint": "चैट लॉग, रन और त्रुटियाँ",
+      "approvals": "अनुमोदन",
+      "approvalsHint": "रोके गए टूल एक्शन जो आपके निर्णय की प्रतीक्षा कर रहे हैं",
+      "schedules": "शेड्यूल",
+      "schedulesHint": "समयबद्ध और आवर्ती रन",
+      "metrics": "मेट्रिक्स",
+      "metricsHint": "उपयोग और त्रुटि दरें",
+      "evaluations": "मूल्यांकन",
+      "evaluationsHint": "गुणवत्ता परीक्षण सूट",
+      "knowledge": "ज्ञान",
+      "knowledgeHint": "दस्तावेज़ जिन्हें एजेंट उपयोग कर सकते हैं",
+      "memories": "मेमोरी",
+      "memoriesHint": "स्थायी उपयोगकर्ता मेमोरी पंक्तियाँ",
+      "learnings": "सीखें",
+      "learningsHint": "लर्निंग स्टोर रिकॉर्ड",
+      "users": "उपयोगकर्ता",
+      "usersHint": "लोग और वर्कफ़्लो पहुँच",
+      "notifications": "सूचनाएँ",
+      "notificationsHint": "एक उपयोगकर्ता या सभी को संदेश भेजें",
+      "billing": "बिलिंग",
+      "billingHint": "क्रेडिट, प्लान और उपयोग सीमाएँ",
+      "credentials": "क्रेडेंशियल",
+      "credentialsHint": "मॉडल और टूल के लिए API कुंजियाँ",
+      "publicApi": "सार्वजनिक API",
+      "publicApiHint": "टोकन और शेयर लिंक",
+      "serviceAccounts": "सेवा खाते",
+      "serviceAccountsHint": "मशीन क्रेडेंशियल",
+      "mcpServer": "MCP सर्वर",
+      "mcpServerHint": "Model Context Protocol एंडपॉइंट",
+      "superAdmin": "सुपर एडमिन",
+      "superAdminHint": "टेनेंट और प्लेटफ़ॉर्म ऑडिट",
+      "sandboxPackages": "सैंडबॉक्स पैकेज",
+      "sandboxPackagesHint": "अनुमत Python पैकेज"
+    }
+  },
+  "home": {
+    "title": "Atlas Agents",
+    "tagline": "मल्टी-टेनेंट एजेंट कॉन्फ़िगरेशन और ब्रांडेड ग्राहक चैट"
+  }
+}

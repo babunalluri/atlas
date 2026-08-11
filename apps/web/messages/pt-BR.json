@@ -1,0 +1,81 @@
+{
+  "common": {
+    "save": "Salvar",
+    "cancel": "Cancelar",
+    "signIn": "Entrar",
+    "signOut": "Sair",
+    "signUp": "Cadastrar-se",
+    "loading": "Carregando…",
+    "language": "Idioma",
+    "admin": "Admin",
+    "backToWorkspace": "Voltar ao espaço de trabalho",
+    "exitTenant": "Sair"
+  },
+  "auth": {
+    "signInTitle": "Entrar",
+    "signInSubtitle": "A autenticação da equipe usa Keycloak auto-hospedado (código aberto). Nenhuma assinatura do Clerk é necessária.",
+    "continueWithKeycloak": "Continuar com Keycloak",
+    "signUpTitle": "Cadastrar-se",
+    "backToHome": "Voltar ao início",
+    "devUsers": "Usuários de desenvolvimento"
+  },
+  "nav": {
+    "brandSubtitle": "CONTROLE MULTI-INQUILINO",
+    "groups": {
+      "build": "Criar",
+      "monitor": "Monitorar",
+      "configure": "Configurar",
+      "platform": "Plataforma"
+    },
+    "items": {
+      "workflows": "Fluxos de trabalho",
+      "workflowsHint": "O que usuários e APIs podem executar",
+      "teams": "Equipes",
+      "teamsHint": "Coordenar vários agentes",
+      "agents": "Agentes",
+      "agentsHint": "Especialistas com prompts e ferramentas",
+      "tools": "Ferramentas",
+      "toolsHint": "API, Python, MCP e toolkits",
+      "toolkitCatalog": "Catálogo de toolkits",
+      "toolkitCatalogHint": "Ativar toolkits integrados como ferramentas",
+      "traces": "Rastreamentos",
+      "tracesHint": "Logs de chat, execuções e erros",
+      "approvals": "Aprovações",
+      "approvalsHint": "Ações de ferramentas pausadas aguardando você",
+      "schedules": "Agendamentos",
+      "schedulesHint": "Execuções programadas e recorrentes",
+      "metrics": "Métricas",
+      "metricsHint": "Uso e taxas de erro",
+      "evaluations": "Avaliações",
+      "evaluationsHint": "Suítes de testes de qualidade",
+      "knowledge": "Conhecimento",
+      "knowledgeHint": "Documentos que os agentes podem usar",
+      "memories": "Memórias",
+      "memoriesHint": "Linhas de memória persistente do usuário",
+      "learnings": "Aprendizados",
+      "learningsHint": "Registros do armazenamento de aprendizado",
+      "users": "Usuários",
+      "usersHint": "Pessoas e acesso a fluxos de trabalho",
+      "notifications": "Notificações",
+      "notificationsHint": "Mensagem para um usuário ou para todos",
+      "billing": "Cobrança",
+      "billingHint": "Créditos, planos e limites de uso",
+      "credentials": "Credenciais",
+      "credentialsHint": "Chaves de API para modelos e ferramentas",
+      "publicApi": "API pública",
+      "publicApiHint": "Tokens e links de compartilhamento",
+      "serviceAccounts": "Contas de serviço",
+      "serviceAccountsHint": "Credenciais de máquina",
+      "mcpServer": "Servidor MCP",
+      "mcpServerHint": "Endpoint do Model Context Protocol",
+      "superAdmin": "Superadmin",
+      "superAdminHint": "Inquilinos e auditoria da plataforma",
+      "sandboxPackages": "Pacotes sandbox",
+      "sandboxPackagesHint": "Pacotes Python permitidos"
+    }
+  },
+  "home": {
+    "title": "Atlas Agents",
+    "tagline": "Configuração de agentes multi-inquilino e chat de cliente com marca"
+  }
+}

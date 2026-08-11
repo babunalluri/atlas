@@ -1038,6 +1038,7 @@ interface BackendTenantUser {
   phone?: string | null;
   role: "tenant_admin" | "end_user";
   is_active: boolean;
+  timezone?: string;
   invite_pending?: boolean;
   temporary_password?: string | null;
   sign_in_url?: string | null;
@@ -1056,6 +1057,7 @@ function mapTenantUser(row: BackendTenantUser): TenantUser {
     phone: row.phone ?? null,
     role: row.role,
     isActive: row.is_active,
+    timezone: row.timezone || "UTC",
     invitePending: Boolean(row.invite_pending),
     temporaryPassword: row.temporary_password ?? null,
     signInUrl: row.sign_in_url ?? null,
@@ -1101,6 +1103,7 @@ export async function createTenantUser(
         phone: input.phone?.trim() || null,
         role: input.role,
         is_active: input.isActive,
+        timezone: input.timezone || "UTC",
         workflow_ids: input.workflowIds,
         team_ids: input.teamIds,
       },
@@ -1123,10 +1126,11 @@ export async function updateTenantUser(
           : {}),
         ...(input.email !== undefined ? { email: input.email } : {}),
         ...(input.phone !== undefined
-          ? { phone: input.phone.trim() || null }
+          ? { phone: input.phone?.trim() || null }
           : {}),
         ...(input.role !== undefined ? { role: input.role } : {}),
         ...(input.isActive !== undefined ? { is_active: input.isActive } : {}),
+        ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
         ...(input.workflowIds !== undefined
           ? { workflow_ids: input.workflowIds }
           : {}),
@@ -3295,6 +3299,8 @@ export interface WorkspaceInfo {
   user_id?: string;
   role?: "platform_admin" | "tenant_admin" | "end_user";
   can_administer?: boolean;
+  timezone?: string;
+  tenant_timezone?: string;
 }
 
 export async function getWorkspaceInfo(
@@ -3655,6 +3661,7 @@ interface BackendPlatformTenant {
   slug: string;
   auth_org_id: string;
   branding: Record<string, unknown>;
+  timezone?: string;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -3676,6 +3683,7 @@ function mapPlatformTenant(row: BackendPlatformTenant): PlatformTenant {
     slug: row.slug,
     authOrgId: row.auth_org_id,
     branding: row.branding,
+    timezone: row.timezone || "UTC",
     isActive: row.is_active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -3694,7 +3702,7 @@ export async function listPlatformTenants(
 
 export async function createPlatformTenant(
   accessToken: string,
-  input: { name: string; slug: string; authOrgId: string },
+  input: { name: string; slug: string; authOrgId: string; timezone?: string },
 ): Promise<PlatformTenant> {
   const row = await apiFetch<BackendPlatformTenant>(
     "/admin/platform/tenants",
@@ -3705,6 +3713,7 @@ export async function createPlatformTenant(
         name: input.name,
         slug: input.slug,
         auth_org_id: input.authOrgId,
+        timezone: input.timezone || "UTC",
       },
     },
   );

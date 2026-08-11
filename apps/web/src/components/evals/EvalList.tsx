@@ -1,12 +1,12 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { Link, useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select } from "@/components/ui/Field";
+import { Input, Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   createEval,
   type EvalDefinition,
@@ -130,33 +130,28 @@ export function EvalList({
             </div>
             <div>
               <Label htmlFor="eval-target">Pinned target</Label>
-              <Select
+              <SearchableSelect
                 id="eval-target"
-                value={targetIndex}
-                onChange={(event) => setTargetIndex(Number(event.target.value))}
-              >
-                {targets.map((target, index) => (
-                  <option key={`${target.target_type}:${target.version_id}`} value={index}>
-                    {target.name} · {target.target_type} · {target.version_status}
-                  </option>
-                ))}
-              </Select>
+                value={String(targetIndex)}
+                onChange={(value) => setTargetIndex(Number(value))}
+                placeholder="Select target"
+                options={targets.map((target, index) => ({
+                  value: String(index),
+                  label: `${target.name} · ${target.target_type} · ${target.version_status}`,
+                }))}
+              />
             </div>
             <div>
               <Label htmlFor="eval-evaluator">Evaluator</Label>
-              <Select
+              <SearchableSelect
                 id="eval-evaluator"
                 value={evaluator}
-                onChange={(event) =>
-                  setEvaluator(event.target.value as EvalEvaluator)
-                }
-              >
-                {EVALUATORS.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </Select>
+                onChange={(value) => setEvaluator(value as EvalEvaluator)}
+                options={EVALUATORS.map((item) => ({
+                  value: item.value,
+                  label: item.label,
+                }))}
+              />
               <p className="mt-1 text-xs text-slate-muted">
                 {evaluatorMeta?.hint}
               </p>

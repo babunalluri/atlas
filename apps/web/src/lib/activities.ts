@@ -156,23 +156,49 @@ export function activityTargetTypeLabel(
   return "Workflow";
 }
 
-/** Fixed IANA zone for traces/activities — never use browser default (SSR hydration). */
-export const ACTIVITY_DISPLAY_TIMEZONE = "Asia/Kolkata";
+/** Fixed fallback when workspace timezone is unknown (SSR-safe). */
+export const ACTIVITY_DISPLAY_TIMEZONE = "UTC";
 /** Short label shown in UI column headers / absolute time suffixes. */
-export const ACTIVITY_DISPLAY_ZONE_LABEL = "IST";
+export const ACTIVITY_DISPLAY_ZONE_LABEL = "UTC";
 
-/** Stable for SSR/client — avoid default locale/timezone (hydration mismatch). */
-export function formatActivityTime(iso: string): {
+function zoneLabel(timeZone: string): string {
+  if (timeZone === "UTC") return "UTC";
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      timeZoneName: "short",
+    }).formatToParts(new Date());
+    return parts.find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+  } catch {
+    return timeZone;
+  }
+}
+
+/** Stable for SSR/client — pass an explicit IANA zone (viewer → org → UTC). */
+export function formatActivityTime(
+  iso: string,
+  timeZone: string = ACTIVITY_DISPLAY_TIMEZONE,
+): {
   absolute: string;
   zone: string;
 } {
   const date = new Date(iso);
-  const absolute = new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "medium",
-    timeZone: ACTIVITY_DISPLAY_TIMEZONE,
-  }).format(date);
-  return { absolute, zone: ACTIVITY_DISPLAY_ZONE_LABEL };
+  const zone = timeZone || ACTIVITY_DISPLAY_TIMEZONE;
+  try {
+    const absolute = new Intl.DateTimeFormat("en-US", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+      timeZone: zone,
+    }).format(date);
+    return { absolute, zone: zoneLabel(zone) };
+  } catch {
+    const absolute = new Intl.DateTimeFormat("en-US", {
+      dateStyle: "medium",
+      timeStyle: "medium",
+      timeZone: "UTC",
+    }).format(date);
+    return { absolute, zone: "UTC" };
+  }
 }
 
 export function formatDurationMs(value: number | null | undefined): string {

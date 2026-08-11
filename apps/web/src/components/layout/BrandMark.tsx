@@ -1,8 +1,8 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 
 export function BrandMark({
   compact = false,
-  href = "/",
+  href = "/admin/agents",
   subtitle = "Multi-tenant control",
 }: {
   compact?: boolean;

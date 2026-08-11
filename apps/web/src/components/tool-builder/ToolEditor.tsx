@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 
 import { PythonCodeEditor } from "@/components/tool-builder/PythonCodeEditor";
@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select, Textarea } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createToolDefinition,
@@ -761,24 +762,19 @@ export function ToolEditor({
                 <div className="grid gap-4 md:grid-cols-[0.4fr_1fr]">
                   <div>
                     <Label htmlFor="tool-method">Method</Label>
-                    <Select
+                    <SearchableSelect
                       id="tool-method"
                       value={form.httpMethod ?? "GET"}
-                      onChange={(event) =>
+                      onChange={(value) =>
                         update(
                           "httpMethod",
-                          event.target.value as NonNullable<
-                            EditableTool["httpMethod"]
-                          >,
+                          value as NonNullable<EditableTool["httpMethod"]>,
                         )
                       }
-                    >
-                      {["GET", "POST", "PUT", "PATCH", "DELETE"].map(
-                        (method) => (
-                          <option key={method}>{method}</option>
-                        ),
+                      options={["GET", "POST", "PUT", "PATCH", "DELETE"].map(
+                        (method) => ({ value: method, label: method }),
                       )}
-                    </Select>
+                    />
                   </div>
                   <div>
                     <Label htmlFor="tool-url">Allowlisted HTTPS base URL</Label>
@@ -861,24 +857,26 @@ export function ToolEditor({
                 <>
                   <div>
                     <Label htmlFor="tool-credential">Credential</Label>
-                    <Select
+                    <SearchableSelect
                       id="tool-credential"
                       value={form.credentialId ?? ""}
-                      onChange={(event) =>
-                        update("credentialId", event.target.value || null)
+                      onChange={(value) =>
+                        update("credentialId", value || null)
                       }
-                    >
-                      <option value="">No credential</option>
-                      {credentials
-                        .filter(
-                          (credential) => credential.provider === "rest_api",
-                        )
-                        .map((credential) => (
-                          <option key={credential.id} value={credential.id}>
-                            {credential.name}
-                          </option>
-                        ))}
-                    </Select>
+                      placeholder="No credential"
+                      emptyMessage="No matching credentials"
+                      options={[
+                        { value: "", label: "No credential" },
+                        ...credentials
+                          .filter(
+                            (credential) => credential.provider === "rest_api",
+                          )
+                          .map((credential) => ({
+                            value: credential.id,
+                            label: credential.name,
+                          })),
+                      ]}
+                    />
                     <p className="mt-1 text-xs text-slate-muted">
                       Optional JSON credential keys are available in tool code at
                       runtime. Secret values are never returned to this page.
@@ -1064,22 +1062,24 @@ export function ToolEditor({
               {form.kind !== "tenant_python" ? (
                 <div>
                   <Label htmlFor="tool-credential-shared">Server-side credential</Label>
-                  <Select
+                  <SearchableSelect
                     id="tool-credential-shared"
                     value={form.credentialId ?? ""}
-                    onChange={(event) =>
-                      update("credentialId", event.target.value || null)
-                    }
-                  >
-                    <option value="">No credential</option>
-                    {credentials
-                      .filter((credential) => credential.provider === "rest_api")
-                      .map((credential) => (
-                        <option key={credential.id} value={credential.id}>
-                          {credential.name}
-                        </option>
-                      ))}
-                  </Select>
+                    onChange={(value) => update("credentialId", value || null)}
+                    placeholder="No credential"
+                    emptyMessage="No matching credentials"
+                    options={[
+                      { value: "", label: "No credential" },
+                      ...credentials
+                        .filter(
+                          (credential) => credential.provider === "rest_api",
+                        )
+                        .map((credential) => ({
+                          value: credential.id,
+                          label: credential.name,
+                        })),
+                    ]}
+                  />
                   <p className="mt-1 text-xs text-slate-muted">
                     Secret values are never returned to this page.
                   </p>

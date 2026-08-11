@@ -211,6 +211,8 @@ services:
       # In-network issuer for Auth.js token/userinfo/jwks inside the web container.
       AUTH_KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/atlas
       NEXT_PUBLIC_AUTH_PROVIDER: keycloak
+      NEXT_PUBLIC_AUTH_KEYCLOAK_ID: atlas-web
+      NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: http://localhost:8080/realms/atlas
       NEXT_PUBLIC_DEV_AUTH: "false"
       NEXT_PUBLIC_DEV_TENANT_ID: "11111111-1111-1111-1111-111111111111"
       NEXT_PUBLIC_DEV_USER_ID: "dev-admin"

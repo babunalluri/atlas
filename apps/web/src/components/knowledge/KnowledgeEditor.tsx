@@ -1,13 +1,14 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { useState } from "react";
 
 import { BackLink } from "@/components/ui/BackLink";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
-import { Input, Label, Select } from "@/components/ui/Field";
+import { Input, Label } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { SaveIcon } from "@/components/ui/icons";
 import {
   deleteKnowledgeSource,
@@ -254,20 +255,19 @@ export function KnowledgeEditor({
         </div>
         <div className="mb-3 max-w-xs">
           <Label htmlFor="knowledge-connector">Connector</Label>
-          <Select
+          <SearchableSelect
             id="knowledge-connector"
             value={connector}
-            onChange={(event) =>
-              setConnector(
-                event.target.value as "upload" | "url" | "s3" | "github",
-              )
+            onChange={(value) =>
+              setConnector(value as "upload" | "url" | "s3" | "github")
             }
-          >
-            <option value="upload">File upload</option>
-            <option value="url">URL</option>
-            <option value="s3">Document store URI</option>
-            <option value="github">GitHub file</option>
-          </Select>
+            options={[
+              { value: "upload", label: "File upload" },
+              { value: "url", label: "URL" },
+              { value: "s3", label: "Document store URI" },
+              { value: "github", label: "GitHub file" },
+            ]}
+          />
         </div>
         {connector === "upload" ? (
           <div className="flex flex-wrap items-end gap-2">

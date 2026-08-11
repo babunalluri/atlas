@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select, Textarea } from "@/components/ui/Field";
+import { Input, Label, Textarea } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   createLearning,
   deleteLearning,
@@ -108,18 +109,19 @@ export function LearningsPanel() {
       <section className="grid gap-3 rounded-xl border border-line bg-raised/50 p-4 md:grid-cols-2">
         <div>
           <Label htmlFor="learning-type">Learning type</Label>
-          <Select
+          <SearchableSelect
             id="learning-type"
             value={learningType}
-            onChange={(event) => setLearningType(event.target.value)}
-          >
-            <option value="user_memory">user_memory</option>
-            <option value="user_profile">user_profile</option>
-            <option value="session_context">session_context</option>
-            <option value="entity_memory">entity_memory</option>
-            <option value="decision_log">decision_log</option>
-            <option value="learned_knowledge">learned_knowledge</option>
-          </Select>
+            onChange={setLearningType}
+            options={[
+              { value: "user_memory", label: "user_memory" },
+              { value: "user_profile", label: "user_profile" },
+              { value: "session_context", label: "session_context" },
+              { value: "entity_memory", label: "entity_memory" },
+              { value: "decision_log", label: "decision_log" },
+              { value: "learned_knowledge", label: "learned_knowledge" },
+            ]}
+          />
         </div>
         <div>
           <Label htmlFor="learning-user">User id (optional filter / owner)</Label>

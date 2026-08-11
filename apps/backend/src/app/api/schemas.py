@@ -594,8 +594,16 @@ class TenantUserCreateIn(BaseModel):
     )
     role: Literal["tenant_admin", "end_user"] = "end_user"
     is_active: bool = True
+    timezone: str = Field(default="UTC", max_length=100)
     workflow_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
     team_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        from app.core.timezones import normalize_timezone
+
+        return normalize_timezone(value)
 
     @field_validator("display_name")
     @classmethod
@@ -636,8 +644,18 @@ class TenantUserUpdateIn(BaseModel):
     phone: str | None = Field(default=None, max_length=40)
     role: Literal["tenant_admin", "end_user"] | None = None
     is_active: bool | None = None
+    timezone: str | None = Field(default=None, max_length=100)
     workflow_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
     team_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from app.core.timezones import normalize_timezone
+
+        return normalize_timezone(value)
 
     @field_validator("display_name")
     @classmethod
@@ -673,6 +691,7 @@ class TenantUserOut(BaseModel):
     phone: str | None = None
     role: str
     is_active: bool
+    timezone: str = "UTC"
     invite_pending: bool = False
     temporary_password: str | None = None
     sign_in_url: str | None = None

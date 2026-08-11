@@ -1,14 +1,17 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { BackLink } from "@/components/ui/BackLink";
+import { Link, useRouter } from "@/i18n/navigation";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select } from "@/components/ui/Field";
+import {
+  TimezoneSelect,
+  browserTimezone,
+} from "@/components/ui/TimezoneSelect";
 import { SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createTenantUser,
@@ -50,6 +53,7 @@ export function UserEditor({
           phone: initial.phone ?? "",
           role: initial.role,
           isActive: initial.isActive,
+          timezone: initial.timezone || browserTimezone(),
           workflowIds: initial.workflowIds,
           teamIds: initial.teamIds,
         }
@@ -59,6 +63,7 @@ export function UserEditor({
           phone: "",
           role: "end_user",
           isActive: true,
+          timezone: browserTimezone(),
           workflowIds: [],
           teamIds: [],
         },
@@ -134,6 +139,7 @@ export function UserEditor({
         phone: form.phone?.trim() || "",
         role: form.role,
         isActive: form.isActive,
+        timezone: form.timezone,
         workflowIds: form.workflowIds,
         teamIds: form.teamIds,
       });
@@ -144,6 +150,7 @@ export function UserEditor({
         phone: updated.phone ?? "",
         role: updated.role,
         isActive: updated.isActive,
+        timezone: updated.timezone || "UTC",
         workflowIds: updated.workflowIds,
         teamIds: updated.teamIds,
       });
@@ -185,6 +192,7 @@ export function UserEditor({
         phone: updated.phone ?? "",
         role: updated.role,
         isActive: updated.isActive,
+        timezone: updated.timezone || "UTC",
         workflowIds: updated.workflowIds,
         teamIds: updated.teamIds,
       });
@@ -366,6 +374,16 @@ export function UserEditor({
                   phone: event.target.value,
                 }))
               }
+            />
+          </div>
+          <div className="md:col-span-2">
+            <TimezoneSelect
+              id="user-timezone"
+              value={form.timezone}
+              onChange={(timezone) =>
+                setForm((current) => ({ ...current, timezone }))
+              }
+              hint="Used when this user views Traces"
             />
           </div>
           <div>

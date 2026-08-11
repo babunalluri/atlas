@@ -69,6 +69,7 @@ class Tenant(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     branding: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(100), default="UTC", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -89,6 +90,7 @@ class Membership(Base, TenantScoped, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     email: Mapped[str | None] = mapped_column(String(320))
     phone: Mapped[str | None] = mapped_column(String(40))
+    timezone: Mapped[str] = mapped_column(String(100), default="UTC", nullable=False)
     role: Mapped[Role] = mapped_column(Enum(Role), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     __table_args__ = (Index("uq_membership_tenant_user", "tenant_id", "user_id", unique=True),)

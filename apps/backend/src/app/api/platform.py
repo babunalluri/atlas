@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,12 +47,30 @@ class TenantCreate(BaseModel):
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=100)
     auth_org_id: str = Field(min_length=1, max_length=255)
     branding: dict[str, Any] = Field(default_factory=dict)
+    timezone: str = Field(default="UTC", max_length=100)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        from app.core.timezones import normalize_timezone
+
+        return normalize_timezone(value)
 
 
 class TenantUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     is_active: bool | None = None
     branding: dict[str, Any] | None = None
+    timezone: str | None = Field(default=None, max_length=100)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from app.core.timezones import normalize_timezone
+
+        return normalize_timezone(value)
 
 
 class TenantOut(BaseModel):
@@ -61,6 +79,7 @@ class TenantOut(BaseModel):
     slug: str
     auth_org_id: str
     branding: dict[str, Any]
+    timezone: str = "UTC"
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -175,6 +194,7 @@ async def create_tenant(
         slug=validate_slug(payload.slug),
         auth_org_id=payload.auth_org_id.strip(),
         branding=payload.branding,
+        timezone=payload.timezone,
         is_active=True,
     )
     session.add(tenant)
@@ -281,6 +301,9 @@ async def update_tenant(
     if payload.branding is not None and payload.branding != tenant.branding:
         changes["branding_updated"] = True
         tenant.branding = payload.branding
+    if payload.timezone is not None and payload.timezone != tenant.timezone:
+        changes["timezone"] = {"from": tenant.timezone, "to": payload.timezone}
+        tenant.timezone = payload.timezone
 
     if changes:
         await session.flush()

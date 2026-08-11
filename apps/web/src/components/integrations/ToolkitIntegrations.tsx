@@ -1,12 +1,13 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { useMemo, useState } from "react";
 
 import { ToolkitLogo } from "@/components/integrations/ToolkitLogo";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Select } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   createCredential,
   createToolDefinition,
@@ -438,18 +439,17 @@ export function ToolkitIntegrations({
                         <Label htmlFor="integration-credential">
                           Tenant credential
                         </Label>
-                        <Select
+                        <SearchableSelect
                           id="integration-credential"
                           value={credentialId}
-                          onChange={(event) => setCredentialId(event.target.value)}
-                        >
-                          <option value="">Select credential</option>
-                          {selectedCredentials.map((credential) => (
-                            <option key={credential.id} value={credential.id}>
-                              {credential.name}
-                            </option>
-                          ))}
-                        </Select>
+                          onChange={setCredentialId}
+                          placeholder="Select credential"
+                          emptyMessage="No matching credentials"
+                          options={selectedCredentials.map((credential) => ({
+                            value: credential.id,
+                            label: credential.name,
+                          }))}
+                        />
                       </div>
                     ) : (
                       <div className="grid gap-3 rounded-xl border border-line bg-raised/60 p-4 md:grid-cols-[1fr_1.4fr_auto] md:items-end">

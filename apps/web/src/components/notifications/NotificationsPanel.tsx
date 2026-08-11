@@ -1,11 +1,12 @@
 "use client";
 
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label, Select, Textarea } from "@/components/ui/Field";
+import { Input, Label, Textarea } from "@/components/ui/Field";
+import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { listSentNotifications, sendOrgNotification } from "@/lib/api/admin";
 import type { NotificationBatch, TenantUser } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -57,6 +58,12 @@ export function NotificationsPanel({
   async function onSend() {
     if (!title.trim() || !body.trim()) {
       setError("Title and message are required");
+      return;
+    }
+    if (selectable.length === 0) {
+      setError(
+        "This organization has no active users yet. Invite someone under Users first.",
+      );
       return;
     }
     if (audience === "user" && !userId) {
@@ -120,7 +127,7 @@ export function NotificationsPanel({
                     : "border-line bg-raised text-slate-muted hover:text-ink"
                 }`}
               >
-                All active users
+                All active users ({selectable.length})
               </button>
               <button
                 type="button"
@@ -134,28 +141,35 @@ export function NotificationsPanel({
                 One user
               </button>
             </div>
+            {selectable.length === 0 ? (
+              <p className="mt-2 text-xs text-amber">
+                No active members in this organization. Entering as platform
+                admin does not count —{" "}
+                <Link href="/admin/users" className="font-semibold underline">
+                  invite users
+                </Link>{" "}
+                first.
+              </p>
+            ) : null}
           </div>
 
           {audience === "user" ? (
             <div>
               <Label htmlFor="notify-user">User</Label>
-              <Select
+              <SearchableSelect
                 id="notify-user"
                 value={userId}
-                onChange={(event) => setUserId(event.target.value)}
+                onChange={setUserId}
                 disabled={selectable.length === 0}
-              >
-                {selectable.length === 0 ? (
-                  <option value="">No active users</option>
-                ) : (
-                  selectable.map((user) => (
-                    <option key={user.id} value={user.userId}>
-                      {user.displayName}
-                      {user.email ? ` · ${user.email}` : ""}
-                    </option>
-                  ))
-                )}
-              </Select>
+                placeholder={
+                  selectable.length === 0 ? "No active users" : "Search users…"
+                }
+                emptyMessage="No matching users"
+                options={selectable.map((user) => ({
+                  value: user.userId,
+                  label: `${user.displayName}${user.email ? ` · ${user.email}` : ""}`,
+                }))}
+              />
             </div>
           ) : null}
 
@@ -195,7 +209,7 @@ export function NotificationsPanel({
               variant="accent"
               size="sm"
               onClick={() => void onSend()}
-              disabled={busy}
+              disabled={busy || selectable.length === 0}
             >
               {busy ? "Sending…" : "Send notification"}
             </Button>
