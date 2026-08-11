@@ -50,13 +50,13 @@ from app.tenancy.ids import new_id, validate_slug
 
 
 def _validate_cel_condition_expression(expression: str) -> None:
-    """Reject invalid CEL when the Agno validator is available."""
+    """Reject invalid CEL; fail closed when the evaluator is unavailable."""
     try:
         from agno.workflow.cel import CEL_AVAILABLE, validate_cel_expression
     except ImportError:
-        return
+        raise ValueError("Invalid CEL condition expression")
     if not CEL_AVAILABLE:
-        return
+        raise ValueError("Invalid CEL condition expression")
     if not validate_cel_expression(expression):
         raise ValueError("Invalid CEL condition expression")
 
