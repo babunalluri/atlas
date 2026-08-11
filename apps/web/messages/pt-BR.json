@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "Entrar",
-    "signInSubtitle": "A autenticação da equipe usa Keycloak auto-hospedado (código aberto). Nenhuma assinatura do Clerk é necessária.",
-    "continueWithKeycloak": "Continuar com Keycloak",
-    "signUpTitle": "Cadastrar-se",
+    "signInSubtitle": "Use a conta da sua organização para acessar o portal admin e o workspace.",
+    "continueSignIn": "Continuar para entrar",
+    "signUpTitle": "Criar conta",
+    "signUpSubtitle": "Crie sua conta; depois um admin Atlas vinculará você a uma organização do workspace.",
+    "createAccount": "Criar conta",
+    "signUpFallback": "Criar conta",
+    "alreadyHaveAccount": "Já tem conta? Entrar",
     "backToHome": "Voltar ao início",
     "devUsers": "Usuários de desenvolvimento"
   },

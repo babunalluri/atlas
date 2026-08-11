@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "साइन इन",
-    "signInSubtitle": "स्टाफ़ प्रमाणीकरण स्व-होस्टेड Keycloak (ओपन सोर्स) का उपयोग करता है। Clerk सब्सक्रिप्शन की आवश्यकता नहीं।",
-    "continueWithKeycloak": "Keycloak के साथ जारी रखें",
-    "signUpTitle": "साइन अप",
+    "signInSubtitle": "ऑर्गनाइज़ेशन खाते से एडमिन पोर्टल और वर्कस्पेस तक पहुँचें।",
+    "continueSignIn": "साइन इन जारी रखें",
+    "signUpTitle": "खाता बनाएँ",
+    "signUpSubtitle": "खाता बनाएँ; फिर Atlas एडमिन आपको वर्कस्पेस संगठन से जोड़ेंगे।",
+    "createAccount": "खाता बनाएँ",
+    "signUpFallback": "खाता बनाएँ",
+    "alreadyHaveAccount": "पहले से खाता है? साइन इन करें",
     "backToHome": "होम पर वापस जाएँ",
     "devUsers": "डेव उपयोगकर्ता"
   },

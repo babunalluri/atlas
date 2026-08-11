@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "登录",
-    "signInSubtitle": "员工身份验证使用自托管的 Keycloak（开源）。无需 Clerk 订阅。",
-    "continueWithKeycloak": "使用 Keycloak 继续",
-    "signUpTitle": "注册",
+    "signInSubtitle": "使用组织账户访问管理门户和工作区。",
+    "continueSignIn": "继续登录",
+    "signUpTitle": "创建账户",
+    "signUpSubtitle": "创建账户后，Atlas 管理员会将您关联到工作区组织。",
+    "createAccount": "创建账户",
+    "signUpFallback": "创建账户",
+    "alreadyHaveAccount": "已有账户？登录",
     "backToHome": "返回首页",
     "devUsers": "开发用户"
   },

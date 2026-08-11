@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { SessionProvider } from "next-auth/react";
+import { getLocale } from "next-intl/server";
 import {
   IBM_Plex_Mono,
   IBM_Plex_Sans,
@@ -9,6 +10,8 @@ import {
   Noto_Sans_SC,
   Syne,
 } from "next/font/google";
+
+import { rtlLocales, type AppLocale } from "@/i18n/routing";
 
 import "./globals.css";
 
@@ -69,13 +72,17 @@ export const metadata: Metadata = {
  * Do not call `auth()` here — that would force every public/embed route dynamic.
  * SessionProvider fetches the session on the client; middleware still protects admin.
  */
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const locale = (await getLocale()) as AppLocale;
+  const lang = locale === "pt-BR" ? "pt-BR" : locale;
+  const dir = rtlLocales.has(locale) ? "rtl" : "ltr";
+
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={lang} dir={dir} suppressHydrationWarning>
       <body
         className={`${syne.variable} ${plexSans.variable} ${plexMono.variable} ${noto.variable} ${notoDeva.variable} ${notoArabic.variable} ${notoSc.variable} font-sans`}
       >

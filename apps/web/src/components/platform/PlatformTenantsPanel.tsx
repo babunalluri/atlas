@@ -1,5 +1,6 @@
 "use client";
 
+import { useLocale } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
 
 import { PlatformGrantCreditsPanel } from "@/components/platform/PlatformGrantCreditsPanel";
@@ -50,6 +51,7 @@ export function PlatformTenantsPanel({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { getAccessToken } = useAgentOsToken();
+  const locale = useLocale();
 
   const [sourceTenantId, setSourceTenantId] = useState("");
   const [destTenantId, setDestTenantId] = useState("");
@@ -169,7 +171,7 @@ export function PlatformTenantsPanel({
       await enterPlatformTenant(await getAccessToken(), tenant.id);
       document.cookie = `${PLATFORM_TENANT_COOKIE}=${tenant.id}; Path=/; SameSite=Lax`;
       document.cookie = `${PLATFORM_TENANT_NAME_COOKIE}=${encodeURIComponent(tenant.name)}; Path=/; SameSite=Lax`;
-      window.location.assign("/admin/agents");
+      window.location.assign(`/${locale}/admin/agents`);
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : "Could not enter tenant workspace",

@@ -1,6 +1,10 @@
 {
   "realm": "atlas",
   "enabled": true,
+  "displayName": "Atlas Agents",
+  "displayNameHtml": "<span>Atlas Agents</span>",
+  "loginTheme": "atlas",
+  "accountTheme": "atlas",
   "registrationAllowed": true,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,

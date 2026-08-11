@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "Iniciar sesión",
-    "signInSubtitle": "La autenticación del personal usa Keycloak autoalojado (código abierto). No se requiere suscripción a Clerk.",
-    "continueWithKeycloak": "Continuar con Keycloak",
-    "signUpTitle": "Registrarse",
+    "signInSubtitle": "Usa la cuenta de tu organización para acceder al portal de administración y al workspace.",
+    "continueSignIn": "Continuar para iniciar sesión",
+    "signUpTitle": "Crear cuenta",
+    "signUpSubtitle": "Crea tu cuenta; luego un administrador de Atlas te vinculará a una organización del workspace.",
+    "createAccount": "Crear cuenta",
+    "signUpFallback": "Crear cuenta",
+    "alreadyHaveAccount": "¿Ya tienes cuenta? Inicia sesión",
     "backToHome": "Volver al inicio",
     "devUsers": "Usuarios de desarrollo"
   },

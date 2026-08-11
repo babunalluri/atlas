@@ -1,0 +1,216 @@
+/**
+ * Atlas Agents sign-in theme — mirrors apps/web/src/app/globals.css light tokens.
+ * Loaded on login + account consoles when realm theme is set to "atlas".
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Syne:wght@600;700&display=swap");
+
+:root {
+  --atlas-canvas: #f5f8fb;
+  --atlas-surface: #eef3f7;
+  --atlas-raised: #ffffff;
+  --atlas-fog: #d7e0e8;
+  --atlas-ink: #071018;
+  --atlas-ink-soft: #12202c;
+  --atlas-muted: #5b6b78;
+  --atlas-line: #c5d0da;
+  --atlas-accent: #0f8f7b;
+  --atlas-accent-bright: #18c4a8;
+  --atlas-accent-dim: #0b6b5c;
+  --atlas-shadow:
+    0 1px 2px rgba(7, 16, 24, 0.04),
+    0 14px 34px -18px rgba(7, 16, 24, 0.22);
+
+  --pf-v5-global--primary-color--100: var(--atlas-accent);
+  --pf-v5-global--primary-color--200: var(--atlas-accent-bright);
+  --pf-v5-global--active-color--100: var(--atlas-accent);
+  --pf-v5-global--link--Color: var(--atlas-accent);
+  --pf-v5-global--link--Color--hover: var(--atlas-accent-dim);
+  --pf-v5-global--BackgroundColor--100: var(--atlas-canvas);
+  --pf-v5-global--BackgroundColor--200: var(--atlas-raised);
+  --pf-v5-global--FontFamily--text: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --pf-v5-global--FontFamily--heading: "Syne", ui-sans-serif, system-ui, sans-serif;
+  --pf-v5-global--Color--100: var(--atlas-ink);
+  --pf-v5-global--Color--200: var(--atlas-muted);
+  --pf-v5-global--BorderColor--100: var(--atlas-line);
+}
+
+html,
+body {
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  color: var(--atlas-ink);
+}
+
+body,
+.login-pf body,
+.pf-v5-c-login__container {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(24, 196, 168, 0.14), transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, rgba(217, 119, 6, 0.08), transparent 50%),
+    linear-gradient(180deg, #eef3f7 0%, #f5f8fb 40%, #e8eef4 100%) !important;
+}
+
+#kc-header {
+  margin-bottom: 1.5rem;
+}
+
+#kc-header-wrapper {
+  font-family: "Syne", ui-sans-serif, system-ui, sans-serif;
+  font-size: 1.65rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--atlas-ink) !important;
+  text-transform: none;
+  text-align: center;
+}
+
+#kc-page-title,
+.pf-v5-c-title {
+  font-family: "Syne", ui-sans-serif, system-ui, sans-serif !important;
+  font-weight: 600 !important;
+  color: var(--atlas-ink) !important;
+}
+
+.pf-v5-c-login__main,
+#kc-content-wrapper,
+.card-pf {
+  background: var(--atlas-raised) !important;
+  border: 1px solid var(--atlas-line) !important;
+  border-radius: 1rem !important;
+  box-shadow: var(--atlas-shadow) !important;
+}
+
+.pf-v5-c-form-control,
+input[type="text"],
+input[type="password"],
+input[type="email"] {
+  border-radius: 0.5rem !important;
+  border-color: var(--atlas-line) !important;
+  font-family: inherit;
+}
+
+.pf-v5-c-form-control:focus,
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="email"]:focus {
+  border-color: var(--atlas-accent) !important;
+  box-shadow: 0 0 0 2px rgba(15, 143, 123, 0.18) !important;
+}
+
+.pf-v5-c-button.pf-m-primary,
+#kc-login,
+input[type="submit"] {
+  background: var(--atlas-ink) !important;
+  border-color: var(--atlas-ink) !important;
+  border-radius: 0.375rem !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.01em;
+}
+
+.pf-v5-c-button.pf-m-primary:hover,
+#kc-login:hover,
+input[type="submit"]:hover {
+  background: var(--atlas-ink-soft) !important;
+  border-color: var(--atlas-ink-soft) !important;
+}
+
+.pf-v5-c-button.pf-m-secondary,
+.pf-v5-c-button.pf-m-link {
+  color: var(--atlas-accent) !important;
+}
+
+#kc-info,
+#kc-registration,
+#kc-form-options,
+.pf-v5-c-login__main-footer-band-item {
+  color: var(--atlas-muted) !important;
+  font-size: 0.875rem;
+}
+
+#kc-info a,
+#kc-registration a,
+a {
+  color: var(--atlas-accent) !important;
+}
+
+#kc-info a:hover,
+#kc-registration a:hover,
+a:hover {
+  color: var(--atlas-accent-dim) !important;
+}
+
+.pf-v5-c-alert {
+  border-radius: 0.75rem;
+}
+
+/* Account console chrome */
+.pf-v5-c-page__main-section,
+.pf-v5-c-masthead {
+  background: var(--atlas-canvas);
+}
+
+.pf-v5-c-masthead {
+  border-bottom: 1px solid var(--atlas-line);
+}
+
+.pf-v5-c-nav__link.pf-m-current,
+.pf-v5-c-nav__link:hover {
+  --pf-v5-c-nav__link--m-current--BackgroundColor: rgba(15, 143, 123, 0.08);
+}
+
+/* Strip Keycloak product branding from login + account surfaces. */
+#kc-footer,
+footer[data-kc],
+.pf-v5-c-login__footer,
+.pf-v5-c-login__main-footer-band--variant-fill,
+a[href*="keycloak.org"],
+a[href*="keycloak.io"],
+img[alt*="Keycloak" i],
+img[src*="keycloak" i] {
+  display: none !important;
+}
+
+#kc-header-wrapper {
+  font-size: 0 !important;
+  line-height: 0 !important;
+}
+
+#kc-header-wrapper::before {
+  content: "Atlas Agents";
+  display: block;
+  font-family: "Syne", ui-sans-serif, system-ui, sans-serif;
+  font-size: 1.65rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--atlas-ink);
+}
+
+.pf-v5-c-masthead .pf-v5-c-brand,
+.pf-v5-c-masthead__brand {
+  position: relative;
+  min-width: 8rem;
+}
+
+.pf-v5-c-masthead .pf-v5-c-brand .pf-v5-c-brand__text,
+.pf-v5-c-masthead .pf-v5-c-brand img,
+.pf-v5-c-masthead__brand-link img {
+  visibility: hidden !important;
+}
+
+.pf-v5-c-masthead .pf-v5-c-brand::after,
+.pf-v5-c-masthead__brand::after {
+  content: "Atlas Agents";
+  visibility: visible;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: "Syne", ui-sans-serif, system-ui, sans-serif;
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--atlas-ink);
+  white-space: nowrap;
+}

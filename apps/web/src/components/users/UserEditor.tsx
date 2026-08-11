@@ -200,7 +200,7 @@ export function UserEditor({
         updated.temporaryPassword
           ? `Synced. Temporary password: ${updated.temporaryPassword}`
           : updated.invitePending || updated.userId.startsWith("pending:")
-            ? "Pending membership ready — create/link the user in Keycloak, then have them sign in"
+            ? "Pending membership ready — have them sign in with their organization account"
             : "Identity sync recorded",
       );
       router.refresh();

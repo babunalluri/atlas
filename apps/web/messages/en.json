@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "Sign in",
-    "signInSubtitle": "Staff authentication uses self-hosted Keycloak (open source). No Clerk subscription required.",
-    "continueWithKeycloak": "Continue with Keycloak",
-    "signUpTitle": "Sign up",
+    "signInSubtitle": "Use your organization account to access the admin portal and workspace.",
+    "continueSignIn": "Continue to sign in",
+    "signUpTitle": "Create account",
+    "signUpSubtitle": "Create your account, then an Atlas admin will attach you to a workspace organization.",
+    "createAccount": "Create account",
+    "signUpFallback": "Create account",
+    "alreadyHaveAccount": "Already have an account? Sign in",
     "backToHome": "Back to home",
     "devUsers": "Dev users"
   },

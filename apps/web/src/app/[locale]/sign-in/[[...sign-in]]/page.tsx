@@ -21,7 +21,7 @@ function SignInActions() {
       onClick={() => signIn("keycloak", { callbackUrl })}
       className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
     >
-      {t("continueWithKeycloak")}
+      {t("continueSignIn")}
     </button>
   );
 }
@@ -44,7 +44,7 @@ export default function SignInPage() {
             disabled
             className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas opacity-70"
           >
-            {t("continueWithKeycloak")}
+            {t("continueSignIn")}
           </button>
         }
       >

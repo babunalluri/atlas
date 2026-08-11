@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "تسجيل الدخول",
-    "signInSubtitle": "مصادقة الموظفين تستخدم Keycloak المستضاف ذاتيًا (مفتوح المصدر). لا يلزم اشتراك Clerk.",
-    "continueWithKeycloak": "المتابعة مع Keycloak",
+    "signInSubtitle": "استخدم حساب مؤسستك للوصول إلى بوابة الإدارة ومساحة العمل.",
+    "continueSignIn": "متابعة تسجيل الدخول",
     "signUpTitle": "إنشاء حساب",
+    "signUpSubtitle": "أنشئ حسابك، ثم يربطك مسؤول Atlas بمؤسسة مساحة العمل.",
+    "createAccount": "إنشاء حساب",
+    "signUpFallback": "إنشاء حساب",
+    "alreadyHaveAccount": "لديك حساب بالفعل؟ سجّل الدخول",
     "backToHome": "العودة إلى الصفحة الرئيسية",
     "devUsers": "مستخدمو التطوير"
   },

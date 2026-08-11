@@ -33,7 +33,7 @@ such as `org_demo_acme`).
 ```bash
 docker compose up -d keycloak postgres redis backend web
 # Keycloak admin: http://localhost:8080  (admin / admin)
-# Realm: atlas  · Client: atlas-web
+# Realm: atlas  · Client: atlas-web  · Login theme: atlas (Atlas-branded UI)
 ```
 
 Default seed users (dev only — change in prod):
@@ -77,6 +77,11 @@ Access tokens are short-lived; Auth.js refreshes them via the Keycloak refresh
 token before calling the Atlas API. Access tokens must include `org_id`,
 `org_role`, `platform_admin` (optional), `email` (for invite binding), and
 audience `atlas-web` (realm client mappers in `infra/keycloak/atlas-realm.json`).
+
+**Branded login UI:** custom theme `atlas` in `infra/keycloak/themes/` (Atlas fonts/colors;
+see [Keycloak themes](https://www.keycloak.org/ui-customization/themes)). Fresh Compose imports
+set it automatically. On an existing `keycloak_data` volume, choose **Realm settings → Themes →
+Login/Account = atlas** once.
 
 `org_id` / `org_role` mappers aggregate **user and group** attributes. Put staff
 in the org group matching `tenants.auth_org_id` (for `org_id`). Set `org_role` on

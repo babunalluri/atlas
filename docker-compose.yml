@@ -74,10 +74,15 @@ services:
       KC_HOSTNAME: http://localhost:8080
       KC_HOSTNAME_STRICT: "false"
       KC_HEALTH_ENABLED: "true"
+      # Reload theme assets quickly in dev (see infra/keycloak/themes/).
+      KC_SPI_THEME_STATIC_MAX_AGE: "-1"
+      KC_SPI_THEME_CACHE_THEMES: "false"
+      KC_SPI_THEME_CACHE_TEMPLATES: "false"
     ports:
       - "8080:8080"
     volumes:
       - ./infra/keycloak/atlas-realm.json:/opt/keycloak/data/import/atlas-realm.json:ro
+      - ./infra/keycloak/themes:/opt/keycloak/themes:ro
       - keycloak_data:/opt/keycloak/data
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080"]

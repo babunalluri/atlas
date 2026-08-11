@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -19,6 +19,17 @@ function isSafeHref(href: string | undefined): href is string {
   );
 }
 
+function isBlockCode(className: string | undefined, children: ReactNode): boolean {
+  if (className?.startsWith("language-")) return true;
+  const text =
+    typeof children === "string"
+      ? children
+      : Array.isArray(children)
+        ? children.map(String).join("")
+        : String(children ?? "");
+  return text.includes("\n");
+}
+
 function markdownComponents(dark: boolean): Components {
   const linkClass = dark
     ? "font-medium text-[var(--tenant-accent,#18c4a8)] underline-offset-2 hover:underline"
@@ -31,8 +42,8 @@ function markdownComponents(dark: boolean): Components {
     : "my-3 overflow-x-auto rounded-xl border border-line bg-fog/40 p-3 font-mono text-[0.82em] leading-relaxed text-ink-soft";
   const headingMuted = dark ? "text-white/45" : "text-slate-muted";
   const blockquoteClass = dark
-    ? "my-3 border-l-2 border-[var(--tenant-accent,#18c4a8)]/50 pl-3 text-white/75"
-    : "my-3 border-l-2 border-teal/40 pl-3 text-slate-muted";
+    ? "my-3 border-s-2 border-[var(--tenant-accent,#18c4a8)]/50 ps-3 text-white/75"
+    : "my-3 border-s-2 border-teal/40 ps-3 text-slate-muted";
   const tableWrap = "my-3 overflow-x-auto rounded-lg border";
   const tableClass = dark
     ? "min-w-full border-collapse text-left text-xs text-white/85"
@@ -62,10 +73,10 @@ function markdownComponents(dark: boolean): Components {
       <p className="mb-3 last:mb-0 [&:not(:first-child)]:mt-0">{children}</p>
     ),
     ul: ({ children }) => (
-      <ul className="mb-3 list-disc space-y-1.5 pl-5 last:mb-0">{children}</ul>
+      <ul className="mb-3 list-disc space-y-1.5 ps-5 last:mb-0">{children}</ul>
     ),
     ol: ({ children }) => (
-      <ol className="mb-3 list-decimal space-y-1.5 pl-5 last:mb-0">{children}</ol>
+      <ol className="mb-3 list-decimal space-y-1.5 ps-5 last:mb-0">{children}</ol>
     ),
     li: ({ children }) => <li className="leading-relaxed">{children}</li>,
     strong: ({ children }) => (
@@ -88,22 +99,26 @@ function markdownComponents(dark: boolean): Components {
         className={cn("my-4 border-0 border-t", dark ? "border-white/10" : "border-line")}
       />
     ),
-    code: ({ className, children, ...props }) => {
-      const isBlock = Boolean(className);
-      if (isBlock) {
+    code: ({ className, children, node: _node, ...props }) => {
+      if (isBlockCode(className, children)) {
         return (
           <code className={cn("block whitespace-pre", className)} {...props}>
             {children}
           </code>
         );
       }
-      return (
-        <code className={codeInline} {...props}>
-          {children}
-        </code>
-      );
+      return <code className={codeInline}>{children}</code>;
     },
     pre: ({ children }) => <pre className={preClass}>{children}</pre>,
+    img: ({ src, alt }) =>
+      typeof src === "string" ? (
+        <img
+          src={src}
+          alt={alt ?? ""}
+          loading="lazy"
+          className="my-3 h-auto max-w-full rounded-lg"
+        />
+      ) : null,
     table: ({ children }) => (
       <div className={cn(tableWrap, dark ? "border-white/10" : "border-line")}>
         <table className={tableClass}>{children}</table>

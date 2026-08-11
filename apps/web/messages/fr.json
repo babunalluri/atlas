@@ -13,9 +13,13 @@
   },
   "auth": {
     "signInTitle": "Se connecter",
-    "signInSubtitle": "L'authentification du personnel utilise Keycloak auto-hébergé (open source). Aucun abonnement Clerk requis.",
-    "continueWithKeycloak": "Continuer avec Keycloak",
-    "signUpTitle": "S'inscrire",
+    "signInSubtitle": "Utilisez le compte de votre organisation pour accéder au portail d'administration et à l'espace de travail.",
+    "continueSignIn": "Continuer vers la connexion",
+    "signUpTitle": "Créer un compte",
+    "signUpSubtitle": "Créez votre compte, puis un administrateur Atlas vous rattachera à une organisation.",
+    "createAccount": "Créer un compte",
+    "signUpFallback": "Créer un compte",
+    "alreadyHaveAccount": "Vous avez déjà un compte ? Connectez-vous",
     "backToHome": "Retour à l'accueil",
     "devUsers": "Utilisateurs de développement"
   },

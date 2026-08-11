@@ -35,7 +35,6 @@ function isPublicPath(pathWithoutLocale: string): boolean {
     "/sign-up",
     "/t/",
     "/embed/",
-    "/chat",
     "/api/auth",
   ];
   return publicPrefixes.some(
@@ -78,7 +77,8 @@ export default auth((request) => {
 });
 
 export const config = {
+  // Run auth/intl on paths with dots in segments (e.g. user ids); skip only static files.
   matcher: [
-    "/((?!_next|.*\\..*).*)",
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|[^/]+\\.[^/]+$).*)",
   ],
 };

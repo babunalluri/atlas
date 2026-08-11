@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import available_timezones
 
 # Curated common zones shown in admin pickers (still accept any valid IANA id).
 COMMON_TIMEZONES: tuple[str, ...] = (
@@ -27,11 +27,11 @@ COMMON_TIMEZONES: tuple[str, ...] = (
     "Pacific/Auckland",
 )
 
+_CANONICAL_TIMEZONES = frozenset(available_timezones())
+
 
 def normalize_timezone(value: str | None, *, default: str = "UTC") -> str:
     cleaned = (value or "").strip() or default
-    try:
-        ZoneInfo(cleaned)
-    except ZoneInfoNotFoundError as exc:
-        raise ValueError(f"Unknown IANA timezone: {cleaned}") from exc
-    return cleaned
+    if cleaned in _CANONICAL_TIMEZONES:
+        return cleaned
+    raise ValueError(f"Unknown IANA timezone: {cleaned}")
