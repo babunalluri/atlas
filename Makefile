@@ -1,4 +1,4 @@
-.PHONY: up down logs test-backend test-web typecheck smoke
+.PHONY: up down logs test-backend test-migrations test-web typecheck smoke
 
 up:
 	docker compose up --build
@@ -11,6 +11,9 @@ logs:
 
 test-backend:
 	cd apps/backend && python -m pip install -e ".[dev]" && pytest -q
+
+test-migrations:
+	cd apps/backend && python -m pip install -e ".[dev]" && alembic heads && pytest -q tests/test_migrations.py
 
 test-web:
 	npm install && npm run test:web
