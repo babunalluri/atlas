@@ -5,7 +5,7 @@ import { mergeMessages } from "@/i18n/merge-messages";
 describe("mergeMessages", () => {
   it("deep-merges nested namespaces without dropping English fallbacks", () => {
     const en = {
-      home: { title: "Atlas", tagline: "English tagline", headline: "Hello" },
+      home: { title: "Atlas", headline: "Hello", support: "English support" },
       nav: { items: { agents: "Agents", teams: "Teams" } },
     };
     const ar = {
@@ -17,7 +17,7 @@ describe("mergeMessages", () => {
 
     expect(merged.home.title).toBe("أطلس");
     expect(merged.home.headline).toBe("مرحباً");
-    expect(merged.home.tagline).toBe("English tagline");
+    expect(merged.home.support).toBe("English support");
     expect(merged.nav.items.agents).toBe("Agents");
     expect(merged.nav.items.teams).toBe("الفرق");
   });

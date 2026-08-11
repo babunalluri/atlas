@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "@/i18n/navigation";
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
@@ -49,6 +50,7 @@ export function ScheduleManager({
   targets: ScheduleTarget[];
 }) {
   const router = useRouter();
+  const tCommon = useTranslations("common");
   const { getAccessToken } = useAgentOsToken();
   const runnableTargets = targets.filter(
     (target) =>
@@ -172,7 +174,7 @@ export function ScheduleManager({
               </p>
               {editing ? (
                 <Button size="sm" variant="ghost" onClick={reset}>
-                  Cancel
+                  {tCommon("cancel")}
                 </Button>
               ) : null}
             </div>

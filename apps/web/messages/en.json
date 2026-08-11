@@ -9,7 +9,6 @@
     "signUp": "Sign up",
     "loading": "Loading…",
     "language": "Language",
-    "admin": "Admin",
     "backToWorkspace": "Back to workspace",
     "exitTenant": "Exit"
   },
@@ -82,7 +81,6 @@
   },
   "home": {
     "title": "Atlas Agents",
-    "tagline": "Multi-tenant agent configuration and branded customer chat",
     "platformDescriptor": "multi-tenant agent platform",
     "brandSubtitle": "Agent workspace",
     "headline": "Your team's agents, ready when you are.",

@@ -201,6 +201,11 @@ async def test_end_users_are_tenant_scoped(identity_db):
         assert leaked is None
 
 
+def _invoke_tool(tool_obj: object):
+    fn = getattr(tool_obj, "entrypoint", tool_obj)
+    return fn()
+
+
 async def test_my_profile_uses_context_not_model_ids(identity_db):
     factory = identity_db["factory"]
     ctx = identity_db["tenant_a"]
@@ -224,7 +229,7 @@ async def test_my_profile_uses_context_not_model_ids(identity_db):
         set_tenant_context(bound)
         tools = build_identity_tools(session, bound)
         my_profile = next(t for t in tools if getattr(t, "name", None) == "my_profile")
-        raw = await my_profile()
+        raw = await _invoke_tool(my_profile)
         payload = json.loads(raw)
         assert payload["verified"] is True
         assert payload["email"] == "profile@example.com"
@@ -242,7 +247,7 @@ async def test_my_profile_uses_context_not_model_ids(identity_db):
         my_profile_u = next(
             t for t in tools_u if getattr(t, "name", None) == "my_profile"
         )
-        raw_u = await my_profile_u()
+        raw_u = await _invoke_tool(my_profile_u)
         assert json.loads(raw_u)["verified"] is False
 
 

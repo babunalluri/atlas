@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -38,6 +39,7 @@ export function PublicApiTestBed({
   onWorkflowChange: (id: string) => void;
   onTeamChange: (id: string) => void;
 }) {
+  const tCommon = useTranslations("common");
   const [secret, setSecret] = useState("");
   const [mode, setMode] = useState<RunMode>("first");
   const [sessionId, setSessionId] = useState("");
@@ -344,7 +346,7 @@ export function PublicApiTestBed({
             variant="ghost"
             onClick={() => abortRef.current?.abort()}
           >
-            Cancel
+            {tCommon("cancel")}
           </Button>
         ) : null}
       </div>

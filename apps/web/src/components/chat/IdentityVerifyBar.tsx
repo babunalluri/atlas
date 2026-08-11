@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
 import {
@@ -22,6 +23,7 @@ export function IdentityVerifyBar({
   guestId,
   compact = false,
 }: Props) {
+  const tCommon = useTranslations("common");
   const [status, setStatus] = useState<IdentityStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
@@ -180,7 +182,7 @@ export function IdentityVerifyBar({
               }}
               className="rounded-lg border border-white/15 px-3 py-1.5 text-xs text-white/65"
             >
-              Cancel
+              {tCommon("cancel")}
             </button>
           </div>
         </div>

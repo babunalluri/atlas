@@ -109,7 +109,10 @@ class IdentityService:
             raise LookupError("No active verification code for this session")
         if challenge.guest_user_id != guest_user_id:
             raise PermissionError("Verification belongs to another guest")
-        if challenge.expires_at < datetime.now(UTC):
+        expires_at = challenge.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at < datetime.now(UTC):
             raise ValueError("Verification code expired")
         if challenge.attempt_count >= 5:
             raise ValueError("Too many attempts — request a new code")

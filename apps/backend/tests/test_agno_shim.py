@@ -42,7 +42,8 @@ def sandbox_path(monkeypatch: pytest.MonkeyPatch):
     assert SANDBOX_ROOT is not None
     monkeypatch.syspath_prepend(str(SANDBOX_ROOT))
     _clear_shim_modules()
-    return SANDBOX_ROOT
+    yield SANDBOX_ROOT
+    _clear_shim_modules()
 
 
 def test_log_helpers_importable(sandbox_path):

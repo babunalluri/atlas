@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -19,6 +20,7 @@ export function MemoriesPanel({
 }: {
   initialUserId?: string;
 }) {
+  const tCommon = useTranslations("common");
   const { getAccessToken } = useAgentOsToken();
   const [userId, setUserId] = useState(initialUserId);
   const [memories, setMemories] = useState<UserMemory[]>([]);
@@ -160,7 +162,7 @@ export function MemoriesPanel({
                 setDraft("");
               }}
             >
-              Cancel
+              {tCommon("cancel")}
             </Button>
           ) : null}
           <Button variant="accent" disabled={busy} onClick={save}>

@@ -9,7 +9,6 @@
     "signUp": "S'inscrire",
     "loading": "Chargement…",
     "language": "Langue",
-    "admin": "Admin",
     "backToWorkspace": "Retour à l'espace de travail",
     "exitTenant": "Quitter"
   },
@@ -82,7 +81,6 @@
   },
   "home": {
     "title": "Atlas Agents",
-    "tagline": "Configuration d'agents multi-locataire et chat client de marque",
     "platformDescriptor": "plateforme d'agents multi-locataire",
     "brandSubtitle": "Espace agents",
     "headline": "Les agents de votre équipe, prêts quand vous l'êtes.",

@@ -9,7 +9,6 @@
     "signUp": "注册",
     "loading": "加载中…",
     "language": "语言",
-    "admin": "管理",
     "backToWorkspace": "返回工作区",
     "exitTenant": "退出"
   },
@@ -82,7 +81,6 @@
   },
   "home": {
     "title": "Atlas Agents",
-    "tagline": "多租户智能体配置与品牌化客户聊天",
     "platformDescriptor": "多租户智能体平台",
     "brandSubtitle": "智能体工作区",
     "headline": "团队智能体，随叫随到。",
