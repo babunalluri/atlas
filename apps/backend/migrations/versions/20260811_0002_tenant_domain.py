@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260811_0002_tenant_domain"
-down_revision = "20260811_0001_tenant_user_timezone"
+revision = "20260811_0002"
+down_revision = "20260811_0001"
 branch_labels = None
 depends_on = None
 
