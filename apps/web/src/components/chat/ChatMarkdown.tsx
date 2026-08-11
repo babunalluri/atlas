@@ -19,7 +19,7 @@ function isSafeHref(href: string | undefined): href is string {
   );
 }
 
-function isBlockCode(className: string | undefined, children: ReactNode): boolean {
+export function isBlockCode(className: string | undefined, children: ReactNode): boolean {
   if (className?.startsWith("language-")) return true;
   const text =
     typeof children === "string"
@@ -46,14 +46,14 @@ function markdownComponents(dark: boolean): Components {
     : "my-3 border-s-2 border-teal/40 ps-3 text-slate-muted";
   const tableWrap = "my-3 overflow-x-auto rounded-lg border";
   const tableClass = dark
-    ? "min-w-full border-collapse text-left text-xs text-white/85"
-    : "min-w-full border-collapse text-left text-xs text-ink-soft";
+    ? "min-w-full border-collapse text-start text-xs text-white/85"
+    : "min-w-full border-collapse text-start text-xs text-ink-soft";
   const thClass = dark
-    ? "border-b border-white/10 bg-white/5 px-3 py-2 font-semibold"
-    : "border-b border-line bg-fog/50 px-3 py-2 font-semibold";
+    ? "border-b border-white/10 bg-white/5 px-3 py-2 text-start font-semibold"
+    : "border-b border-line bg-fog/50 px-3 py-2 text-start font-semibold";
   const tdClass = dark
-    ? "border-b border-white/8 px-3 py-2 align-top"
-    : "border-b border-line/70 px-3 py-2 align-top";
+    ? "border-b border-white/8 px-3 py-2 text-start align-top"
+    : "border-b border-line/70 px-3 py-2 text-start align-top";
 
   return {
     h1: ({ children }) => (

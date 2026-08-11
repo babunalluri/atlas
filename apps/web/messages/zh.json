@@ -1,7 +1,9 @@
 {
   "common": {
     "save": "保存",
+    "saving": "保存中…",
     "cancel": "取消",
+    "invite": "邀请",
     "signIn": "登录",
     "signOut": "退出登录",
     "signUp": "注册",
@@ -80,6 +82,13 @@
   },
   "home": {
     "title": "Atlas Agents",
-    "tagline": "多租户智能体配置与品牌化客户聊天"
+    "tagline": "多租户智能体配置与品牌化客户聊天",
+    "platformDescriptor": "多租户智能体平台",
+    "brandSubtitle": "智能体工作区",
+    "headline": "团队智能体，随叫随到。",
+    "support": "组织成员登录以打开分配的工作流和团队，或管理控制平面。",
+    "openingWorkspace": "正在打开您的工作区…",
+    "footerCta": "登录以继续",
+    "previewSignedIn": "已登录"
   }
 }

@@ -1,5 +1,6 @@
 import { getRequestConfig } from "next-intl/server";
 
+import { mergeMessages } from "@/i18n/merge-messages";
 import { defaultLocale, locales, type AppLocale } from "@/i18n/routing";
 
 function resolveLocale(locale: string | undefined): AppLocale {
@@ -20,18 +21,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
 
   return {
     locale,
-    messages: {
-      ...enMessages,
-      ...userMessages,
-      common: { ...enMessages.common, ...userMessages.common },
-      auth: { ...enMessages.auth, ...userMessages.auth },
-      nav: {
-        ...enMessages.nav,
-        ...userMessages.nav,
-        groups: { ...enMessages.nav.groups, ...userMessages.nav?.groups },
-        items: { ...enMessages.nav.items, ...userMessages.nav?.items },
-      },
-      home: { ...enMessages.home, ...userMessages.home },
-    },
+    messages:
+      locale === "en"
+        ? userMessages
+        : mergeMessages(enMessages, userMessages),
   };
 });

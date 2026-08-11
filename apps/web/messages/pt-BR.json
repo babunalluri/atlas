@@ -1,7 +1,9 @@
 {
   "common": {
     "save": "Salvar",
+    "saving": "Salvando…",
     "cancel": "Cancelar",
+    "invite": "Convidar",
     "signIn": "Entrar",
     "signOut": "Sair",
     "signUp": "Cadastrar-se",
@@ -80,6 +82,13 @@
   },
   "home": {
     "title": "Atlas Agents",
-    "tagline": "Configuração de agentes multi-inquilino e chat de cliente com marca"
+    "tagline": "Configuração de agentes multi-inquilino e chat de cliente com marca",
+    "platformDescriptor": "plataforma de agentes multi-inquilino",
+    "brandSubtitle": "Espaço de agentes",
+    "headline": "Os agentes da sua equipe, prontos quando você estiver.",
+    "support": "Membros da organização entram para abrir fluxos e equipes atribuídos ou administrar o plano de controle.",
+    "openingWorkspace": "Abrindo seu workspace…",
+    "footerCta": "Entre para continuar",
+    "previewSignedIn": "Conectado"
   }
 }

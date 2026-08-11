@@ -1,6 +1,7 @@
 "use client";
 
 import { Link, useRouter } from "@/i18n/navigation";
+import { useTranslations } from "next-intl";
 import {
   useCallback,
   useEffect,
@@ -72,6 +73,7 @@ export function CustomerChat({
   /** Compact layout for iframe embeds (no session sidebar). */
   embedded?: boolean;
 }) {
+  const tCommon = useTranslations("common");
   const workflowTeams =
     "workflow" in surface ? (surface.workflow.teams ?? []) : [];
   const [runMode, setRunMode] = useState<"workflow" | "team">(
@@ -716,7 +718,7 @@ export function CustomerChat({
                       href={`/t/${surface.tenant.slug}/chat`}
                       className="rounded-lg border border-line bg-raised/70 px-3 py-1.5 text-xs font-medium text-slate-muted transition hover:border-[var(--tenant-accent)]/60 hover:text-ink"
                     >
-                      Back to workspace
+                      {tCommon("backToWorkspace")}
                     </Link>
                   ) : null}
                   {canAdminister ? (

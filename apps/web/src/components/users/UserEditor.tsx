@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { BackLink } from "@/components/ui/BackLink";
 import { Link, useRouter } from "@/i18n/navigation";
@@ -44,6 +45,7 @@ export function UserEditor({
 }) {
   const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
+  const tCommon = useTranslations("common");
   const [form, setForm] = useState<TenantUserInput>(() =>
     initial
       ? {
@@ -300,10 +302,10 @@ export function UserEditor({
           >
             <SaveIcon />
             {busy === "save"
-              ? "Saving…"
+              ? tCommon("saving")
               : mode === "create"
-                ? "Invite"
-                : "Save"}
+                ? tCommon("invite")
+                : tCommon("save")}
           </Button>
         </EditorActions>
       </header>

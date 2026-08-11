@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import { useRouter } from "@/i18n/navigation";
 
 import { BackLink } from "@/components/ui/BackLink";
@@ -53,6 +54,7 @@ export function TeamEditor({
 }) {
   const { getAccessToken } = useAgentOsToken();
   const router = useRouter();
+  const tCommon = useTranslations("common");
   const [form, setForm] = useState<TeamDraftInput>(() => applyTeamToForm(initial));
   const [status, setStatus] = useState(initial.status);
   const [draftVersion, setDraftVersion] = useState(initial.draftVersion);
@@ -206,7 +208,7 @@ export function TeamEditor({
             disabled={busy !== null}
           >
             <SaveIcon />
-            {busy === "save" ? "Saving…" : "Save"}
+            {busy === "save" ? tCommon("saving") : tCommon("save")}
           </Button>
           <Button
             variant="accent"

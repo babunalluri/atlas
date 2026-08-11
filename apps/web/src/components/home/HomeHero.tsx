@@ -1,6 +1,7 @@
 "use client";
 
 import { Link, useRouter } from "@/i18n/navigation";
+import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
 import { BrandMark } from "@/components/layout/BrandMark";
@@ -11,49 +12,25 @@ import { cn } from "@/lib/utils";
 
 type HomeMode = "loading" | "signed_out" | "onboarding" | "redirecting";
 
-type HomeState = {
-  mode: HomeMode;
-  primaryHref: string;
-  primaryLabel: string;
-  workspaceName?: string;
-  brandHref: string;
-  brandSubtitle: string;
-  headline: string;
-  support: string;
-};
-
-const SIGNED_OUT: HomeState = {
-  mode: "signed_out",
-  primaryHref: "/sign-in",
-  primaryLabel: "Sign in",
-  brandHref: "/",
-  brandSubtitle: "Agent workspace",
-  headline: "Your team's agents, ready when you are.",
-  support:
-    "Sign in with your organization account to open assigned workflows and teams, or administer the control plane.",
-};
-
 /**
  * Signed-out landing stays. Signed-in users go straight to the workspace
  * portal; Admin is available from the portal header and admin shell.
  */
 export function HomeHero() {
   const router = useRouter();
+  const tHome = useTranslations("home");
+  const tCommon = useTranslations("common");
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
-  const [state, setState] = useState<HomeState>({
-    ...SIGNED_OUT,
-    mode: "loading",
-    headline: "…",
-    support: "",
-  });
+  const [mode, setMode] = useState<HomeMode>("loading");
+  const [workspaceName, setWorkspaceName] = useState<string | undefined>();
 
   useEffect(() => {
     if (!isLoaded) {
-      setState((prev) => ({ ...prev, mode: "loading" }));
+      setMode("loading");
       return;
     }
     if (!isSignedIn) {
-      setState(SIGNED_OUT);
+      setMode("signed_out");
       return;
     }
     let cancelled = false;
@@ -64,29 +41,18 @@ export function HomeHero() {
         const status = await getOnboardingStatus(token);
         if (cancelled) return;
         if (!status.provisioned) {
-          setState({
-            mode: "onboarding",
-            primaryHref: "/admin/onboarding",
-            primaryLabel: "Finish setup",
-            workspaceName: status.tenant_name ?? undefined,
-            brandHref: "/admin/onboarding",
-            brandSubtitle: "Workspace setup",
-            headline: "Finish setting up your workspace.",
-            support:
-              "Provision your organization tenant, then publish workflows your teammates can run.",
-          });
+          setWorkspaceName(status.tenant_name ?? undefined);
+          setMode("onboarding");
           return;
         }
         const workspace = await getWorkspaceInfo(token);
         if (cancelled) return;
         const slug = workspace.slug || status.tenant_slug || "";
         const portalHref = slug ? `/t/${slug}/chat` : "/chat";
-        if (!cancelled) {
-          setState((prev) => ({ ...prev, mode: "redirecting" }));
-          router.replace(portalHref);
-        }
+        setMode("redirecting");
+        router.replace(portalHref);
       } catch {
-        if (!cancelled) setState(SIGNED_OUT);
+        if (!cancelled) setMode("signed_out");
       }
     })();
     return () => {
@@ -94,30 +60,33 @@ export function HomeHero() {
     };
   }, [getAccessToken, isLoaded, isSignedIn, router]);
 
-  if (state.mode === "onboarding") {
+  if (mode === "onboarding") {
     return (
       <div className="relative min-h-screen overflow-hidden">
         <div className="pointer-events-none absolute inset-0 grid-noise opacity-50" />
         <div className="relative mx-auto flex min-h-screen max-w-5xl flex-col px-6 py-10 md:py-14">
           <header>
-            <BrandMark href={state.brandHref} subtitle={state.brandSubtitle} />
+            <BrandMark
+              href="/admin/onboarding"
+              subtitle={tHome("onboardingBrandSubtitle")}
+            />
           </header>
           <div className="flex flex-1 flex-col justify-center py-16">
-            {state.workspaceName ? (
+            {workspaceName ? (
               <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-                {state.workspaceName}
+                {workspaceName}
               </p>
             ) : null}
             <h1 className="max-w-3xl font-display text-4xl font-semibold tracking-tight text-ink sm:text-5xl">
-              {state.headline}
+              {tHome("onboardingHeadline")}
             </h1>
             <p className="mt-5 max-w-xl text-base leading-relaxed text-slate-muted">
-              {state.support}
+              {tHome("onboardingSupport")}
             </p>
             <div className="mt-8">
-              <Link href={state.primaryHref}>
+              <Link href="/admin/onboarding">
                 <Button variant="accent" className="min-w-[10rem]">
-                  {state.primaryLabel}
+                  {tHome("finishSetup")}
                 </Button>
               </Link>
             </div>
@@ -127,21 +96,28 @@ export function HomeHero() {
     );
   }
 
-  if (
-    state.mode === "redirecting" ||
-    (isLoaded && isSignedIn && state.mode === "loading")
-  ) {
+  if (mode === "redirecting" || (isLoaded && isSignedIn && mode === "loading")) {
     return (
       <main className="flex min-h-screen items-center justify-center px-6">
-        <p className="text-sm text-slate-muted">Opening your workspace…</p>
+        <p className="text-sm text-slate-muted">{tHome("openingWorkspace")}</p>
       </main>
     );
   }
 
-  return <SignedOutLanding loading={state.mode === "loading"} />;
+  return <SignedOutLanding loading={mode === "loading"} tCommon={tCommon} tHome={tHome} />;
 }
 
-function SignedOutLanding({ loading }: { loading: boolean }) {
+function SignedOutLanding({
+  loading,
+  tCommon,
+  tHome,
+}: {
+  loading: boolean;
+  tCommon: ReturnType<typeof useTranslations<"common">>;
+  tHome: ReturnType<typeof useTranslations<"home">>;
+}) {
+  const tAuth = useTranslations("auth");
+
   return (
     <div className="relative overflow-hidden">
       <div className="pointer-events-none absolute inset-0 grid-noise opacity-45" />
@@ -162,7 +138,7 @@ function SignedOutLanding({ loading }: { loading: boolean }) {
 
       <div className="relative mx-auto max-w-6xl px-6 pb-24 pt-10 md:px-8 md:pt-14">
         <header className="portal-rise">
-          <BrandMark href="/" subtitle="Agent workspace" />
+          <BrandMark href="/" subtitle={tHome("brandSubtitle")} />
         </header>
 
         <section
@@ -173,50 +149,48 @@ function SignedOutLanding({ loading }: { loading: boolean }) {
         >
           <div className="portal-rise portal-rise-delay-1">
             <h1 className="max-w-xl font-display text-4xl font-semibold tracking-tight text-ink sm:text-5xl lg:text-[3.35rem] lg:leading-[1.08]">
-              Your team&apos;s agents, ready when you are.
+              {tHome("headline")}
             </h1>
             <p className="mt-5 max-w-md text-base leading-relaxed text-slate-muted">
-              Organization members sign in to open assigned workflows and teams,
-              or administer the control plane.
+              {tHome("support")}
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link href="/sign-in">
                 <Button variant="accent" className="min-w-[9.5rem]">
-                  Sign in
+                  {tCommon("signIn")}
                 </Button>
               </Link>
               <Link href="/sign-up">
-                <Button variant="secondary">Create account</Button>
+                <Button variant="secondary">{tAuth("createAccount")}</Button>
               </Link>
             </div>
           </div>
 
           <div className="portal-rise portal-rise-delay-2">
-            <WorkspacePreview />
+            <WorkspacePreview tHome={tHome} />
           </div>
         </section>
 
         <section className="portal-rise portal-rise-delay-3 mt-24 border-t border-line/70 pt-14 md:mt-28">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-            Two doors, one platform
+            {tHome("twoDoorsEyebrow")}
           </p>
           <h2 className="mt-3 max-w-xl font-display text-3xl font-semibold tracking-tight text-ink">
-            Built for operators and the people who run the work.
+            {tHome("twoDoorsTitle")}
           </h2>
           <div className="mt-10 grid gap-10 md:grid-cols-2 md:gap-14">
             <div>
               <h3 className="font-display text-xl font-semibold text-ink">
-                Control plane
+                {tHome("controlPlaneTitle")}
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-slate-muted">
-                Admins configure agents, teams, knowledge, tools, and approvals —
-                then publish experiences for org members.
+                {tHome("controlPlaneBody")}
               </p>
               <ul className="mt-5 space-y-2.5 text-sm text-ink-soft">
                 {[
-                  "Draft, version, and publish agents & workflows",
-                  "Attach knowledge, credentials, and sandbox tools",
-                  "Trace runs, resolve approvals, manage access",
+                  tHome("controlPlaneBullet1"),
+                  tHome("controlPlaneBullet2"),
+                  tHome("controlPlaneBullet3"),
                 ].map((line) => (
                   <li key={line} className="flex gap-2.5">
                     <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-teal" />
@@ -227,17 +201,16 @@ function SignedOutLanding({ loading }: { loading: boolean }) {
             </div>
             <div>
               <h3 className="font-display text-xl font-semibold text-ink">
-                Workspace portal
+                {tHome("workspacePortalTitle")}
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-slate-muted">
-                Teammates sign in, land in a tenant-branded portal, pick an
-                assigned workflow or team, and chat — no anonymous guest access.
+                {tHome("workspacePortalBody")}
               </p>
               <ul className="mt-5 space-y-2.5 text-sm text-ink-soft">
                 {[
-                  "Only surfaces assigned to your org account",
-                  "Streaming chat with pause, cancel, and resume",
-                  "Organization identity on every run",
+                  tHome("workspacePortalBullet1"),
+                  tHome("workspacePortalBullet2"),
+                  tHome("workspacePortalBullet3"),
                 ].map((line) => (
                   <li key={line} className="flex gap-2.5">
                     <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-teal" />
@@ -251,28 +224,16 @@ function SignedOutLanding({ loading }: { loading: boolean }) {
 
         <section className="mt-20 md:mt-24">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-            From sign-in to conversation
+            {tHome("pathEyebrow")}
           </p>
           <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight text-ink">
-            A straight path into the right surface.
+            {tHome("pathTitle")}
           </h2>
           <ol className="mt-10 grid gap-6 sm:grid-cols-3">
             {[
-              {
-                step: "01",
-                title: "Authenticate",
-                copy: "Sign in with your organization account. Atlas resolves your tenant and role.",
-              },
-              {
-                step: "02",
-                title: "Choose a surface",
-                copy: "Open the workspace portal, then use Admin when you need the control plane.",
-              },
-              {
-                step: "03",
-                title: "Run the work",
-                copy: "Start a workflow or team chat — streaming responses with human approvals when needed.",
-              },
+              { step: "01", title: tHome("step1Title"), copy: tHome("step1Copy") },
+              { step: "02", title: tHome("step2Title"), copy: tHome("step2Copy") },
+              { step: "03", title: tHome("step3Title"), copy: tHome("step3Copy") },
             ].map((item) => (
               <li key={item.step} className="relative pt-1">
                 <p className="font-mono text-xs text-teal">{item.step}</p>
@@ -288,18 +249,21 @@ function SignedOutLanding({ loading }: { loading: boolean }) {
         </section>
 
         <footer className="mt-24 flex flex-col gap-3 border-t border-line/70 pt-8 text-sm text-slate-muted sm:flex-row sm:items-center sm:justify-between">
-          <p>Atlas Agents — multi-tenant agent platform</p>
-          <p className="text-xs uppercase tracking-[0.12em]">
-            Sign in to continue
+          <p>
+            {tHome("title")} — {tHome("platformDescriptor")}
           </p>
+          <p className="text-xs uppercase tracking-[0.12em]">{tHome("footerCta")}</p>
         </footer>
       </div>
     </div>
   );
 }
 
-/** Decorative product mock — fills the empty hero plane without stock imagery. */
-function WorkspacePreview() {
+function WorkspacePreview({
+  tHome,
+}: {
+  tHome: ReturnType<typeof useTranslations<"home">>;
+}) {
   return (
     <div
       className="relative overflow-hidden rounded-2xl border border-line bg-ink text-canvas shadow-[0_24px_60px_-28px_rgba(7,16,24,0.55)]"
@@ -319,24 +283,30 @@ function WorkspacePreview() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-teal-bright">
-              Acme Corp
+              {tHome("previewTenant")}
             </p>
-            <p className="mt-0.5 text-xs text-white/45">Workspace portal</p>
+            <p className="mt-0.5 text-xs text-white/45">{tHome("previewPortalLabel")}</p>
           </div>
           <span className="rounded-full border border-white/15 px-2.5 py-1 text-[10px] text-white/55">
-            Signed in
+            {tHome("previewSignedIn")}
           </span>
         </div>
         <p className="mt-6 font-display text-2xl font-semibold tracking-tight text-white">
-          What would you like to work on?
+          {tHome("previewPrompt")}
         </p>
-        <p className="mt-2 max-w-sm text-sm text-white/50">
-          Assigned workflows and teams for your account.
-        </p>
+        <p className="mt-2 max-w-sm text-sm text-white/50">{tHome("previewSubtext")}</p>
         <div className="mt-6 grid gap-3 sm:grid-cols-2">
           {[
-            { kind: "Workflow", name: "Customer intake", hint: "Guided steps" },
-            { kind: "Team", name: "Front line", hint: "Open chat" },
+            {
+              kind: tHome("previewWorkflowKind"),
+              name: tHome("previewWorkflowName"),
+              hint: tHome("previewWorkflowHint"),
+            },
+            {
+              kind: tHome("previewTeamKind"),
+              name: tHome("previewTeamName"),
+              hint: tHome("previewTeamHint"),
+            },
           ].map((card) => (
             <div
               key={card.name}
