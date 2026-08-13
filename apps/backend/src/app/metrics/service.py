@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
+import json
 import math
+import re
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Sequence
@@ -21,6 +24,92 @@ from app.db.models import (
     WorkflowConfig,
 )
 from app.tenancy.context import TenantContext
+
+_NON_TOOL_LABELS = frozenset(
+    {
+        "toolcallstarted",
+        "toolcallcompleted",
+        "toolcallerror",
+        "toolcallevent",
+        "runevent",
+        "runstarted",
+        "runcompleted",
+        "runerror",
+        "runcancelled",
+        "runpaused",
+    }
+)
+_NESTED_TOOL_KEYS = ("tool_name", "name", "tool", "tool_execution")
+_QUOTED_TOOL_NAME_RE = re.compile(
+    r"""['\"](?:tool_name|name|tool)['\"]\s*:\s*['\"]([^'\"]+)['\"]"""
+)
+
+
+def _looks_like_call_id(value: str) -> bool:
+    stripped = value.strip()
+    return stripped.startswith("call_") or stripped == "tool_call_id"
+
+
+def _maybe_mapping(value: str) -> dict[str, Any] | None:
+    stripped = value.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return None
+    for parser in (ast.literal_eval, json.loads):
+        try:
+            parsed = parser(stripped)
+        except (ValueError, SyntaxError, json.JSONDecodeError, TypeError, MemoryError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def tool_label(value: Any, *, depth: int = 0) -> str | None:
+    """Return a human-readable tool name; never a tool_call_id blob."""
+    if value is None or depth > 4:
+        return None
+    if isinstance(value, dict):
+        for key in _NESTED_TOOL_KEYS:
+            nested = value.get(key)
+            if nested is None or nested is value:
+                continue
+            label = tool_label(nested, depth=depth + 1)
+            if label:
+                return label
+        return None
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    mapping = _maybe_mapping(stripped)
+    if mapping is not None:
+        return tool_label(mapping, depth=depth + 1)
+    if "tool_call_id" in stripped and (
+        stripped.startswith("{") or stripped.startswith("'") or stripped.startswith('"')
+    ):
+        match = _QUOTED_TOOL_NAME_RE.search(stripped)
+        if match and not _looks_like_call_id(match.group(1)):
+            return match.group(1)[:255]
+        return None
+    if stripped.lower() in _NON_TOOL_LABELS or _looks_like_call_id(stripped):
+        return None
+    return stripped[:255]
+
+
+def _span_tool_name(span: TraceSpan) -> str:
+    attributes = span.attributes if isinstance(span.attributes, dict) else {}
+    for candidate in (
+        attributes.get("tool_name"),
+        attributes.get("tool"),
+        attributes.get("tool_execution"),
+        attributes.get("name"),
+        span.name,
+    ):
+        label = tool_label(candidate)
+        if label:
+            return label
+    return "unknown"
 
 
 def _day(value: datetime) -> datetime:
@@ -114,13 +203,7 @@ class MetricsService:
             trace = trace_by_id.get(span.trace_id)
             if trace is None:
                 continue
-            attributes = span.attributes if isinstance(span.attributes, dict) else {}
-            tool_name = str(
-                attributes.get("tool_name")
-                or attributes.get("name")
-                or attributes.get("tool")
-                or span.name
-            )
+            tool_name = _span_tool_name(span)
             date = _day(trace.started_at)
             tool_counts[(date, trace.target_id)][tool_name] += 1
             all_tool_counts[date][tool_name] += 1
@@ -249,7 +332,9 @@ class MetricsService:
         top_tools: Counter[str] = Counter()
         for row in totals:
             for item in row.top_tools:
-                top_tools[str(item["name"])] += int(item["count"])
+                raw_name = item.get("name") if isinstance(item, dict) else item
+                label = tool_label(raw_name) or "unknown"
+                top_tools[label] += int(item["count"] if isinstance(item, dict) else 1)
 
         names = await self._target_names()
         target_totals: dict[tuple[str, uuid.UUID], dict[str, Any]] = {}

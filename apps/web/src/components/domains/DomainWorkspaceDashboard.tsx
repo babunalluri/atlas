@@ -24,10 +24,10 @@ export function DomainWorkspaceDashboard({
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
             {data.domain_label} workspace
           </p>
-          <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
+          <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
             {isGeneric ? "Tenant metrics" : `${data.domain_label} dashboard`}
           </h1>
-          <p className="mt-2 max-w-2xl text-sm text-slate-muted">
+          <p className="mt-1 max-w-2xl text-sm text-slate-muted">
             {isGeneric
               ? `Operational metrics for the last ${data.range_days} days.`
               : `Domain-specific KPIs and operational metrics for the last ${data.range_days} days.`}
@@ -109,7 +109,7 @@ export function DomainWorkspaceDashboard({
         </>
       ) : null}
 
-      <MetricsDashboard data={data.metrics} />
+      <MetricsDashboard data={data.metrics} embedded />
     </div>
   );
 }

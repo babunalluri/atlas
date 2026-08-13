@@ -172,3 +172,63 @@ async def test_metric_aggregates_are_durable_and_tenant_isolated(session, tenant
     rerun = await MetricsService(session, tenant_a).dashboard(days=30)
     assert rerun["kpis"]["runs"] == 1
     assert len(rerun["daily"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_top_tools_use_readable_names_not_span_attribute_blobs(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    config, version, conversation = await _team_and_conversation(session, tenant_a, "tools")
+    traces = TraceRepository(session, tenant_a)
+    trace = await traces.start(
+        conversation=conversation,
+        target_id=config.id,
+        version_id=version.id,
+        name="Tool run",
+        message="quote",
+    )
+    await traces.record_event(
+        trace.id,
+        {
+            "event": "ToolCallStarted",
+            "tool": {
+                "tool_call_id": "call_qrGpwPPJXXBChAk3Nwuz2vbc",
+                "tool_name": "get_quote",
+                "tool_args": {"symbol": "AAPL"},
+            },
+        },
+    )
+    await traces.record_event(
+        trace.id,
+        {
+            "event": "ToolCallStarted",
+            "name": {
+                "tool_call_id": "call_other",
+                "tool_name": "get_quote",
+            },
+        },
+    )
+    await traces.record_event(
+        trace.id,
+        {"event": "RunCompleted", "run_id": "run-tools", "content": "done"},
+    )
+
+    dashboard = await MetricsService(session, tenant_a).dashboard(days=30)
+    names = [item["name"] for item in dashboard["top_tools"]]
+    assert names == ["get_quote"]
+    assert dashboard["top_tools"][0]["count"] == 2
+    assert all("tool_call_id" not in name for name in names)
+
+
+def test_tool_label_parses_stringified_dicts():
+    from app.metrics.service import tool_label
+
+    blob = (
+        "{'tool_call_id': 'call_qrGpwPPJXXBChAk3Nwuz2vbc', "
+        "'tool_name': 'search_web', 'tool_args': {'q': 'nse'}}"
+    )
+    assert tool_label(blob) == "search_web"
+    assert tool_label({"tool": {"tool_call_id": "call_1", "tool_name": "list_orders"}}) == (
+        "list_orders"
+    )
+    assert tool_label("ToolCallStarted") is None
+    assert "tool_call_id" not in (tool_label(blob) or "")

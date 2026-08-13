@@ -10,13 +10,79 @@ function duration(value: number | null) {
   return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(2)} s`;
 }
 
+const NESTED_TOOL_KEYS = ["tool_name", "name", "tool"] as const;
+
+function parseMaybeObject(raw: string): Record<string, unknown> | null {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  try {
+    const json = JSON.parse(trimmed) as unknown;
+    if (json && typeof json === "object" && !Array.isArray(json)) {
+      return json as Record<string, unknown>;
+    }
+  } catch {
+    // Python dict repr uses single quotes.
+  }
+  try {
+    const json = JSON.parse(
+      trimmed
+        .replace(/\bNone\b/g, "null")
+        .replace(/\bTrue\b/g, "true")
+        .replace(/\bFalse\b/g, "false")
+        .replace(/'/g, '"'),
+    ) as unknown;
+    if (json && typeof json === "object" && !Array.isArray(json)) {
+      return json as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function readableToolName(raw: unknown, depth = 0): string {
+  const extracted = extractToolName(raw, depth);
+  return extracted ?? "Unknown tool";
+}
+
+function extractToolName(value: unknown, depth: number): string | null {
+  if (value == null || depth > 4) return null;
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    for (const key of NESTED_TOOL_KEYS) {
+      const nested = extractToolName(record[key], depth + 1);
+      if (nested) return nested;
+    }
+    return null;
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    trimmed.includes("tool_call_id")
+  ) {
+    const parsed = parseMaybeObject(trimmed);
+    if (parsed) return extractToolName(parsed, depth + 1);
+    const named =
+      /['"](?:tool_name|name|tool)['"]\s*:\s*['"]([^'"]+)['"]/.exec(trimmed);
+    if (named?.[1] && !named[1].startsWith("call_")) return named[1];
+    return null;
+  }
+  if (/^toolcall/i.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function MetricsDashboard({
   data,
   compact = false,
+  embedded = false,
 }: {
   data: Dashboard;
   compact?: boolean;
+  embedded?: boolean;
 }) {
+  const showHero = !compact && !embedded;
   const cards = compact
     ? []
     : [
@@ -29,8 +95,8 @@ export function MetricsDashboard({
       ];
 
   return (
-    <div className="space-y-6">
-      {compact ? null : (
+    <div className={showHero ? "space-y-6" : "space-y-4"}>
+      {showHero ? (
         <header>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
             Atlas operations
@@ -43,7 +109,7 @@ export function MetricsDashboard({
             sessions, tool spans, and approval waits.
           </p>
         </header>
-      )}
+      ) : null}
 
       {compact ? null : (
         <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
@@ -91,18 +157,21 @@ export function MetricsDashboard({
           <div className="border-b border-line px-4 py-3">
             <p className="th-label">Top tools</p>
           </div>
-          {data.top_tools.map((tool, index) => (
-            <div
-              key={tool.name}
-              className="flex items-center justify-between border-b border-line/60 px-4 py-3 last:border-0"
-            >
-              <p className="truncate text-sm">
-                <span className="mr-2 font-mono text-slate-muted">{index + 1}</span>
-                {tool.name}
-              </p>
-              <Badge tone="info">{tool.count}</Badge>
-            </div>
-          ))}
+          {data.top_tools.map((tool, index) => {
+            const label = readableToolName(tool.name);
+            return (
+              <div
+                key={`${index}:${tool.name}`}
+                className="flex items-center justify-between gap-3 border-b border-line/60 px-4 py-3 last:border-0"
+              >
+                <p className="min-w-0 truncate text-sm" title={label}>
+                  <span className="mr-2 font-mono text-slate-muted">{index + 1}</span>
+                  {label}
+                </p>
+                <Badge tone="info">{tool.count}</Badge>
+              </div>
+            );
+          })}
           {data.top_tools.length === 0 ? (
             <p className="px-4 py-10 text-center text-sm text-slate-muted">
               No tool calls recorded.

@@ -36,8 +36,7 @@ import { cn } from "@/lib/utils";
 
 type StatusFilter = "all" | "active" | "suspended";
 
-const TENANT_VISIBLE_ROWS = 15;
-const TENANT_ROW_HEIGHT = "3.5rem";
+const PAGE_SIZE = 15;
 
 export function PlatformTenantsPanel({
   initialTenants,
@@ -57,6 +56,7 @@ export function PlatformTenantsPanel({
 
   const [status, setStatus] = useState<StatusFilter>("all");
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
   const [sourceTenantId, setSourceTenantId] = useState("");
   const [destTenantId, setDestTenantId] = useState("");
   const [catalog, setCatalog] = useState<PlatformCatalogItem[]>([]);
@@ -88,6 +88,12 @@ export function PlatformTenantsPanel({
       return haystack.includes(query);
     });
   }, [q, status, tenants]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredTenants.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * PAGE_SIZE;
+  const pageItems = filteredTenants.slice(start, start + PAGE_SIZE);
+  const end = Math.min(filteredTenants.length, start + PAGE_SIZE);
 
   useEffect(() => {
     if (!sourceTenantId) {
@@ -248,7 +254,10 @@ export function PlatformTenantsPanel({
                 value={q}
                 placeholder="Search tenants…"
                 className="min-w-[220px] flex-1"
-                onChange={(event) => setQ(event.target.value)}
+                onChange={(event) => {
+                  setQ(event.target.value);
+                  setPage(1);
+                }}
               />
               <div className="flex flex-wrap items-center gap-2">
                 {(
@@ -261,7 +270,10 @@ export function PlatformTenantsPanel({
                   <button
                     key={value}
                     type="button"
-                    onClick={() => setStatus(value)}
+                    onClick={() => {
+                      setStatus(value);
+                      setPage(1);
+                    }}
                     className={cn(
                       "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
                       status === value
@@ -274,13 +286,38 @@ export function PlatformTenantsPanel({
                 ))}
               </div>
             </div>
-            <p className="text-xs text-slate-muted">
-              {tenants.length === 0
-                ? "No tenants yet"
-                : filteredTenants.length === 0
-                  ? "No tenants match"
-                  : `Showing ${filteredTenants.length} of ${tenants.length} tenants`}
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-muted">
+              <p>
+                {tenants.length === 0
+                  ? "No tenants yet"
+                  : filteredTenants.length === 0
+                    ? "No tenants match"
+                    : `Showing ${start + 1}–${end} of ${filteredTenants.length} tenants`}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                >
+                  Previous
+                </Button>
+                <span className="mono-cell">
+                  {safePage} / {totalPages}
+                </span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={safePage >= totalPages}
+                  onClick={() =>
+                    setPage((current) => Math.min(totalPages, current + 1))
+                  }
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
           </div>
           <div className="min-w-[1100px]">
             <div className="grid grid-cols-[1.1fr_0.7fr_0.9fr_1fr_0.55fr_0.55fr_auto] gap-3 border-b border-line px-3 py-2">
@@ -301,21 +338,8 @@ export function PlatformTenantsPanel({
                 No tenants match this search or filter.
               </p>
             ) : (
-              <div
-                className={
-                  filteredTenants.length > TENANT_VISIBLE_ROWS
-                    ? "overlay-y-auto"
-                    : undefined
-                }
-                style={
-                  filteredTenants.length > TENANT_VISIBLE_ROWS
-                    ? {
-                        maxHeight: `calc(${TENANT_ROW_HEIGHT} * ${TENANT_VISIBLE_ROWS})`,
-                      }
-                    : undefined
-                }
-              >
-                {filteredTenants.map((tenant) => (
+              <div>
+                {pageItems.map((tenant) => (
                   <div
                     key={tenant.id}
                     className="grid min-h-14 grid-cols-[1.1fr_0.7fr_0.9fr_1fr_0.55fr_0.55fr_auto] items-center gap-3 border-b border-line/60 px-3 py-2 last:border-0"

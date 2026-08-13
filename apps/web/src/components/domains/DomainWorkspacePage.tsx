@@ -49,7 +49,7 @@ export function DomainWorkspacePage({
   }
 
   return (
-    <div className="h-full overflow-y-auto px-5 py-8">
+    <div className="h-full overflow-y-auto px-5 py-6">
       <DomainWorkspaceDashboard
         data={data}
         refreshing={refreshing}
