@@ -1,91 +1,85 @@
 # Stock Broker — Skill Reference
 
-Atlas skill pack for Stock Broker ops + customer assistance.
+Atlas skill pack for the Stock Broker **end-user desk**: three chats only.
 
-- **Toolkit (Stock Broker APIs):** `tools/stock_broker_toolkit.py` (`StockBrokerToolkit`) — platform mocks until Stock Broker API is live
-- **Toolkit (Groww demat/live):** `tools/groww_toolkit.py` — Groww Trading API (`api.groww.in`); see `tools/GROWW.md`
-- **Toolkit (Zerodha Kite):** `tools/kite_toolkit.py` — Kite Connect v3 (`api.kite.trade`); see `tools/KITE.md` (optional / multi-broker)
-- **Teams:** `teams/learning.md` (end-user Learn via KB), `teams/customer_support.md`, `teams/ops_desk.md`
-- **Agents:** see table below
-- **Workflows:** learn (KB) → publish → paper → live approval → kill switch
-- **PRD:** Stock Broker v2.1 (modules A–E, UC-1 / UC-2 / UC-3)
-- **Learn policy:** Do **not** rebuild Classplus; end-user education uses **Atlas Knowledge Base**.
+- **Workspace chats:** Learning · Paper trading · Live trading
+- **Toolkit (platform):** `tools/stock_broker_toolkit.py` — signals, paper hub, algo status. Bind on Paper and/or Live as needed.
+- **Broker adapters:** vendor APIs stay vendor-specific. Assign whichever toolkit the tenant uses on **Live trading** (holdings/orders) and optionally **Learning** (read-only quotes):
+  - Groww — `tools/groww_toolkit.py` + `tools/GROWW.md`
+  - Zerodha Kite — `tools/kite_toolkit.py` + `tools/KITE.md`
+  - Any later broker — publish the toolkit, assign it on those teams
+- **Learn policy:** Knowledge Base for lessons. Generic ticker questions (“predict TCS…”) stay in **Learning**: read-only quotes if a broker toolkit is assigned; **never** predict or guarantee prices. Do **not** rebuild Classplus.
+- **Desk widgets:** Widget → Team → member Agent → **assigned** tool. Agents never call a broker that is not bound.
 
 ---
 
 ## Personas → Atlas agents
 
-| Persona (PRD) | Agent file | Primary tools | Mutating? |
+| Window | Agent file | Tools | Mutating? |
 |---|---|---|---|
-| Signal Publisher | `agents/signal_publisher.md` | list drafts, publish, suppress, push preview | yes (publish/suppress) |
-| Param Editor | `agents/param_editor.md` | get/update schema, draft params, diff | yes (draft save) |
-| Feed Monitor | `agents/feed_monitor.md` | feed health, stale signals | no |
-| Compliance / Live Approver | `agents/compliance_officer.md` | live queue, approve/deny, kill switch | yes |
-| Learning Guide | `agents/learning_guide.md` | Atlas Knowledge Base (retrieve/answer) | no |
-| Customer Concierge | `agents/customer_concierge.md` | signals/paper + Groww holdings/positions/margin/orders | paper + Groww place/cancel = yes (HITL) |
+| Learning | `agents/learning_guide.md` | KB + assigned read-only quotes (`get_ltp` / `get_quote` / `get_ohlc`) | no |
+| Paper trading | `agents/paper_trader.md` | signals + paper hub / `place_paper_order` | paper only (HITL) |
+| Live trading | `agents/live_trader.md` | assigned broker + algo status | live place/cancel (HITL) |
 
-Operators **cannot** approve live or trip kill switch (PRD RBAC). Those stay on Compliance / Admin agents only.
+No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on this desk. Live eligibility and global kill stay in-product / HITL policy — the Live trader **explains**, it does not approve or trip kill.
 
 ---
 
 ## Teams
 
-| Team | Members | Mission |
-|---|---|---|
-| Learning (end user) | Learning Guide | Teach from **KB** — no Classplus rebuild |
-| Customer Support | Concierge | Signals → paper → Groww / live status |
-| Ops Desk | Publisher + Param Editor + Feed Monitor + Compliance | UC-3 publish/suppress; UC-2 governance |
+| Team | Slug | Member | Mission |
+|---|---|---|---|
+| Learning | `learning` | Learning Guide | KB + generic market Qs (no predictions) |
+| Paper trading | `paper-trading` | Paper Trader | Signal → paper fill |
+| Live trading | `live-trading` | Live Trader | Assigned broker + live status |
 
 ---
 
 ## Workflows
 
-| Workflow | UC | File |
-|---|---|---|
-| Learn via Knowledge Base | Module A (Atlas) | `workflows/learn_via_kb.md` |
-| Publish / suppress signal | UC-3 | `workflows/publish_signal.md` |
-| Signal → paper order | UC-1 | `workflows/paper_from_signal.md` |
-| Live approval + arm | UC-2 | `workflows/live_approval.md` |
-| Kill switch / auto-disarm | UC-2 | `workflows/kill_switch.md` |
+| Workflow | File |
+|---|---|
+| Learn via Knowledge Base | `workflows/learn_via_kb.md` |
+| Signal → paper order | `workflows/paper_from_signal.md` |
+| Live status / arm / reconnect | `workflows/live_approval.md` |
+| Auto-disarm / reconnect | `workflows/kill_switch.md` |
 
 ---
 
 ## Tool capability map
 
-| Capability | Read / mutate | Used by |
-|---|---|---|
-| `list_signals` | read | Concierge, Publisher, Feed |
-| `get_signal` | read | Concierge, Publisher |
-| `list_draft_signals` | read | Publisher |
-| `publish_signal` | mutate | Publisher |
-| `suppress_signal` | mutate | Publisher |
-| `preview_push` | read | Publisher |
-| `get_param_schema` | read | Param Editor |
-| `update_param_draft` | mutate | Param Editor |
-| `diff_param_versions` | read | Param Editor |
-| `get_feed_health` | read | Feed Monitor |
-| `list_live_requests` | read | Compliance |
-| `approve_live_request` | mutate | Compliance |
-| `deny_live_request` | mutate | Compliance |
-| `get_algo_status` | read | Compliance, Concierge |
-| `arm_algo` / `disarm_algo` | mutate | Compliance (or customer via product UI; agent only if policy allows) |
-| `kill_switch` | mutate | Compliance / Admin only |
-| `get_paper_hub` | read | Concierge |
-| `place_paper_order` | mutate | Concierge |
-| `list_positions` | read | Concierge |
-| `list_strategy_packs` | read | Concierge |
-| `get_account_health` | read | Concierge, Compliance |
+### Platform (Paper / Live as assigned)
 
-All mutating calls require Atlas HITL approval when attached as sandbox capabilities.
+| Capability | Read / mutate | Window |
+|---|---|---|
+| `list_signals` / `get_signal` | read | Paper |
+| `get_paper_hub` / `list_positions` | read | Paper |
+| `place_paper_order` | mutate | Paper |
+| `get_algo_status` / `list_strategy_packs` | read | Live |
+| `arm_algo` / `disarm_algo` | mutate | Live (HITL, policy) |
+
+### Broker adapters (Live) — generic aliases
+
+Broker APIs differ. Prefer these when they exist on the **assigned** toolkit; otherwise call the closest bound name:
+
+| Intent | Typical names |
+|---|---|
+| Account / token health | `get_account_health`, `get_profile` |
+| Holdings | `get_holdings` |
+| Positions | `get_positions` |
+| Margin / funds | `get_user_margin`, `get_margins`, `get_user_margins`, `get_funds` |
+| Orders | `list_orders`, `get_orders` |
+| Quotes (Learning read-only; Live any) | `get_ltp`, `get_quote`, `get_ohlc` |
+| Place / cancel (HITL) | `place_order`, `cancel_order`, vendor `modify_order` |
 
 ---
 
-## Hard rules (every agent)
+## Assigned broker policy
 
-1. Never invent fills, approvals, or broker tokens.
-2. Never show or log OAuth / refresh tokens.
-3. Suppressed signals must not be described as active to customers.
-4. Live arm requires: live approved + valid demat token + risk caps + ≥1 pack.
-5. Customer live trading demat is **Groww** — guide Groww OAuth / reconnect; do not push other brokers unless Ops policy says otherwise.
-6. SEBI RA/IA disclosures: remind before live paths; do not bypass Compliance.
-7. Prefer tool results over memory for prices, P&L, and approval status.
+1. Discover tools bound on **this** team or agent.
+2. Never assume Groww, Kite, or any vendor.
+3. If no broker tool is bound on Live trading, say so. Do not invent holdings or P&L.
+4. Token expiry / 401 → auto-disarm; reconnect **that** broker.
+5. Never echo OAuth, access tokens, secrets, or OTPs.
+6. Prefer tool results over memory for prices, fills, and arm status.
+7. No guaranteed-returns language. SEBI-aware.

@@ -3346,14 +3346,44 @@ export interface DomainDashboardWidget {
   label: string;
   value: string;
   hint: string;
+  group?: string;
+}
+
+export interface DomainChatTarget {
+  id: string;
+  slug: string;
+  name: string;
+  published: boolean;
+}
+
+export interface DomainBrokerTool {
+  id: string;
+  slug: string;
+  name: string;
+  kind: string;
+  active: boolean;
+  published: boolean;
+  connection_status: string;
+  via_team?: string;
+  via_team_name?: string;
+  via_agent?: string | null;
 }
 
 export interface DomainDashboard {
   domain: WorkspaceDomain;
   domain_label: string;
   range_days: number;
+  fetched_at: string;
   widgets: DomainDashboardWidget[];
   quick_links: Array<{ label: string; href: string }>;
+  chat_targets: DomainChatTarget[];
+  broker_tools: DomainBrokerTool[];
+  desk_snapshot?: {
+    team: { id: string; slug: string; name: string } | null;
+    tools: DomainBrokerTool[];
+    widgets: DomainDashboardWidget[];
+    error: string | null;
+  } | null;
   metrics: MetricsDashboard;
   catalog: {
     agents: number;
@@ -3365,6 +3395,7 @@ export interface DomainDashboard {
     pending_approvals: number;
     team_slugs: string[];
     workflow_slugs: string[];
+    teams_detail?: DomainChatTarget[];
   };
 }
 
@@ -3379,8 +3410,13 @@ export async function listWorkspaceDomains(
 export async function getDomainDashboard(
   accessToken: string,
   days = 30,
+  deskSnapshot = false,
 ): Promise<DomainDashboard> {
-  return apiFetch<DomainDashboard>(`/admin/domains/dashboard?days=${days}`, {
+  const params = new URLSearchParams({
+    days: String(days),
+    desk_snapshot: deskSnapshot ? "true" : "false",
+  });
+  return apiFetch<DomainDashboard>(`/admin/domains/dashboard?${params}`, {
     accessToken,
   });
 }

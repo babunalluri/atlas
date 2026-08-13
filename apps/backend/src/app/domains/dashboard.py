@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, select
@@ -16,9 +16,12 @@ from app.db.models import (
     Tenant,
     WorkflowConfig,
 )
+from app.domains.desk_snapshot import DeskSnapshotService
 from app.domains.types import DOMAIN_LABELS, WorkspaceDomain, normalize_domain
 from app.metrics.service import MetricsService
 from app.tenancy.context import TenantContext
+
+STOCK_BROKER_CHAT_ORDER = ("learning", "paper-trading", "live-trading")
 
 
 class DomainDashboardService:
@@ -26,23 +29,39 @@ class DomainDashboardService:
         self.session = session
         self.context = context
 
-    async def dashboard(self, *, days: int = 30) -> dict[str, Any]:
+    async def dashboard(self, *, days: int = 30, desk_snapshot: bool = False) -> dict[str, Any]:
         tenant = await self.session.scalar(
             select(Tenant).where(Tenant.id == self.context.tenant_id)
         )
         tenant_domain = normalize_domain(getattr(tenant, "domain", None) if tenant else None)
         metrics = await MetricsService(self.session, self.context).dashboard(days=days)
         catalog = await self._catalog_counts()
+        desk = DeskSnapshotService(self.session, self.context)
+        broker_tools = await desk.assigned_tools() if tenant_domain == "stock_broker" else []
+        snapshot = (
+            await desk.snapshot()
+            if tenant_domain == "stock_broker" and desk_snapshot
+            else None
+        )
 
-        widgets = self._widgets_for_domain(tenant_domain, metrics, catalog)
+        widgets = self._widgets_for_domain(tenant_domain, metrics, catalog, broker_tools)
+        if snapshot and snapshot.get("widgets"):
+            widgets = [
+                widget for widget in widgets if widget.get("group") != "brokers"
+            ] + list(snapshot["widgets"])
         quick_links = self._quick_links(tenant_domain, catalog)
+        chat_targets = self._chat_targets(tenant_domain, catalog)
 
         return {
             "domain": tenant_domain,
             "domain_label": DOMAIN_LABELS[tenant_domain],
             "range_days": days,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
             "widgets": widgets,
             "quick_links": quick_links,
+            "chat_targets": chat_targets,
+            "broker_tools": broker_tools,
+            "desk_snapshot": snapshot,
             "metrics": metrics,
             "catalog": catalog,
         }
@@ -98,6 +117,15 @@ class DomainDashboardService:
             "pending_approvals": pending_approvals,
             "team_slugs": [row.slug for row in teams],
             "workflow_slugs": [row.slug for row in workflows],
+            "teams_detail": [
+                {
+                    "id": str(row.id),
+                    "slug": row.slug,
+                    "name": row.name,
+                    "published": bool(row.published_version_id),
+                }
+                for row in teams
+            ],
         }
 
     def _widgets_for_domain(
@@ -105,53 +133,105 @@ class DomainDashboardService:
         domain: WorkspaceDomain,
         metrics: dict[str, Any],
         catalog: dict[str, Any],
+        broker_tools: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         kpis = metrics.get("kpis", {})
         if domain == "stock_broker":
-            return [
+            team_slugs = set(catalog.get("team_slugs", []))
+            brokers = list(broker_tools or [])
+            connected = [row["name"] for row in brokers if row.get("active")]
+            widgets = [
                 {
-                    "id": "ops_runs",
-                    "label": "Ops desk runs",
+                    "id": "desk_runs",
+                    "label": "Desk runs",
                     "value": str(kpis.get("runs", 0)),
-                    "hint": "Agent and team runs in range",
-                },
-                {
-                    "id": "approval_queue",
-                    "label": "Pending approvals",
-                    "value": str(catalog.get("pending_approvals", 0)),
-                    "hint": "Live and mutating actions awaiting review",
+                    "hint": "Learning, paper, and live chats in range",
+                    "group": "ops",
                 },
                 {
                     "id": "success_rate",
                     "label": "Run success rate",
                     "value": f"{(kpis.get('success_rate', 0) * 100):.1f}%",
                     "hint": "Successful runs / total runs",
-                },
-                {
-                    "id": "published_signals",
-                    "label": "Published workflows",
-                    "value": str(catalog.get("published_workflows", 0)),
-                    "hint": "Publish signal and live approval flows",
-                },
-                {
-                    "id": "customer_teams",
-                    "label": "Customer teams",
-                    "value": str(
-                        sum(
-                            1
-                            for slug in catalog.get("team_slugs", [])
-                            if slug in {"customer-support", "learning"}
-                        )
-                    ),
-                    "hint": "Concierge and learning surfaces",
+                    "group": "ops",
                 },
                 {
                     "id": "latency_p95",
                     "label": "P95 latency",
                     "value": self._format_ms(kpis.get("latency_p95_ms")),
                     "hint": "End-to-end run latency",
+                    "group": "ops",
+                },
+                {
+                    "id": "approval_queue",
+                    "label": "Pending approvals",
+                    "value": str(catalog.get("pending_approvals", 0)),
+                    "hint": "Mutating paper and live actions awaiting HITL",
+                    "group": "risk",
+                },
+                {
+                    "id": "live_approval",
+                    "label": "Live trading",
+                    "value": "Ready" if "live-trading" in team_slugs else "Setup",
+                    "hint": "Assigned broker + live status window",
+                    "group": "risk",
+                },
+                {
+                    "id": "paper_flow",
+                    "label": "Paper trading",
+                    "value": "Ready" if "paper-trading" in team_slugs else "Setup",
+                    "hint": "Signal → virtual fill window",
+                    "group": "signals",
+                },
+                {
+                    "id": "learning",
+                    "label": "Learning",
+                    "value": "Ready" if "learning" in team_slugs else "Setup",
+                    "hint": "Knowledge-base teaching window",
+                    "group": "signals",
+                },
+                {
+                    "id": "customer_sessions",
+                    "label": "Chat sessions",
+                    "value": str(kpis.get("unique_sessions", 0)),
+                    "hint": "Unique desk sessions in range",
+                    "group": "signals",
+                },
+                {
+                    "id": "customer_teams",
+                    "label": "Workspace chats",
+                    "value": str(
+                        sum(
+                            1
+                            for slug in team_slugs
+                            if slug in {"learning", "paper-trading", "live-trading"}
+                        )
+                    ),
+                    "hint": "Learning, Paper trading, Live trading",
+                    "group": "signals",
+                },
+                {
+                    "id": "broker_tools",
+                    "label": "Broker tools",
+                    "value": ", ".join(connected) if connected else "None",
+                    "hint": "Assigned on Live trading — refresh loads via that team",
+                    "group": "brokers",
                 },
             ]
+            for row in brokers:
+                status = "Published" if row.get("published") else "Draft"
+                if not row.get("active"):
+                    status = "Inactive"
+                widgets.append(
+                    {
+                        "id": f"broker_{row['slug']}",
+                        "label": row["name"],
+                        "value": status,
+                        "hint": row.get("connection_status") or row["slug"],
+                        "group": "brokers",
+                    }
+                )
+            return widgets
         if domain == "dental_clinic":
             return [
                 {
@@ -159,6 +239,7 @@ class DomainDashboardService:
                     "label": "Patient sessions",
                     "value": str(kpis.get("unique_sessions", 0)),
                     "hint": "Unique chat sessions in range",
+                    "group": "clinic",
                 },
                 {
                     "id": "appointments_flows",
@@ -171,12 +252,14 @@ class DomainDashboardService:
                         )
                     ),
                     "hint": "Published appointment and recall flows",
+                    "group": "clinic",
                 },
                 {
                     "id": "pending_approvals",
                     "label": "Staff approvals",
                     "value": str(catalog.get("pending_approvals", 0)),
                     "hint": "Sensitive actions waiting on staff",
+                    "group": "clinic",
                 },
                 {
                     "id": "front_desk_team",
@@ -185,6 +268,7 @@ class DomainDashboardService:
                     if "front-desk-team" in catalog.get("team_slugs", [])
                     else "Setup",
                     "hint": "Scheduling and intake team",
+                    "group": "clinic",
                 },
                 {
                     "id": "patient_support",
@@ -193,12 +277,14 @@ class DomainDashboardService:
                     if "patient-support" in catalog.get("team_slugs", [])
                     else "Setup",
                     "hint": "Patient-facing concierge",
+                    "group": "clinic",
                 },
                 {
                     "id": "error_rate",
                     "label": "Error rate",
                     "value": f"{(kpis.get('error_rate', 0) * 100):.1f}%",
                     "hint": "Failed runs in range",
+                    "group": "clinic",
                 },
             ]
         return [
@@ -207,28 +293,36 @@ class DomainDashboardService:
                 "label": "Runs",
                 "value": str(kpis.get("runs", 0)),
                 "hint": "Total runs in range",
+                "group": "ops",
             },
             {
                 "id": "success_rate",
                 "label": "Success rate",
                 "value": f"{(kpis.get('success_rate', 0) * 100):.1f}%",
                 "hint": "Successful runs / total runs",
+                "group": "ops",
             },
         ]
+
+    def _chat_targets(
+        self, domain: WorkspaceDomain, catalog: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        detail = list(catalog.get("teams_detail") or [])
+        if domain != "stock_broker":
+            return detail
+        by_slug = {row["slug"]: row for row in detail}
+        return [by_slug[slug] for slug in STOCK_BROKER_CHAT_ORDER if slug in by_slug]
 
     def _quick_links(
         self, domain: WorkspaceDomain, catalog: dict[str, Any]
     ) -> list[dict[str, str]]:
         if domain == "stock_broker":
-            links = [
-                {"label": "Ops Desk team", "href": "/admin/teams"},
+            return [
+                {"label": "Learning / Paper / Live", "href": "/admin/teams"},
+                {"label": "Broker tools", "href": "/admin/tools"},
                 {"label": "Workflows", "href": "/admin/workflows"},
                 {"label": "Approvals", "href": "/admin/approvals"},
-                {"label": "Metrics", "href": "/admin/metrics"},
             ]
-            if "publish-signal" in catalog.get("workflow_slugs", []):
-                links.insert(1, {"label": "Publish signal flow", "href": "/admin/workflows"})
-            return links
         if domain == "dental_clinic":
             return [
                 {"label": "Front desk team", "href": "/admin/teams"},

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -76,8 +74,18 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
                 select(WorkflowConfig).where(WorkflowConfig.tenant_id == tenant.id)
             )
         ).all()
-        assert len(agents) == 6
+        assert len(agents) == 3
+        assert {row.slug for row in agents} == {
+            "learning-guide",
+            "paper-trader",
+            "live-trader",
+        }
         assert len(teams) == 3
+        assert {row.slug for row in teams} == {
+            "learning",
+            "paper-trading",
+            "live-trading",
+        }
         assert len(workflows) == 2
 
 
@@ -120,5 +128,48 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
         body = dashboard.json()
         assert body["domain"] == "stock_broker"
         assert body["domain_label"] == "Stock Broker"
-        assert len(body["widgets"]) >= 4
+        assert body["fetched_at"]
+        assert len(body["widgets"]) >= 6
+        assert {row["id"] for row in body["widgets"]} >= {
+            "desk_runs",
+            "approval_queue",
+            "live_approval",
+            "paper_flow",
+            "learning",
+        }
         assert body["catalog"]["teams"] == 3
+        assert [row["slug"] for row in body["chat_targets"]] == [
+            "learning",
+            "paper-trading",
+            "live-trading",
+        ]
+        assert body["broker_tools"] == []
+        assert any(row["id"] == "broker_tools" for row in body["widgets"])
+        assert body["desk_snapshot"] is None
+
+        snapshot = await client.get(
+            "/admin/domains/dashboard",
+            params={"desk_snapshot": "true"},
+            headers={
+                "X-Dev-User-ID": "broker-admin",
+                "X-Dev-Org-ID": "org_stock_broker_dash",
+                "X-Dev-Org-Role": "org:admin",
+                "X-Dev-Tenant-Id": tenant_id,
+                "X-Dev-Role": "tenant_admin",
+            },
+        )
+        assert snapshot.status_code == 200, snapshot.text
+        snap_body = snapshot.json()
+        assert snap_body["desk_snapshot"]["tools"] == []
+        assert any(
+            row["id"] == "desk_broker" and row["value"] == "None"
+            for row in snap_body["desk_snapshot"]["widgets"]
+        )
+
+
+def test_desk_snapshot_targets_live_and_paper_teams() -> None:
+    from app.domains.desk_snapshot import DESK_TEAM_SLUGS, READ_CAPABILITIES
+
+    assert DESK_TEAM_SLUGS == ("live-trading", "paper-trading")
+    assert "get_user_margins" in READ_CAPABILITIES
+    assert "get_user_margin" in READ_CAPABILITIES

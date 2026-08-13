@@ -52,116 +52,108 @@ class DomainTemplate:
 STOCK_BROKER = DomainTemplate(
     agents=[
         AgentTemplate(
-            slug="signal-publisher",
-            name="Signal Publisher",
-            description="Publish and suppress trading signal packs for ops.",
-            instructions=(
-                "You are the Stock Broker Signal Publisher. You help operators review "
-                "draft signals, publish approved packs, and suppress stale or bad signals. "
-                "Confirm every mutating action with the operator before running tools."
-            ),
-        ),
-        AgentTemplate(
-            slug="param-editor",
-            name="Param Editor",
-            description="Maintain strategy parameter schemas and drafts.",
-            instructions=(
-                "You are the Stock Broker Param Editor. You validate parameter schemas, "
-                "prepare drafts, and explain diffs to operators. Never publish live params "
-                "without explicit confirmation."
-            ),
-        ),
-        AgentTemplate(
-            slug="feed-monitor",
-            name="Feed Monitor",
-            description="Watch signal feed health, lag, and stale counts.",
-            instructions=(
-                "You are the Stock Broker Feed Monitor. Report lag, stale signal counts, "
-                "and feed errors with concrete metrics. Escalate publish issues to Signal Publisher."
-            ),
-        ),
-        AgentTemplate(
-            slug="compliance-officer",
-            name="Compliance Officer",
-            description="Live approval queue, risk caps, and kill switch governance.",
-            instructions=(
-                "You are the Stock Broker Compliance Officer. You own live approval, deny/approve "
-                "decisions, and kill-switch actions. Operators cannot self-approve live trading."
-            ),
-        ),
-        AgentTemplate(
             slug="learning-guide",
             name="Learning Guide",
-            description="Customer education from the knowledge base.",
+            description="Concepts, generic market questions, no trading.",
             instructions=(
-                "You are the Stock Broker Learning Guide. Teach customers using curated knowledge "
-                "base content. Do not give personalized investment advice."
+                "You are the Stock Broker Learning Guide. This window is Learning: Knowledge Base "
+                "lessons and generic market questions (e.g. predict TCS for the next few hours). "
+                "You cannot predict or guarantee prices — that is not investment advice. "
+                "For ticker questions, use assigned read-only quote tools if bound: get_ltp, "
+                "get_quote, get_ohlc (or the closest alias on Groww, Kite, or any other adapter). "
+                "Never invent ticks. If no quote tool is bound, say so and point at the desk chart. "
+                "Never call place_order, cancel_order, or place_paper_order. "
+                "Hand paper practice to Paper trading; holdings and live orders to Live trading. "
+                "If KB has no hit for a how-to question, say you do not have that article yet."
             ),
         ),
         AgentTemplate(
-            slug="customer-concierge",
-            name="Customer Concierge",
-            description="Customer-facing signals, paper trading, and account questions.",
+            slug="paper-trader",
+            name="Paper Trader",
+            description="Signal to paper fills with virtual capital.",
             instructions=(
-                "You are the Stock Broker Customer Concierge. Help customers understand signals, "
-                "paper trading status, and account questions. Route live trading requests to compliance."
+                "You are the Stock Broker Paper Trader. This window is paper only. "
+                "Use assigned platform tools: list_signals, get_signal, get_paper_hub, "
+                "place_paper_order (HITL, reuse idempotency_key), list_positions. "
+                "Optional read-only quotes if bound (get_ltp / get_quote / get_ohlc). "
+                "Never call live place_order, cancel_order, or modify_order. "
+                "Never invent fills or P&L. Paper is allowed when the cash market is closed. "
+                "Hand concepts to Learning; demat and live orders to Live trading."
+            ),
+        ),
+        AgentTemplate(
+            slug="live-trader",
+            name="Live Trader",
+            description="Assigned broker account, holdings, and live orders.",
+            instructions=(
+                "You are the Stock Broker Live Trader. This window is live/demat only. "
+                "Discover tools bound on this agent or the Live trading team. Never assume "
+                "Groww, Kite, or any vendor — call whatever names exist on the assigned toolkit. "
+                "Typical aliases: get_account_health/get_profile, get_holdings, get_positions, "
+                "get_user_margin/get_margins/get_user_margins/get_funds, list_orders/get_orders, "
+                "get_ltp/get_quote, place_order/cancel_order (HITL, stable order_reference_id). "
+                "If no broker tool is bound, say so. Do not invent holdings, fills, or tokens. "
+                "Never echo OAuth or OTPs. You cannot approve live eligibility or trip a global "
+                "kill switch. Hand paper practice to Paper trading; concepts to Learning."
             ),
         ),
     ],
     teams=[
         TeamTemplate(
-            slug="ops-desk",
-            name="Ops Desk",
-            description="Internal operators: publish, params, feed, compliance routing.",
-            instructions=(
-                "Lead the Stock Broker Ops Desk. Route publish work to Signal Publisher, schema "
-                "work to Param Editor, feed health to Feed Monitor, and live governance to Compliance."
-            ),
-            mode="route",
-            member_slugs=[
-                "signal-publisher",
-                "param-editor",
-                "feed-monitor",
-                "compliance-officer",
-            ],
-        ),
-        TeamTemplate(
-            slug="customer-support",
-            name="Customer Support",
-            description="Customer-facing concierge for signals and paper trading.",
-            instructions=(
-                "Lead customer support for Stock Broker. Use Customer Concierge for end-user questions."
-            ),
-            mode="route",
-            member_slugs=["customer-concierge"],
-        ),
-        TeamTemplate(
             slug="learning",
             name="Learning",
-            description="Education team powered by the knowledge base.",
-            instructions="Help customers learn platform concepts via the Learning Guide.",
+            description="Concepts and generic market questions. No trading.",
+            instructions=(
+                "This is the Learning workspace. Route to Learning Guide for KB lessons and "
+                "generic ticker questions. Quotes are read-only from whatever broker toolkit is "
+                "assigned — never predict prices. No paper or live orders. "
+                "Hand paper practice to Paper trading; holdings and live orders to Live trading."
+            ),
             mode="route",
             member_slugs=["learning-guide"],
+        ),
+        TeamTemplate(
+            slug="paper-trading",
+            name="Paper trading",
+            description="Practice signals with virtual capital.",
+            instructions=(
+                "This is the Paper trading workspace. Route to Paper Trader for signal → paper fill. "
+                "Never place live broker orders from this team. Hand concepts to Learning; "
+                "demat and live orders to Live trading."
+            ),
+            mode="route",
+            member_slugs=["paper-trader"],
+        ),
+        TeamTemplate(
+            slug="live-trading",
+            name="Live trading",
+            description="Assigned broker: holdings, margin, live orders.",
+            instructions=(
+                "This is the Live trading workspace. Route to Live Trader. Use whatever broker "
+                "toolkit is assigned (Groww, Kite, or any other) — do not hard-code a vendor. "
+                "If none is bound, say so. Hand paper practice to Paper trading; concepts to Learning."
+            ),
+            mode="route",
+            member_slugs=["live-trader"],
         ),
     ],
     workflows=[
         WorkflowTemplate(
-            slug="publish-signal",
-            name="Publish signal",
-            description="Ops workflow: review draft → publish or suppress.",
+            slug="paper-from-signal",
+            name="Paper from signal",
+            description="Entitled signal → paper ticket → fill.",
             mode="sequential",
             steps=[
-                WorkflowStepTemplate("Review draft", "signal-publisher", "agent"),
-                WorkflowStepTemplate("Compliance check", "compliance-officer", "agent"),
+                WorkflowStepTemplate("Paper ticket", "paper-trading", "team"),
             ],
         ),
         WorkflowTemplate(
             slug="live-approval",
-            name="Live approval",
-            description="Compliance review before arming live trading.",
+            name="Live status",
+            description="Assigned broker health, arm status, live orders.",
             mode="sequential",
             steps=[
-                WorkflowStepTemplate("Compliance review", "compliance-officer", "agent"),
+                WorkflowStepTemplate("Live trading", "live-trading", "team"),
             ],
         ),
     ],

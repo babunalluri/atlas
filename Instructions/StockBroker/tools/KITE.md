@@ -4,7 +4,7 @@ Source: `tools/kite_toolkit.py`
 API docs: https://kite.trade/docs/connect/v3/  
 Host to allowlist: `api.kite.trade`
 
-Stock Broker default customer broker remains **Groww**; use this toolkit when Zerodha/Kite is enabled for a user or for Ops multi-broker support.
+This file is the **Kite Connect** adapter only. Teams and agents stay vendor-agnostic: assign this toolkit when the tenant’s live venue is Zerodha. Do not assume Groww (or any other broker) is present.
 
 ## Load into Atlas
 

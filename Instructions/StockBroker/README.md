@@ -2,79 +2,70 @@
 
 Source of truth for product scope: `~/Downloads/stock-broker-prd.html` (Stock Broker PRD v2.1).
 
-This folder is the **Atlas functional layer** for Stock Broker: team prompts, agent prompts, workflows, and Python tool contracts. Paste / load these into Atlas Team Builder, Agent Builder, and Tool Builder (`tenant_python`).
+This folder is the **Atlas end-user desk** for Stock Broker: three workspace chats, agent prompts, workflows, and Python tool contracts.
+
+## End-user workspace (exactly three chats)
+
+| Chat | Team slug | Agent | Does |
+|------|-----------|-------|------|
+| Learning | `learning` | Learning Guide | KB + generic market questions (no price predictions) |
+| Paper trading | `paper-trading` | Paper Trader | Signals → paper fills |
+| Live trading | `live-trading` | Live Trader | Assigned broker + live status/orders |
+
+Ops publisher / param / feed / compliance agents are **out of this desk**. Tools stay vendor-specific (Groww, Kite, …); teams and agents stay generic.
+
+Already-provisioned tenants still have the old Ops Desk / Concierge pack until you add the three teams above (or create a new Stock Broker workspace). The desk chat only lists `learning`, `paper-trading`, and `live-trading`.
 
 ## What this covers vs the full PRD
 
 | PRD area | Satisfied by Instructions? | Notes |
 |----------|----------------------------|--------|
-| Ops desk copilots (publish, params, feed, compliance) | **Yes (prompts + tools)** | UC-3 style operator assistance |
-| Customer concierge (learn / signals / paper Q&A) | **Yes (prompts + tools)** | Guided flows; not the Flutter app |
-| Signal / paper / demat / algo **API contracts** | **Partial** | Toolkit stubs + canonical paths; needs live Stock Broker API |
-| Flutter customer app (28 screens) | **No** | Separate mobile codebase |
-| Ops Console React UI (14 screens) | **No** | Separate web app (or Atlas UI only for agents) |
-| Academy content / Learn | **Atlas Knowledge Base** via Learning team — **do not rebuild Classplus** | Attach curated KB to Learning Guide |
-| OpenBull execution + **Groww** demat OAuth | **No** | Private execution plane; tools call adapters when APIs exist. Customer trading broker = Groww (product decision; HTML PRD listed Groww as gap — overridden here). |
-| SignalComputeWorker / N-param engines | **No** | Lives in Stock Broker backend workers; example packs referenced in SKILL |
-| Razorpay, FCM, Postgres/Redis product DB | **No** | Product infrastructure |
-
-**Bottom line:** Instructions do **not** ship the full Stock Broker product. They ship the Atlas agents/teams/workflows/tools that operate *against* Stock Broker once APIs are available.
+| End-user Learn / Paper / Live copilots | **Yes** | Three chats above |
+| Signal / paper / demat **API contracts** | **Partial** | Platform toolkit stubs + broker adapters |
+| Flutter customer app / Ops Console | **No** | Separate apps |
+| Academy / Classplus | **Atlas KB** on Learning | Do not rebuild LMS |
+| Broker OAuth / execution plane | **No** | Bind the tenant’s broker toolkit on Live trading |
 
 ## Layout
 
 ```text
 Instructions/StockBroker/
-  README.md                 # this file
-  SKILL.md                  # index: personas, packs, tool map
-  teams/                    # team orchestration prompts (.md)
-  agents/                   # per-agent system prompts (.md)
-  workflows/                # step contracts for key UCs (.md)
-  tools/                    # Python toolkit for Atlas Tool Builder (.py)
+  README.md
+  SKILL.md
+  teams/          learning.md  paper_trading.md  live_trading.md
+  agents/         learning_guide.md  paper_trader.md  live_trader.md
+  workflows/
+  tools/          stock_broker_toolkit.py  groww_toolkit.py  kite_toolkit.py
 ```
 
 ## Auto-provision mapping (domain: `stock_broker`)
 
-When a super admin or org admin creates a tenant with domain **Stock Broker**, Atlas auto-provisions:
-
 | Kind | Slug | File |
 |------|------|------|
-| Agent | `signal-publisher` | `agents/signal_publisher.md` |
-| Agent | `param-editor` | `agents/param_editor.md` |
-| Agent | `feed-monitor` | `agents/feed_monitor.md` |
-| Agent | `compliance-officer` | `agents/compliance_officer.md` |
 | Agent | `learning-guide` | `agents/learning_guide.md` |
-| Agent | `customer-concierge` | `agents/customer_concierge.md` |
-| Team | `ops-desk` | `teams/ops_desk.md` |
-| Team | `customer-support` | `teams/customer_support.md` |
+| Agent | `paper-trader` | `agents/paper_trader.md` |
+| Agent | `live-trader` | `agents/live_trader.md` |
 | Team | `learning` | `teams/learning.md` |
-| Workflow | `publish-signal` | `workflows/publish_signal.md` |
+| Team | `paper-trading` | `teams/paper_trading.md` |
+| Team | `live-trading` | `teams/live_trading.md` |
+| Workflow | `paper-from-signal` | `workflows/paper_from_signal.md` |
 | Workflow | `live-approval` | `workflows/live_approval.md` |
-
-Additional workflow runbooks in `workflows/` (paper, kill switch, learn via KB) can be loaded manually.
 
 ## How to load into Atlas
 
-1. Create agents from `agents/*.md` (instructions field).
-2. Create teams from `teams/*.md`; attach member agents.
+1. Create the three agents from `agents/*.md`.
+2. Create the three teams; attach the matching member agent.
 3. Create Editable Python tools:
-   - `tools/stock_broker_toolkit.py` — Stock Broker platform APIs (mock until live).
-   - `tools/groww_toolkit.py` — Groww broker (`api.groww.in`); see `tools/GROWW.md`. Allowlist host + bind access token / api_key+secret.
-   - `tools/kite_toolkit.py` — Zerodha Kite Connect (`api.kite.trade`); see `tools/KITE.md`. Needs form-urlencoded sandbox proxy + api_key/access_token.
-4. Validate → Publish. Attach Groww tool to Concierge / Compliance; Stock Broker toolkit to Ops agents.
-5. Use `workflows/*.md` as runbooks for operators or as workflow node descriptions.
+   - `tools/stock_broker_toolkit.py` — platform APIs (signals/paper/algo). Bind on Paper trading (and Live if you want algo status).
+   - One **broker adapter** on **Live trading** (orders/holdings) and optionally on **Learning** (read-only quotes for “what’s TCS doing?”): Groww, Kite, or any later toolkit. See `tools/GROWW.md` / `tools/KITE.md`.
+4. Validate → Publish. Desk widgets load **Widget → Team → Agent → assigned tool** on manual refresh.
 
 ## Canonical API namespaces (from PRD)
 
 | Domain | Path |
 |--------|------|
 | Signals (customer) | `/v1/signals/*` |
-| Signals / params (ops) | `/v1/ops/signals/*`, `/v1/ops/params/*` |
 | Paper | `/v1/paper/*` |
 | Live | `/v1/live/*` |
 | Demat / brokers | `/v1/demat/*`, `/v1/brokers/*` |
 | Algo | `/v1/algo/arm\|disarm\|status\|packs\|deploy` |
-| Ops | `/v1/ops/*` |
-
-## Example strategy packs (PRD §0f)
-
-`EX-SMA-X` · `EX-RSI-MR` · `EX-MACD-M` · `EX-VWAP-B` · Breakout · Crypto funding

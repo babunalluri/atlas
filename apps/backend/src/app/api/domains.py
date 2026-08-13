@@ -27,5 +27,8 @@ async def get_domain_dashboard(
     context: AdminContext,
     session: TenantSession,
     days: Annotated[int, Query(ge=1, le=90)] = 30,
+    desk_snapshot: bool = Query(False),
 ) -> dict[str, Any]:
-    return await DomainDashboardService(session, context).dashboard(days=days)
+    return await DomainDashboardService(session, context).dashboard(
+        days=days, desk_snapshot=desk_snapshot
+    )

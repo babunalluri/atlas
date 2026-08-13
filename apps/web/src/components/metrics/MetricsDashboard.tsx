@@ -10,39 +10,51 @@ function duration(value: number | null) {
   return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(2)} s`;
 }
 
-export function MetricsDashboard({ data }: { data: Dashboard }) {
-  const cards = [
-    ["Runs", data.kpis.runs.toLocaleString()],
-    ["Success", percent(data.kpis.success_rate)],
-    ["Error rate", percent(data.kpis.error_rate)],
-    ["P95 latency", duration(data.kpis.latency_p95_ms)],
-    ["Sessions", data.kpis.unique_sessions.toLocaleString()],
-    ["Approval waits", data.kpis.approval_waits.toLocaleString()],
-  ];
+export function MetricsDashboard({
+  data,
+  compact = false,
+}: {
+  data: Dashboard;
+  compact?: boolean;
+}) {
+  const cards = compact
+    ? []
+    : [
+        ["Runs", data.kpis.runs.toLocaleString()],
+        ["Success", percent(data.kpis.success_rate)],
+        ["Error rate", percent(data.kpis.error_rate)],
+        ["P95 latency", duration(data.kpis.latency_p95_ms)],
+        ["Sessions", data.kpis.unique_sessions.toLocaleString()],
+        ["Approval waits", data.kpis.approval_waits.toLocaleString()],
+      ];
 
   return (
     <div className="space-y-6">
-      <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-          Atlas operations
-        </p>
-        <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
-          Tenant metrics
-        </h1>
-        <p className="mt-2 max-w-2xl text-sm text-slate-muted">
-          Durable {data.range_days}-day aggregates derived from tenant traces,
-          sessions, tool spans, and approval waits.
-        </p>
-      </header>
+      {compact ? null : (
+        <header>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
+            Atlas operations
+          </p>
+          <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
+            Tenant metrics
+          </h1>
+          <p className="mt-2 max-w-2xl text-sm text-slate-muted">
+            Durable {data.range_days}-day aggregates derived from tenant traces,
+            sessions, tool spans, and approval waits.
+          </p>
+        </header>
+      )}
 
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-        {cards.map(([label, value]) => (
-          <div key={label} className="surface-panel rounded-xl p-4">
-            <p className="th-label">{label}</p>
-            <p className="mt-2 text-xl font-semibold tnum">{value}</p>
-          </div>
-        ))}
-      </section>
+      {compact ? null : (
+        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+          {cards.map(([label, value]) => (
+            <div key={label} className="surface-panel rounded-xl p-4">
+              <p className="th-label">{label}</p>
+              <p className="mt-2 text-xl font-semibold tnum">{value}</p>
+            </div>
+          ))}
+        </section>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[1.5fr_.7fr]">
         <section className="table-shell rounded-xl">

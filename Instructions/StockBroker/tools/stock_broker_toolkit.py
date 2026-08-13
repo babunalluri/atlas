@@ -3,7 +3,9 @@
 Contracts follow PRD canonical APIs. Wire `base_url` to the Stock Broker API host
 (must be allowlisted). Bind a service credential (Bearer) via tool settings.
 
-Customer live demat broker: Groww.
+This toolkit is the Stock Broker **platform** API (signals, paper, algo, live queue).
+Live demat/orders go through whatever **broker adapter** is assigned on the desk
+(Groww, Kite, or any later toolkit) — not through this class.
 Mutating methods should be marked mutating in Atlas (HITL).
 
 Until the Stock Broker API is live, methods return structured stubs when

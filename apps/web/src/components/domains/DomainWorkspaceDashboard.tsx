@@ -1,27 +1,61 @@
 import { Link } from "@/i18n/navigation";
 
-import { Badge } from "@/components/ui/Badge";
 import { MetricsDashboard } from "@/components/metrics/MetricsDashboard";
+import { Button } from "@/components/ui/Button";
 import type { DomainDashboard } from "@/lib/api/admin";
 
-export function DomainWorkspaceDashboard({ data }: { data: DomainDashboard }) {
+export function DomainWorkspaceDashboard({
+  data,
+  refreshing,
+  onRefresh,
+  error,
+}: {
+  data: DomainDashboard;
+  refreshing?: boolean;
+  onRefresh?: () => void;
+  error?: string | null;
+}) {
   const isGeneric = data.domain === "generic";
 
   return (
     <div className="space-y-6">
-      <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-          {data.domain_label} workspace
-        </p>
-        <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
-          {isGeneric ? "Tenant metrics" : `${data.domain_label} dashboard`}
-        </h1>
-        <p className="mt-2 max-w-2xl text-sm text-slate-muted">
-          {isGeneric
-            ? `Operational metrics for the last ${data.range_days} days.`
-            : `Domain-specific KPIs and operational metrics for the last ${data.range_days} days.`}
-        </p>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
+            {data.domain_label} workspace
+          </p>
+          <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
+            {isGeneric ? "Tenant metrics" : `${data.domain_label} dashboard`}
+          </h1>
+          <p className="mt-2 max-w-2xl text-sm text-slate-muted">
+            {isGeneric
+              ? `Operational metrics for the last ${data.range_days} days.`
+              : `Domain-specific KPIs and operational metrics for the last ${data.range_days} days.`}
+          </p>
+        </div>
+        {onRefresh ? (
+          <div className="flex flex-col items-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onRefresh}
+              disabled={refreshing}
+            >
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </Button>
+            {data.fetched_at ? (
+              <p className="text-[11px] text-slate-muted">
+                Last fetched {new Date(data.fetched_at).toLocaleString()}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </header>
+      {error ? (
+        <p className="rounded-lg border border-rose/30 bg-rose/10 px-3 py-2 text-xs text-rose">
+          {error}
+        </p>
+      ) : null}
 
       {!isGeneric ? (
         <>
