@@ -9,7 +9,7 @@ import { EditTenantDialog } from "@/components/platform/EditTenantDialog";
 import { ProvisionTenantDialog } from "@/components/platform/ProvisionTenantDialog";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Label } from "@/components/ui/Field";
+import { Input, Label } from "@/components/ui/Field";
 import {
   ExternalLinkIcon,
   PauseIcon,
@@ -36,6 +36,9 @@ import { cn } from "@/lib/utils";
 
 type StatusFilter = "all" | "active" | "suspended";
 
+const TENANT_VISIBLE_ROWS = 15;
+const TENANT_ROW_HEIGHT = "3.5rem";
+
 export function PlatformTenantsPanel({
   initialTenants,
   initialAudit,
@@ -53,6 +56,7 @@ export function PlatformTenantsPanel({
   const locale = useLocale();
 
   const [status, setStatus] = useState<StatusFilter>("all");
+  const [q, setQ] = useState("");
   const [sourceTenantId, setSourceTenantId] = useState("");
   const [destTenantId, setDestTenantId] = useState("");
   const [catalog, setCatalog] = useState<PlatformCatalogItem[]>([]);
@@ -68,11 +72,22 @@ export function PlatformTenantsPanel({
     [tenants],
   );
   const filteredTenants = useMemo(() => {
-    if (status === "active") return tenants.filter((tenant) => tenant.isActive);
-    if (status === "suspended")
-      return tenants.filter((tenant) => !tenant.isActive);
-    return tenants;
-  }, [status, tenants]);
+    const query = q.trim().toLowerCase();
+    return tenants.filter((tenant) => {
+      if (status === "active" && !tenant.isActive) return false;
+      if (status === "suspended" && tenant.isActive) return false;
+      if (!query) return true;
+      const haystack = [
+        tenant.name,
+        tenant.slug,
+        tenant.authOrgId,
+        tenant.ownerEmail ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [q, status, tenants]);
 
   useEffect(() => {
     if (!sourceTenantId) {
@@ -228,28 +243,36 @@ export function PlatformTenantsPanel({
       <section>
         <div className="table-shell overlay-x-auto rounded-xl">
           <div className="space-y-3 border-b border-line px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2">
-              {(
-                [
-                  ["all", "All"],
-                  ["active", "Active"],
-                  ["suspended", "Suspended"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setStatus(value)}
-                  className={cn(
-                    "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
-                    status === value
-                      ? "border-line-strong bg-mist text-ink"
-                      : "border-transparent bg-raised text-slate-muted hover:bg-mist",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Input
+                value={q}
+                placeholder="Search tenants…"
+                className="min-w-[220px] flex-1"
+                onChange={(event) => setQ(event.target.value)}
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                {(
+                  [
+                    ["all", "All"],
+                    ["active", "Active"],
+                    ["suspended", "Suspended"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setStatus(value)}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
+                      status === value
+                        ? "border-line-strong bg-mist text-ink"
+                        : "border-transparent bg-raised text-slate-muted hover:bg-mist",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
             <p className="text-xs text-slate-muted">
               {tenants.length === 0
@@ -275,86 +298,102 @@ export function PlatformTenantsPanel({
               </p>
             ) : filteredTenants.length === 0 ? (
               <p className="px-3 py-10 text-center text-sm text-slate-muted">
-                No tenants match this filter.
+                No tenants match this search or filter.
               </p>
-            ) : null}
-            {filteredTenants.map((tenant) => (
+            ) : (
               <div
-                key={tenant.id}
-                className="grid grid-cols-[1.1fr_0.7fr_0.9fr_1fr_0.55fr_0.55fr_auto] items-center gap-3 border-b border-line/60 px-3 py-2 last:border-0"
+                className={
+                  filteredTenants.length > TENANT_VISIBLE_ROWS
+                    ? "overlay-y-auto"
+                    : undefined
+                }
+                style={
+                  filteredTenants.length > TENANT_VISIBLE_ROWS
+                    ? {
+                        maxHeight: `calc(${TENANT_ROW_HEIGHT} * ${TENANT_VISIBLE_ROWS})`,
+                      }
+                    : undefined
+                }
               >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{tenant.name}</p>
-                  <p className="mono-cell truncate text-slate-muted">
-                    /{tenant.slug}
-                  </p>
-                </div>
-                <Badge tone="info">
-                  {tenant.domain === "stock_broker"
-                    ? "Stock Broker"
-                    : tenant.domain === "dental_clinic"
-                      ? "Dental Clinic"
-                      : "General"}
-                </Badge>
-                <p className="mono-cell truncate text-slate-muted">
-                  {tenant.authOrgId}
-                </p>
-                <p
-                  className="truncate text-sm text-slate-muted"
-                  title={tenant.ownerEmail ?? undefined}
-                >
-                  {tenant.ownerEmail || "—"}
-                </p>
-                <p className="mono-cell truncate text-slate-muted">
-                  {tenant.timezone || "UTC"}
-                </p>
-                <Badge dot tone={tenant.isActive ? "success" : "danger"}>
-                  {tenant.isActive ? "Active" : "Suspended"}
-                </Badge>
-                <div className="flex w-24 shrink-0 items-center justify-end gap-0.5">
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label={`Edit ${tenant.name}`}
-                    title="Edit"
-                    disabled={busyId === tenant.id}
-                    onClick={() => setEditingTenant(tenant)}
+                {filteredTenants.map((tenant) => (
+                  <div
+                    key={tenant.id}
+                    className="grid min-h-14 grid-cols-[1.1fr_0.7fr_0.9fr_1fr_0.55fr_0.55fr_auto] items-center gap-3 border-b border-line/60 px-3 py-2 last:border-0"
                   >
-                    <PencilIcon />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label={`Open workspace for ${tenant.name}`}
-                    title="Open workspace"
-                    disabled={!tenant.isActive || busyId === tenant.id}
-                    onClick={() => workInTenant(tenant)}
-                  >
-                    <ExternalLinkIcon />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant={tenant.isActive ? "danger" : "ghost"}
-                    aria-label={
-                      tenant.isActive
-                        ? `Suspend ${tenant.name}`
-                        : `Reactivate ${tenant.name}`
-                    }
-                    title={tenant.isActive ? "Suspend" : "Reactivate"}
-                    disabled={busyId === tenant.id}
-                    onClick={() => toggleTenant(tenant)}
-                  >
-                    {busyId === tenant.id ? (
-                      "…"
-                    ) : tenant.isActive ? (
-                      <PauseIcon />
-                    ) : (
-                      <PlayIcon />
-                    )}
-                  </Button>
-                </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{tenant.name}</p>
+                      <p className="mono-cell truncate text-slate-muted">
+                        /{tenant.slug}
+                      </p>
+                    </div>
+                    <Badge tone="info">
+                      {tenant.domain === "stock_broker"
+                        ? "Stock Broker"
+                        : tenant.domain === "dental_clinic"
+                          ? "Dental Clinic"
+                          : "General"}
+                    </Badge>
+                    <p className="mono-cell truncate text-slate-muted">
+                      {tenant.authOrgId}
+                    </p>
+                    <p
+                      className="truncate text-sm text-slate-muted"
+                      title={tenant.ownerEmail ?? undefined}
+                    >
+                      {tenant.ownerEmail || "—"}
+                    </p>
+                    <p className="mono-cell truncate text-slate-muted">
+                      {tenant.timezone || "UTC"}
+                    </p>
+                    <Badge dot tone={tenant.isActive ? "success" : "danger"}>
+                      {tenant.isActive ? "Active" : "Suspended"}
+                    </Badge>
+                    <div className="flex w-24 shrink-0 items-center justify-end gap-0.5">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`Edit ${tenant.name}`}
+                        title="Edit"
+                        disabled={busyId === tenant.id}
+                        onClick={() => setEditingTenant(tenant)}
+                      >
+                        <PencilIcon />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`Open workspace for ${tenant.name}`}
+                        title="Open workspace"
+                        disabled={!tenant.isActive || busyId === tenant.id}
+                        onClick={() => workInTenant(tenant)}
+                      >
+                        <ExternalLinkIcon />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant={tenant.isActive ? "danger" : "ghost"}
+                        aria-label={
+                          tenant.isActive
+                            ? `Suspend ${tenant.name}`
+                            : `Reactivate ${tenant.name}`
+                        }
+                        title={tenant.isActive ? "Suspend" : "Reactivate"}
+                        disabled={busyId === tenant.id}
+                        onClick={() => toggleTenant(tenant)}
+                      >
+                        {busyId === tenant.id ? (
+                          "…"
+                        ) : tenant.isActive ? (
+                          <PauseIcon />
+                        ) : (
+                          <PlayIcon />
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         </div>
       </section>
