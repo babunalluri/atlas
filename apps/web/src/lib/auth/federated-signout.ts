@@ -10,11 +10,11 @@ type FederatedSession = {
 /**
  * Clear the Auth.js cookie and end the Keycloak SSO session (RP-initiated logout).
  *
- * Always land on a public page (default `/sign-in`). Redirecting back to a
+ * Always land on a public page (default `/`). Redirecting back to a
  * protected route (e.g. chat) feels like "auto sign-in" when Keycloak SSO is
  * still active or the user immediately continues.
  */
-export async function signOutFederated(callbackUrl = "/sign-in"): Promise<void> {
+export async function signOutFederated(callbackUrl = "/"): Promise<void> {
   const session = (await getSession()) as FederatedSession | null;
   const idToken = session?.idToken;
   const endSessionUrl = session?.endSessionUrl;

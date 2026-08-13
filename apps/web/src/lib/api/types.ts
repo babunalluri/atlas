@@ -2,6 +2,10 @@
 
 export type TenantRole = "platform_admin" | "tenant_admin" | "end_user";
 
+export function isProtectedAdminRole(role: string): boolean {
+  return role === "tenant_admin" || role === "platform_admin";
+}
+
 export interface PlatformTenant {
   id: string;
   name: string;
@@ -11,6 +15,7 @@ export interface PlatformTenant {
   branding: Record<string, unknown>;
   timezone: string;
   isActive: boolean;
+  ownerEmail: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -25,6 +30,8 @@ export interface WorkspaceDomainOption {
 export interface PlatformAuditEvent {
   id: string;
   actorId: string;
+  actorEmail: string | null;
+  actorName: string | null;
   action: string;
   tenantId: string | null;
   details: Record<string, unknown>;
@@ -537,6 +544,8 @@ export interface TenantUserInput {
   timezone: string;
   workflowIds: string[];
   teamIds: string[];
+  password?: string;
+  passwordConfirm?: string;
 }
 
 export type NotificationAudience = "user" | "all";

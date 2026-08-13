@@ -1,8 +1,9 @@
 "use client";
 
-import { signIn, useSession } from "next-auth/react";
+import { useSession } from "next-auth/react";
 import { useLocale } from "next-intl";
 
+import { useSignInModal } from "@/components/auth/SignInModalProvider";
 import { Link } from "@/i18n/navigation";
 import { signOutFederated } from "@/lib/auth/federated-signout";
 import { Button, buttonClassName } from "@/components/ui/Button";
@@ -19,6 +20,7 @@ export function ChatAccountBar({
 }) {
   const locale = useLocale();
   const { data: session, status } = useSession();
+  const { openSignIn } = useSignInModal();
 
   if (status === "loading") {
     return <span className="size-8 rounded-full bg-raised" />;
@@ -31,7 +33,7 @@ export function ChatAccountBar({
         size="sm"
         variant="secondary"
         onClick={() =>
-          signIn("keycloak", {
+          openSignIn({
             callbackUrl: signInRedirect || `/t/${tenantSlug}/chat`,
           })
         }
@@ -46,7 +48,7 @@ export function ChatAccountBar({
       type="button"
       size="sm"
       variant="secondary"
-      onClick={() => void signOutFederated(`/${locale}/sign-in`)}
+      onClick={() => void signOutFederated(`/${locale}`)}
       title={session.user?.email || "Signed in"}
     >
       Sign out

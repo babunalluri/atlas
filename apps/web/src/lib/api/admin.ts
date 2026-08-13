@@ -1108,6 +1108,12 @@ export async function createTenantUser(
         timezone: input.timezone || "UTC",
         workflow_ids: input.workflowIds,
         team_ids: input.teamIds,
+        ...(input.password
+          ? {
+              password: input.password,
+              password_confirm: input.passwordConfirm || input.password,
+            }
+          : {}),
       },
     }),
   );
@@ -1137,6 +1143,12 @@ export async function updateTenantUser(
           ? { workflow_ids: input.workflowIds }
           : {}),
         ...(input.teamIds !== undefined ? { team_ids: input.teamIds } : {}),
+        ...(input.password
+          ? {
+              password: input.password,
+              password_confirm: input.passwordConfirm || input.password,
+            }
+          : {}),
       },
     }),
   );
@@ -1155,6 +1167,39 @@ export async function syncTenantUserIdentity(
       },
     ),
   );
+}
+
+export async function setTenantUserPassword(
+  accessToken: string,
+  membershipId: string,
+  password: string,
+  passwordConfirm: string,
+): Promise<void> {
+  await apiFetch<void>(`/admin/users/${membershipId}/password`, {
+    accessToken,
+    method: "POST",
+    body: {
+      password,
+      password_confirm: passwordConfirm,
+    },
+  });
+}
+
+export async function changeMyPassword(
+  accessToken: string,
+  currentPassword: string,
+  newPassword: string,
+  newPasswordConfirm: string,
+): Promise<void> {
+  await apiFetch<void>("/admin/users/me/password", {
+    accessToken,
+    method: "POST",
+    body: {
+      current_password: currentPassword,
+      new_password: newPassword,
+      new_password_confirm: newPasswordConfirm,
+    },
+  });
 }
 
 export async function deleteTenantUser(
@@ -3776,6 +3821,7 @@ interface BackendPlatformTenant {
   branding: Record<string, unknown>;
   timezone?: string;
   is_active: boolean;
+  owner_email?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3783,6 +3829,8 @@ interface BackendPlatformTenant {
 interface BackendPlatformAuditEvent {
   id: string;
   actor_id: string;
+  actor_email?: string | null;
+  actor_name?: string | null;
   action: string;
   tenant_id: string | null;
   details: Record<string, unknown>;
@@ -3799,6 +3847,7 @@ function mapPlatformTenant(row: BackendPlatformTenant): PlatformTenant {
     branding: row.branding,
     timezone: row.timezone || "UTC",
     isActive: row.is_active,
+    ownerEmail: row.owner_email ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -3822,6 +3871,10 @@ export async function createPlatformTenant(
     authOrgId: string;
     timezone?: string;
     domain?: WorkspaceDomain;
+    ownerEmail: string;
+    ownerDisplayName?: string;
+    ownerPassword: string;
+    ownerPasswordConfirm: string;
   },
 ): Promise<PlatformTenant> {
   const row = await apiFetch<BackendPlatformTenant>(
@@ -3835,8 +3888,42 @@ export async function createPlatformTenant(
         auth_org_id: input.authOrgId,
         timezone: input.timezone || "UTC",
         domain: input.domain || "generic",
+        owner_email: input.ownerEmail,
+        owner_display_name: input.ownerDisplayName || undefined,
+        owner_password: input.ownerPassword,
+        owner_password_confirm: input.ownerPasswordConfirm,
       },
     },
+  );
+  return mapPlatformTenant(row);
+}
+
+export async function updatePlatformTenant(
+  accessToken: string,
+  tenantId: string,
+  input: {
+    name?: string;
+    timezone?: string;
+    ownerEmail?: string;
+    ownerDisplayName?: string;
+    ownerPassword?: string;
+    ownerPasswordConfirm?: string;
+  },
+): Promise<PlatformTenant> {
+  const body: Record<string, unknown> = {};
+  if (input.name !== undefined) body.name = input.name;
+  if (input.timezone !== undefined) body.timezone = input.timezone;
+  if (input.ownerEmail !== undefined) body.owner_email = input.ownerEmail;
+  if (input.ownerDisplayName !== undefined) {
+    body.owner_display_name = input.ownerDisplayName;
+  }
+  if (input.ownerPassword) {
+    body.owner_password = input.ownerPassword;
+    body.owner_password_confirm = input.ownerPasswordConfirm;
+  }
+  const row = await apiFetch<BackendPlatformTenant>(
+    `/admin/platform/tenants/${tenantId}`,
+    { accessToken, method: "PATCH", body },
   );
   return mapPlatformTenant(row);
 }
@@ -3956,9 +4043,11 @@ export async function listPlatformAudit(
   return rows.map((row) => ({
     id: row.id,
     actorId: row.actor_id,
+    actorEmail: row.actor_email ?? null,
+    actorName: row.actor_name ?? null,
     action: row.action,
     tenantId: row.tenant_id,
-    details: row.details,
+    details: row.details ?? {},
     createdAt: row.created_at,
   }));
 }

@@ -16,8 +16,7 @@ from app.db.repositories import MembershipRepository, WorkflowRepository
 @pytest.mark.asyncio
 async def test_provision_creates_pending_membership():
     client = IdentityAdminClient(get_settings())
-    assert client.configured() is True
-    result = await client.provision_tenant_user(
+    result = await client.provision_pending_invite(
         email="Pending.User@Example.com",
         display_name="Pending User",
         role=Role.end_user,

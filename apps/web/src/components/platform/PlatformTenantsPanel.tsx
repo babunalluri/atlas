@@ -3,17 +3,21 @@
 import { useLocale } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
 
+import { PlatformAuditLog } from "@/components/platform/PlatformAuditLog";
 import { PlatformGrantCreditsPanel } from "@/components/platform/PlatformGrantCreditsPanel";
+import { EditTenantDialog } from "@/components/platform/EditTenantDialog";
+import { ProvisionTenantDialog } from "@/components/platform/ProvisionTenantDialog";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input, Label } from "@/components/ui/Field";
+import { Label } from "@/components/ui/Field";
+import {
+  ExternalLinkIcon,
+  PauseIcon,
+  PencilIcon,
+  PlayIcon,
+} from "@/components/ui/icons";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
-  TimezoneSelect,
-  browserTimezone,
-} from "@/components/ui/TimezoneSelect";
-import {
-  createPlatformTenant,
   enterPlatformTenant,
   importPlatformTenantResources,
   listPlatformAudit,
@@ -22,18 +26,15 @@ import {
   type PlatformCatalogItem,
   type PlatformImportResult,
 } from "@/lib/api/admin";
-import type {
-  PlatformAuditEvent,
-  PlatformTenant,
-  WorkspaceDomain,
-} from "@/lib/api/types";
+import type { PlatformAuditEvent, PlatformTenant } from "@/lib/api/types";
 import {
   PLATFORM_TENANT_COOKIE,
   PLATFORM_TENANT_NAME_COOKIE,
 } from "@/lib/auth/access-context";
 import { useAgentOsToken } from "@/lib/auth/token";
-import { formatRelative } from "@/lib/utils";
-import { slugifyName } from "@/lib/validation/agent-form";
+import { cn } from "@/lib/utils";
+
+type StatusFilter = "all" | "active" | "suspended";
 
 export function PlatformTenantsPanel({
   initialTenants,
@@ -44,17 +45,14 @@ export function PlatformTenantsPanel({
 }) {
   const [tenants, setTenants] = useState(initialTenants);
   const [audit, setAudit] = useState(initialAudit);
-  const [name, setName] = useState("");
-  const [slug, setSlug] = useState("");
-  const [authOrgId, setAuthOrgId] = useState("");
-  const [timezone, setTimezone] = useState(browserTimezone);
-  const [domain, setDomain] = useState<WorkspaceDomain>("generic");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [provisioning, setProvisioning] = useState(false);
+  const [editingTenant, setEditingTenant] = useState<PlatformTenant | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { getAccessToken } = useAgentOsToken();
   const locale = useLocale();
 
+  const [status, setStatus] = useState<StatusFilter>("all");
   const [sourceTenantId, setSourceTenantId] = useState("");
   const [destTenantId, setDestTenantId] = useState("");
   const [catalog, setCatalog] = useState<PlatformCatalogItem[]>([]);
@@ -69,6 +67,12 @@ export function PlatformTenantsPanel({
     () => tenants.filter((tenant) => tenant.isActive),
     [tenants],
   );
+  const filteredTenants = useMemo(() => {
+    if (status === "active") return tenants.filter((tenant) => tenant.isActive);
+    if (status === "suspended")
+      return tenants.filter((tenant) => !tenant.isActive);
+    return tenants;
+  }, [status, tenants]);
 
   useEffect(() => {
     if (!sourceTenantId) {
@@ -108,30 +112,11 @@ export function PlatformTenantsPanel({
     };
   }, [getAccessToken, sourceTenantId]);
 
-  async function createTenant() {
-    if (!name.trim() || !authOrgId.trim()) return;
-    setCreating(true);
-    setError(null);
+  async function refreshAudit() {
     try {
-      const created = await createPlatformTenant(await getAccessToken(), {
-        name: name.trim(),
-        slug: slugifyName(slug || name),
-        authOrgId: authOrgId.trim(),
-        timezone,
-        domain,
-      });
-      setTenants((current) =>
-        [...current, created].sort((a, b) => a.name.localeCompare(b.name)),
-      );
-      setName("");
-      setSlug("");
-      setAuthOrgId("");
-      setTimezone(browserTimezone);
-      setDomain("generic");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Tenant creation failed");
-    } finally {
-      setCreating(false);
+      setAudit(await listPlatformAudit(await getAccessToken()));
+    } catch {
+      /* keep current audit if refresh fails */
     }
   }
 
@@ -221,122 +206,82 @@ export function PlatformTenantsPanel({
   }
 
   return (
-    <div className="space-y-8">
-      <section className="surface-panel relative overflow-hidden rounded-2xl p-6 md:p-8">
-        <div className="pointer-events-none absolute inset-0 grid-noise opacity-60" />
-        <div className="relative grid gap-6 lg:grid-cols-[1.2fr_1fr] lg:items-end">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-              Platform control
-            </p>
-            <h1 className="mt-2 font-display text-4xl font-semibold tracking-tight">
-              Super admin
-            </h1>
-            <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-muted">
-              Provision tenants, control access, and enter a tenant workspace
-              without weakening its database isolation.
-            </p>
-          </div>
-          <div className="rounded-xl border border-line bg-raised/90 p-4">
-            <p className="mb-3 text-sm font-semibold">Provision tenant</p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <Label htmlFor="tenant-name">Name</Label>
-                <Input
-                  id="tenant-name"
-                  value={name}
-                  placeholder="Acme Corp"
-                  onChange={(event) => {
-                    setName(event.target.value);
-                    if (!slug) setSlug(slugifyName(event.target.value));
-                  }}
-                />
-              </div>
-              <div>
-                <Label htmlFor="tenant-slug">Slug</Label>
-                <Input
-                  id="tenant-slug"
-                  value={slug}
-                  placeholder="acme"
-                  onChange={(event) => setSlug(slugifyName(event.target.value))}
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <Label htmlFor="org-id" hint="Must match the signed-in organization id">
-                  Organization ID
-                </Label>
-                <Input
-                  id="org-id"
-                  value={authOrgId}
-                  placeholder="org_..."
-                  onChange={(event) => setAuthOrgId(event.target.value)}
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <Label htmlFor="tenant-domain">Industry domain</Label>
-                <SearchableSelect
-                  id="tenant-domain"
-                  value={domain}
-                  onChange={(value) => setDomain(value as WorkspaceDomain)}
-                  placeholder="Select domain"
-                  options={[
-                    { value: "generic", label: "General" },
-                    { value: "stock_broker", label: "Stock Broker" },
-                    { value: "dental_clinic", label: "Dental Clinic" },
-                  ]}
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <TimezoneSelect
-                  id="tenant-timezone"
-                  value={timezone}
-                  onChange={setTimezone}
-                  hint="Default for traces and new users"
-                />
-              </div>
-            </div>
-            <Button
-              className="mt-3 w-full"
-              variant="accent"
-              disabled={creating || !name.trim() || !authOrgId.trim()}
-              onClick={createTenant}
-            >
-              {creating ? "Provisioning…" : "Provision tenant"}
-            </Button>
-          </div>
+    <>
+      <div className="space-y-5">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            Tenants
+          </h1>
+          <p className="mt-0.5 text-sm text-slate-muted">
+            Provision organizations with an owner email and password. Atlas
+            creates the Keycloak org group and owner account.
+          </p>
         </div>
-      </section>
+        <Button variant="accent" onClick={() => setProvisioning(true)}>
+          Provision tenant
+        </Button>
+      </header>
 
-      {error ? (
-        <p className="rounded-md border border-rose/30 bg-rose/10 px-3 py-2 text-sm text-rose">
-          {error}
-        </p>
-      ) : null}
+      {error ? <p className="text-sm text-rose">{error}</p> : null}
 
       <section>
-        <div className="mb-3 flex items-end justify-between gap-4">
-          <div>
-            <h2 className="font-display text-2xl font-semibold">Tenants</h2>
-            <p className="text-sm text-slate-muted">
-              {tenants.length} provisioned organization
-              {tenants.length === 1 ? "" : "s"}
+        <div className="table-shell overlay-x-auto rounded-xl">
+          <div className="space-y-3 border-b border-line px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {(
+                [
+                  ["all", "All"],
+                  ["active", "Active"],
+                  ["suspended", "Suspended"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setStatus(value)}
+                  className={cn(
+                    "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
+                    status === value
+                      ? "border-line-strong bg-mist text-ink"
+                      : "border-transparent bg-raised text-slate-muted hover:bg-mist",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-slate-muted">
+              {tenants.length === 0
+                ? "No tenants yet"
+                : filteredTenants.length === 0
+                  ? "No tenants match"
+                  : `Showing ${filteredTenants.length} of ${tenants.length} tenants`}
             </p>
           </div>
-        </div>
-        <div className="table-shell overflow-x-auto rounded-xl">
-          <div className="min-w-[920px]">
-            <div className="grid grid-cols-[1.3fr_0.8fr_1fr_0.7fr_0.7fr_1fr] gap-3 border-b border-line px-4 py-2.5">
+          <div className="min-w-[1100px]">
+            <div className="grid grid-cols-[1.1fr_0.7fr_0.9fr_1fr_0.55fr_0.55fr_auto] gap-3 border-b border-line px-3 py-2">
               <span className="th-label">Tenant</span>
               <span className="th-label">Domain</span>
               <span className="th-label">Organization ID</span>
+              <span className="th-label">Owner</span>
               <span className="th-label">Timezone</span>
               <span className="th-label">Status</span>
-              <span className="th-label text-right">Actions</span>
+              <span className="th-label w-24 text-right">Actions</span>
             </div>
-            {tenants.map((tenant) => (
+            {tenants.length === 0 ? (
+              <p className="px-3 py-10 text-center text-sm text-slate-muted">
+                No tenants yet — provision one above.
+              </p>
+            ) : filteredTenants.length === 0 ? (
+              <p className="px-3 py-10 text-center text-sm text-slate-muted">
+                No tenants match this filter.
+              </p>
+            ) : null}
+            {filteredTenants.map((tenant) => (
               <div
                 key={tenant.id}
-                className="grid grid-cols-[1.3fr_0.8fr_1fr_0.7fr_0.7fr_1fr] items-center gap-3 border-b border-line/60 px-4 py-3 last:border-0"
+                className="grid grid-cols-[1.1fr_0.7fr_0.9fr_1fr_0.55fr_0.55fr_auto] items-center gap-3 border-b border-line/60 px-3 py-2 last:border-0"
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{tenant.name}</p>
@@ -354,28 +299,58 @@ export function PlatformTenantsPanel({
                 <p className="mono-cell truncate text-slate-muted">
                   {tenant.authOrgId}
                 </p>
+                <p
+                  className="truncate text-sm text-slate-muted"
+                  title={tenant.ownerEmail ?? undefined}
+                >
+                  {tenant.ownerEmail || "—"}
+                </p>
                 <p className="mono-cell truncate text-slate-muted">
                   {tenant.timezone || "UTC"}
                 </p>
                 <Badge dot tone={tenant.isActive ? "success" : "danger"}>
                   {tenant.isActive ? "Active" : "Suspended"}
                 </Badge>
-                <div className="flex justify-end gap-2">
+                <div className="flex w-24 shrink-0 items-center justify-end gap-0.5">
                   <Button
-                    size="sm"
-                    variant="secondary"
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Edit ${tenant.name}`}
+                    title="Edit"
+                    disabled={busyId === tenant.id}
+                    onClick={() => setEditingTenant(tenant)}
+                  >
+                    <PencilIcon />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={`Open workspace for ${tenant.name}`}
+                    title="Open workspace"
                     disabled={!tenant.isActive || busyId === tenant.id}
                     onClick={() => workInTenant(tenant)}
                   >
-                    Open workspace
+                    <ExternalLinkIcon />
                   </Button>
                   <Button
-                    size="sm"
-                    variant={tenant.isActive ? "danger" : "secondary"}
+                    size="icon"
+                    variant={tenant.isActive ? "danger" : "ghost"}
+                    aria-label={
+                      tenant.isActive
+                        ? `Suspend ${tenant.name}`
+                        : `Reactivate ${tenant.name}`
+                    }
+                    title={tenant.isActive ? "Suspend" : "Reactivate"}
                     disabled={busyId === tenant.id}
                     onClick={() => toggleTenant(tenant)}
                   >
-                    {tenant.isActive ? "Suspend" : "Reactivate"}
+                    {busyId === tenant.id ? (
+                      "…"
+                    ) : tenant.isActive ? (
+                      <PauseIcon />
+                    ) : (
+                      <PlayIcon />
+                    )}
                   </Button>
                 </div>
               </div>
@@ -386,8 +361,8 @@ export function PlatformTenantsPanel({
 
       <PlatformGrantCreditsPanel tenants={tenants} />
 
-      <section className="rounded-xl border border-line bg-raised/40 p-5">
-        <h2 className="font-display text-2xl font-semibold">
+      <section className="rounded-xl border border-line bg-raised/40 p-4">
+        <h2 className="font-display text-xl font-semibold">
           Import across tenants
         </h2>
         <p className="mt-1 max-w-2xl text-sm text-slate-muted">
@@ -441,7 +416,7 @@ export function PlatformTenantsPanel({
               No teams or workflows in this tenant yet.
             </p>
           ) : (
-            <div className="max-h-64 space-y-2 overflow-y-auto rounded-lg border border-line bg-canvas/40 p-3">
+            <div className="overlay-y-auto max-h-64 space-y-2 rounded-lg border border-line bg-canvas/40 p-3">
               {catalog.map((item) => {
                 const checked = selectedIds.includes(item.id);
                 return (
@@ -513,62 +488,45 @@ export function PlatformTenantsPanel({
           </p>
         </div>
         <div className="table-shell rounded-xl">
-          {audit.length === 0 ? (
-            <p className="px-3 py-6 text-center text-sm text-slate-muted">
-              No platform changes have been recorded yet.
-            </p>
-          ) : (
-            <div className="max-h-[min(28rem,70vh)] overflow-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead className="sticky top-0 z-10 border-b border-line/70 bg-raised text-[10px] uppercase tracking-[0.12em] text-slate-muted">
-                <tr>
-                  <th className="px-3 py-2 font-medium">Action</th>
-                  <th className="px-3 py-2 font-medium">Actor</th>
-                  <th className="px-3 py-2 font-medium">Tenant</th>
-                  <th className="px-3 py-2 font-medium text-right">When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {audit.map((event) => {
-                  const tenant = event.tenantId
-                    ? tenants.find((row) => row.id === event.tenantId)
-                    : null;
-                  const actorShort =
-                    event.actorId.length > 18
-                      ? `${event.actorId.slice(0, 10)}…${event.actorId.slice(-4)}`
-                      : event.actorId;
-                  return (
-                    <tr
-                      key={event.id}
-                      className="border-b border-line/50 last:border-0"
-                    >
-                      <td className="max-w-[240px] truncate px-3 py-1.5 font-medium">
-                        {event.action}
-                      </td>
-                      <td
-                        className="mono-cell max-w-[140px] truncate px-3 py-1.5 text-slate-muted"
-                        title={event.actorId}
-                      >
-                        {actorShort}
-                      </td>
-                      <td
-                        className="max-w-[160px] truncate px-3 py-1.5 text-slate-muted"
-                        title={tenant?.slug ?? event.tenantId ?? undefined}
-                      >
-                        {tenant?.name ?? tenant?.slug ?? "—"}
-                      </td>
-                      <td className="mono-cell whitespace-nowrap px-3 py-1.5 text-right text-slate-muted">
-                        {formatRelative(event.createdAt)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            </div>
-          )}
+          <PlatformAuditLog events={audit} tenants={tenants} />
         </div>
       </section>
     </div>
+    {provisioning ? (
+      <ProvisionTenantDialog
+        getAccessToken={getAccessToken}
+        takenEmails={tenants
+          .map((tenant) => tenant.ownerEmail)
+          .filter((email): email is string => Boolean(email))}
+        onCreated={(created) => {
+          setTenants((current) =>
+            [...current, created].sort((a, b) => a.name.localeCompare(b.name)),
+          );
+          void refreshAudit();
+        }}
+        onClose={() => setProvisioning(false)}
+      />
+    ) : null}
+    {editingTenant ? (
+      <EditTenantDialog
+        key={editingTenant.id}
+        tenant={editingTenant}
+        getAccessToken={getAccessToken}
+        takenEmails={tenants
+          .filter((tenant) => tenant.id !== editingTenant.id)
+          .map((tenant) => tenant.ownerEmail)
+          .filter((email): email is string => Boolean(email))}
+        onSaved={(updated) => {
+          setTenants((current) =>
+            current
+              .map((row) => (row.id === updated.id ? updated : row))
+              .sort((a, b) => a.name.localeCompare(b.name)),
+          );
+          void refreshAudit();
+        }}
+        onClose={() => setEditingTenant(null)}
+      />
+    ) : null}
+    </>
   );
 }

@@ -1,63 +1,33 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { Suspense } from "react";
-import { signIn } from "next-auth/react";
-import { useTranslations } from "next-intl";
-import { useSearchParams } from "next/navigation";
-
-import { Link } from "@/i18n/navigation";
-import { safeAuthCallbackUrl } from "@/lib/auth/callback-url";
-
-function SignInActions() {
-  const t = useTranslations("auth");
-  const searchParams = useSearchParams();
-  const callbackUrl = safeAuthCallbackUrl(
-    searchParams.get("callbackUrl") ?? searchParams.get("redirect_url"),
-  );
-
-  return (
-    <button
-      type="button"
-      onClick={() => signIn("keycloak", { callbackUrl })}
-      className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas"
-    >
-      {t("continueSignIn")}
-    </button>
-  );
+function firstQueryValue(
+  value: string | string[] | undefined,
+): string | undefined {
+  if (typeof value === "string" && value) return value;
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0]) {
+    return value[0];
+  }
+  return undefined;
 }
 
-export default function SignInPage() {
-  const t = useTranslations("auth");
-  const tc = useTranslations("common");
-
-  return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-6">
-      <div>
-        <p className="text-sm font-medium text-accent">Atlas</p>
-        <h1 className="mt-2 font-display text-3xl text-ink">{t("signInTitle")}</h1>
-        <p className="mt-2 text-sm text-slate-muted">{t("signInSubtitle")}</p>
-      </div>
-      <Suspense
-        fallback={
-          <button
-            type="button"
-            disabled
-            className="rounded-md bg-ink px-4 py-3 text-sm font-medium text-canvas opacity-70"
-          >
-            {t("continueSignIn")}
-          </button>
-        }
-      >
-        <SignInActions />
-      </Suspense>
-      <p className="text-xs text-slate-muted">
-        {t("devUsers")}: <code>admin@atlas.local</code> / <code>atlas-admin</code> ·{" "}
-        <code>ops@acme.atlas.local</code> / <code>atlas-acme</code>
-      </p>
-      <Link href="/" className="text-sm text-accent underline">
-        {t("backToHome")}
-      </Link>
-      <p className="sr-only">{tc("signIn")}</p>
-    </main>
-  );
+/**
+ * Auth.js and leftover /sign-in links still land here. Open the home layout
+ * with the Atlas sign-in modal instead of Keycloak’s hosted page.
+ */
+export default async function SignInPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ locale: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const { locale } = await params;
+  const query = await searchParams;
+  const callbackUrl =
+    firstQueryValue(query.callbackUrl) ??
+    firstQueryValue(query.redirect_url) ??
+    firstQueryValue(query.next);
+  const dest = new URLSearchParams({ signin: "1" });
+  if (callbackUrl) dest.set("callbackUrl", callbackUrl);
+  redirect(`/${locale}?${dest.toString()}`);
 }

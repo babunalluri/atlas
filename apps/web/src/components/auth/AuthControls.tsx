@@ -1,17 +1,27 @@
 "use client";
 
-import { signIn, useSession } from "next-auth/react";
+import type { Session } from "next-auth";
+import { useSession } from "next-auth/react";
 import { useLocale, useTranslations } from "next-intl";
 
-import { Link } from "@/i18n/navigation";
+import { sessionLooksSignedIn } from "@/lib/auth/auth-session";
 import { signOutFederated } from "@/lib/auth/federated-signout";
 
-export function AuthControls() {
+function devAuthEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_DEV_AUTH === "true";
+}
+
+export function AuthControls({
+  serverSession = null,
+}: {
+  serverSession?: Session | null;
+}) {
   const t = useTranslations("common");
   const locale = useLocale();
-  const { data: session, status } = useSession();
+  const { data: clientSession, status } = useSession();
+  const session = clientSession ?? serverSession;
 
-  if (status === "loading") {
+  if (status === "loading" && !sessionLooksSignedIn(serverSession)) {
     return (
       <span className="rounded-md border border-line bg-raised px-3 py-2 text-sm text-slate-muted">
         {t("loading")}
@@ -19,34 +29,23 @@ export function AuthControls() {
     );
   }
 
-  if (!session) {
+  // Admin-only control: never render Sign in. Missing session is a redirect.
+  if (!sessionLooksSignedIn(session) && !devAuthEnabled()) {
     return (
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => signIn("keycloak", { callbackUrl: `/${locale}/admin` })}
-          className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
-        >
-          {t("signIn")}
-        </button>
-        <Link
-          href="/sign-up"
-          className="rounded-md bg-ink px-3 py-2 text-sm font-medium text-canvas"
-        >
-          {t("signUp")}
-        </Link>
-      </div>
+      <span className="rounded-md border border-line bg-raised px-3 py-2 text-sm text-slate-muted">
+        {t("loading")}
+      </span>
     );
   }
 
   return (
     <div className="flex items-center gap-2">
       <span className="hidden text-sm text-slate-muted sm:inline">
-        {session.user?.email || session.user?.name || "Signed in"}
+        {session?.user?.email || session?.user?.name || "Signed in"}
       </span>
       <button
         type="button"
-        onClick={() => void signOutFederated(`/${locale}/sign-in`)}
+        onClick={() => void signOutFederated(`/${locale}`)}
         className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
       >
         {t("signOut")}

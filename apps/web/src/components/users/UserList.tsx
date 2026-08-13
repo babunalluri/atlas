@@ -7,10 +7,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
 import { PencilIcon, TrashIcon } from "@/components/ui/icons";
-import { deleteTenantUser } from "@/lib/api/admin";
-import type { TenantUser } from "@/lib/api/types";
+import { deleteTenantUser, updateTenantUser } from "@/lib/api/admin";
+import { isProtectedAdminRole, type TenantUser } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn, formatRelative } from "@/lib/utils";
+import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
+import { DeleteUserDialog } from "@/components/users/DeleteUserDialog";
+import { EditUserForm } from "@/components/users/EditUserForm";
 
 type StatusFilter = "all" | "active" | "inactive";
 
@@ -24,6 +27,8 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
+  const [editingUser, setEditingUser] = useState<TenantUser | null>(null);
+  const [deletingUser, setDeletingUser] = useState<TenantUser | null>(null);
 
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase();
@@ -49,12 +54,12 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
   const pageItems = filtered.slice(start, start + PAGE_SIZE);
   const end = Math.min(filtered.length, start + PAGE_SIZE);
 
-  async function onDelete(user: TenantUser) {
-    if (
-      !window.confirm(
-        `Delete “${user.displayName}”? This cannot be undone.`,
-      )
-    ) {
+  async function confirmDelete() {
+    const user = deletingUser;
+    if (!user) return;
+    if (isProtectedAdminRole(user.role)) {
+      setError("Admin users cannot be deleted");
+      setDeletingUser(null);
       return;
     }
     setDeletingIds((current) => new Set(current).add(user.id));
@@ -62,6 +67,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
     try {
       await deleteTenantUser(await getAccessToken(), user.id);
       setUsers((prev) => prev.filter((item) => item.id !== user.id));
+      setDeletingUser(null);
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : "Failed to delete user",
@@ -210,27 +216,39 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
                   </p>
                 </Link>
                 <div className="flex shrink-0 items-center justify-end gap-0.5">
-                  <Link
-                    href={`/admin/users/${user.id}`}
-                    className={buttonClassName({
-                      variant: "ghost",
-                      size: "icon",
-                    })}
-                    aria-label={`Edit ${user.displayName}`}
-                    title="Edit"
-                  >
-                    <PencilIcon />
-                  </Link>
                   <Button
                     size="icon"
-                    variant="danger"
-                    aria-label={`Delete ${user.displayName}`}
-                    title="Delete"
-                    disabled={deletingIds.has(user.id)}
-                    onClick={() => void onDelete(user)}
+                    variant="ghost"
+                    aria-label={`Edit ${user.displayName}`}
+                    title="Edit"
+                    onClick={() => setEditingUser(user)}
                   >
-                    {deletingIds.has(user.id) ? "…" : <TrashIcon />}
+                    <PencilIcon />
                   </Button>
+                  {isProtectedAdminRole(user.role) ? (
+                    <span title="Admin users cannot be deleted">
+                      <Button
+                        size="icon"
+                        variant="danger"
+                        aria-label="Admin users cannot be deleted"
+                        title="Admin users cannot be deleted"
+                        disabled
+                      >
+                        <TrashIcon />
+                      </Button>
+                    </span>
+                  ) : (
+                    <Button
+                      size="icon"
+                      variant="danger"
+                      aria-label={`Delete ${user.displayName}`}
+                      title="Delete"
+                      disabled={deletingIds.has(user.id)}
+                      onClick={() => setDeletingUser(user)}
+                    >
+                      {deletingIds.has(user.id) ? "…" : <TrashIcon />}
+                    </Button>
+                  )}
                 </div>
               </div>
             </li>
@@ -244,6 +262,50 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
           ) : null}
         </ul>
       </section>
+
+      {editingUser ? (
+        <AdminFormDialog
+          title="Edit user"
+          subtitle={`Update ${editingUser.displayName} in this organization. Passwords stay in Keycloak — Atlas never stores them.`}
+          titleId="edit-user-title"
+          onClose={() => setEditingUser(null)}
+        >
+          <EditUserForm
+            user={editingUser}
+            takenEmails={users
+              .filter((item) => item.id !== editingUser.id)
+              .map((item) => item.email)
+              .filter((email): email is string => Boolean(email))}
+            onCancel={() => setEditingUser(null)}
+            onSubmit={async (values) => {
+              const updated = await updateTenantUser(
+                await getAccessToken(),
+                editingUser.id,
+                {
+                  displayName: values.displayName,
+                  email: values.email,
+                  role: values.role,
+                  password: values.password,
+                  passwordConfirm: values.passwordConfirm,
+                },
+              );
+              setUsers((prev) =>
+                prev.map((item) => (item.id === updated.id ? updated : item)),
+              );
+              setEditingUser(null);
+            }}
+          />
+        </AdminFormDialog>
+      ) : null}
+
+      {deletingUser ? (
+        <DeleteUserDialog
+          user={deletingUser}
+          busy={deletingIds.has(deletingUser.id)}
+          onClose={() => setDeletingUser(null)}
+          onConfirm={() => void confirmDelete()}
+        />
+      ) : null}
     </div>
   );
 }

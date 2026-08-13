@@ -104,6 +104,7 @@ export function SearchableSelect({
 
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       setOpen(false);
       setQuery("");
       return;

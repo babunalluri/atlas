@@ -1,9 +1,10 @@
 "use client";
 
 import { Link, useRouter } from "@/i18n/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
+import { useSignInModal } from "@/components/auth/SignInModalProvider";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { Button } from "@/components/ui/Button";
 import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
@@ -116,7 +117,8 @@ function SignedOutLanding({
   tCommon: ReturnType<typeof useTranslations<"common">>;
   tHome: ReturnType<typeof useTranslations<"home">>;
 }) {
-  const tAuth = useTranslations("auth");
+  const locale = useLocale();
+  const { openSignIn } = useSignInModal();
 
   return (
     <div className="relative overflow-hidden">
@@ -136,14 +138,14 @@ function SignedOutLanding({
         }}
       />
 
-      <div className="relative mx-auto max-w-6xl px-6 pb-24 pt-10 md:px-8 md:pt-14">
+      <div className="relative mx-auto max-w-6xl px-6 py-10 md:px-8 md:py-14">
         <header className="portal-rise">
           <BrandMark href="/" subtitle={tHome("brandSubtitle")} />
         </header>
 
         <section
           className={cn(
-            "mt-14 grid items-center gap-12 lg:mt-20 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] lg:gap-16",
+            "mt-10 grid items-center gap-10 md:mt-14 md:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] md:gap-14",
             loading && "opacity-50",
           )}
         >
@@ -151,18 +153,20 @@ function SignedOutLanding({
             <h1 className="max-w-xl font-display text-4xl font-semibold tracking-tight text-ink sm:text-5xl lg:text-[3.35rem] lg:leading-[1.08]">
               {tHome("headline")}
             </h1>
-            <p className="mt-5 max-w-md text-base leading-relaxed text-slate-muted">
+            <p className="mt-5 max-w-md text-lg leading-relaxed text-slate-muted">
               {tHome("support")}
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link href="/sign-in">
-                <Button variant="accent" className="min-w-[9.5rem]">
-                  {tCommon("signIn")}
-                </Button>
-              </Link>
-              <Link href="/sign-up">
-                <Button variant="secondary">{tAuth("createAccount")}</Button>
-              </Link>
+              <Button
+                type="button"
+                variant="accent"
+                className="min-w-[9.5rem]"
+                onClick={() =>
+                  openSignIn({ callbackUrl: `/${locale}/admin` })
+                }
+              >
+                {tCommon("signIn")}
+              </Button>
             </div>
           </div>
 
@@ -171,14 +175,14 @@ function SignedOutLanding({
           </div>
         </section>
 
-        <section className="portal-rise portal-rise-delay-3 mt-24 border-t border-line/70 pt-14 md:mt-28">
+        <section className="portal-rise portal-rise-delay-3 mt-16 border-t border-line/70 pt-12 md:mt-20">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
             {tHome("twoDoorsEyebrow")}
           </p>
           <h2 className="mt-3 max-w-xl font-display text-3xl font-semibold tracking-tight text-ink">
             {tHome("twoDoorsTitle")}
           </h2>
-          <div className="mt-10 grid gap-10 md:grid-cols-2 md:gap-14">
+          <div className="mt-8 grid gap-8 sm:grid-cols-2 md:gap-12">
             <div>
               <h3 className="font-display text-xl font-semibold text-ink">
                 {tHome("controlPlaneTitle")}
@@ -186,7 +190,7 @@ function SignedOutLanding({
               <p className="mt-2 text-sm leading-relaxed text-slate-muted">
                 {tHome("controlPlaneBody")}
               </p>
-              <ul className="mt-5 space-y-2.5 text-sm text-ink-soft">
+              <ul className="mt-5 space-y-2.5 text-sm leading-relaxed text-ink-soft">
                 {[
                   tHome("controlPlaneBullet1"),
                   tHome("controlPlaneBullet2"),
@@ -206,7 +210,7 @@ function SignedOutLanding({
               <p className="mt-2 text-sm leading-relaxed text-slate-muted">
                 {tHome("workspacePortalBody")}
               </p>
-              <ul className="mt-5 space-y-2.5 text-sm text-ink-soft">
+              <ul className="mt-5 space-y-2.5 text-sm leading-relaxed text-ink-soft">
                 {[
                   tHome("workspacePortalBullet1"),
                   tHome("workspacePortalBullet2"),
@@ -222,14 +226,14 @@ function SignedOutLanding({
           </div>
         </section>
 
-        <section className="mt-20 md:mt-24">
+        <section className="mt-16 md:mt-20">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
             {tHome("pathEyebrow")}
           </p>
           <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight text-ink">
             {tHome("pathTitle")}
           </h2>
-          <ol className="mt-10 grid gap-6 sm:grid-cols-3">
+          <ol className="mt-8 grid gap-6 sm:grid-cols-3">
             {[
               { step: "01", title: tHome("step1Title"), copy: tHome("step1Copy") },
               { step: "02", title: tHome("step2Title"), copy: tHome("step2Copy") },
@@ -248,7 +252,7 @@ function SignedOutLanding({
           </ol>
         </section>
 
-        <footer className="mt-24 flex flex-col gap-3 border-t border-line/70 pt-8 text-sm text-slate-muted sm:flex-row sm:items-center sm:justify-between">
+        <footer className="mt-16 flex flex-col gap-3 border-t border-line/70 pt-8 text-sm text-slate-muted sm:flex-row sm:items-center sm:justify-between">
           <p>
             {tHome("title")} — {tHome("platformDescriptor")}
           </p>

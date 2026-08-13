@@ -116,12 +116,28 @@
 @layer base {
   html {
     scroll-behavior: smooth;
+    scrollbar-width: none;
   }
 
   body {
     @apply bg-canvas text-ink font-sans antialiased;
     background-image: var(--app-gradient);
     min-height: 100vh;
+    scrollbar-width: none;
+  }
+
+  /*
+   * Hide scrollbar tracks app-wide. Overflow still scrolls via wheel,
+   * trackpad, and keyboard. Do not set overflow: hidden on html/body.
+   */
+  * {
+    scrollbar-width: none;
+  }
+
+  *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
   }
 
   ::selection {
@@ -154,11 +170,36 @@
     background: color-mix(in oklab, var(--tone-canvas) 92%, transparent);
   }
 
+  /*
+   * Overlay pane scroll: overflow-*: auto (not scroll) so the pane only
+   * scrolls when items overflow. Tracks stay hidden (same as the global
+   * scrollbar rule). Wheel, trackpad, and focus still scroll.
+   */
+  .overlay-y-auto {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+
+  .overlay-y-auto::-webkit-scrollbar,
+  .overlay-x-auto::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
   /* Dense data table / list container. */
   .table-shell {
     overflow: hidden;
     border: 1px solid color-mix(in oklab, var(--tone-line) 85%, transparent);
     background: color-mix(in oklab, var(--tone-raised) 92%, transparent);
+  }
+
+  /* After .table-shell so overflow-x: auto wins over overflow: hidden. */
+  .overlay-x-auto {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
   }
 
   /* Uppercase micro-label used for table headers and section eyebrows. */

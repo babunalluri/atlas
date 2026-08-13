@@ -1199,7 +1199,7 @@ class MembershipRepository(TenantRepository):
             tenant_id=self.context.tenant_id,
             user_id=user_id.strip(),
             display_name=display_name.strip(),
-            email=(email or "").strip() or None,
+            email=(email or "").strip().lower() or None,
             phone=(phone or "").strip() or None,
             timezone=timezone,
             role=role,
@@ -1233,7 +1233,7 @@ class MembershipRepository(TenantRepository):
         if display_name is not None:
             membership.display_name = display_name.strip()
         if email is not None:
-            membership.email = email.strip() or None
+            membership.email = email.strip().lower() or None
         if clear_phone:
             membership.phone = None
         elif phone is not None:

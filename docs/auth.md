@@ -50,6 +50,8 @@ AUTH_PROVIDER=oidc
 AUTH_ISSUER=http://localhost:8080/realms/atlas
 AUTH_JWKS_URL=http://localhost:8080/realms/atlas/protocol/openid-connect/certs
 AUTH_AUDIENCE=atlas-web
+KEYCLOAK_ADMIN_URL=http://localhost:8080
+# KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD — see `.env.example`
 # Web (Auth.js)
 AUTH_URL=http://localhost:3000
 AUTH_SECRET=<random 32+ chars>
@@ -78,6 +80,16 @@ token before calling the Atlas API. Access tokens must include `org_id`,
 `org_role`, `platform_admin` (optional), `email` (for invite binding), and
 audience `atlas-web` (realm client mappers in `infra/keycloak/atlas-realm.json`).
 
+**Sign in:** Atlas opens a modal on the home page and exchanges username/password
+for tokens via Keycloak **Direct Access Grants** (Resource Owner Password
+Credentials). Auth.js stores the same JWT session as the OIDC provider
+(`access_token`, refresh, `org_id`). The browser does **not** redirect to
+Keycloak’s hosted login for the happy path. **Forgot Password?** still uses
+Keycloak’s reset URL (`…/login-actions/reset-credentials`). Client `atlas-web`
+must have Direct Access Grants enabled (set in `atlas-realm.json`; on an
+existing volume, enable it in Admin → Clients → atlas-web, or Atlas can PATCH
+it via the Admin API).
+
 **Branded login UI:** custom theme `atlas` in `infra/keycloak/themes/` (Atlas fonts/colors;
 see [Keycloak themes](https://www.keycloak.org/ui-customization/themes)). Fresh Compose imports
 set it automatically. On an existing `keycloak_data` volume, choose **Realm settings → Themes →
@@ -98,18 +110,44 @@ session ends — not only the Auth.js cookie.
 If you already imported the realm before mapper updates, either delete the
 `keycloak_data` volume and re-import, or add the mappers manually in the Admin UI.
 
-## Invites
+## Tenant handover (email + password)
 
-1. Create the user (or enable registration) in Keycloak Admin.
-2. Add them to the org group matching `tenants.auth_org_id` (provides `org_id`
-   via aggregated group attributes).
-3. Set user attribute `org_role` (`org:admin` or `org:member`) and optional
-   `platform_admin=true` for platform operators.
-4. Atlas `/admin/users` can still create a **pending** membership row bound on
-   first login by email (`pending:…` → real `sub`).
+Super Admin provisions a tenant with **owner email + password**. Atlas:
 
-Optional later: Keycloak Admin REST client behind the same `IdentityAdminClient`
-interface.
+1. Ensures a Keycloak group named after `tenants.auth_org_id` with attribute
+   `org_id` (same shape as `org_demo_acme` / `org_demo_globex` in
+   `infra/keycloak/atlas-realm.json`).
+2. Creates the Keycloak user (username=email, enabled, email verified locally)
+   with that password (`temporary=false`).
+3. Puts the user in the org group with `org_role=org:admin` (never
+   `platform_admin`).
+4. Creates an Atlas `memberships` row as `tenant_admin` and assigns domain
+   starter teams to the **owner’s** Keycloak `sub`.
+
+**Existing tenants without an owner** (created before owner email was required):
+Super Admin → Tenants → **Edit**. Set owner email + password. Atlas creates the
+Keycloak user in that tenant’s org group (`org_id` = `auth_org_id`,
+`org_role=org:admin`), a `tenant_admin` membership, and assigns default desk
+teams. The Owner column shows **—** until you do this. Changing to a new unused
+email creates another owner; an email that already exists in Keycloak returns
+409 (it will not steal another org’s user).
+
+Org owners create additional users the same way (email + password + role), and
+can **Edit** existing people (display name, email, role, optional password).
+Atlas updates Keycloak `org_role` (`org:admin` / `org:member`) and the Atlas
+membership. Email changes update Keycloak username/email when unique (409 if
+taken). Passwords live only in Keycloak — never in Atlas Postgres or logs.
+Platform administrators cannot be edited or have their password reset from a
+tenant workspace.
+
+**Passwords:** Super Admin sets an owner password from **Edit tenant**. Tenant
+admins set or reset passwords from **Edit user**. Keycloak login still has
+**Forgot Password?** — that email is sent by Keycloak SMTP, which is **not
+configured in local Compose**, so the email reset will not arrive until you
+add SMTP in the Keycloak Admin console.
+
+Pending-invite memberships remain available behind `IDENTITY_INVITE_ENABLED=true`
+but are not the Users CTA.
 
 ## OCI
 

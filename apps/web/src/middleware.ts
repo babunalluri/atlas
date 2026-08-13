@@ -67,9 +67,13 @@ export default auth((request) => {
 
   if (!request.auth) {
     const signInLocale = locale ?? routing.defaultLocale;
-    const signIn = new URL(`/${signInLocale}/sign-in`, request.nextUrl.origin);
+    const signIn = new URL(`/${signInLocale}`, request.nextUrl.origin);
     const returnTo = `${request.nextUrl.pathname}${request.nextUrl.search}`;
-    signIn.searchParams.set("callbackUrl", returnTo || `/${signInLocale}/admin`);
+    signIn.searchParams.set("signin", "1");
+    signIn.searchParams.set(
+      "callbackUrl",
+      returnTo || `/${signInLocale}/admin`,
+    );
     return NextResponse.redirect(signIn);
   }
 
@@ -77,8 +81,9 @@ export default auth((request) => {
 });
 
 export const config = {
-  // Run auth/intl on paths with dots in segments (e.g. user ids); skip only static files.
+  // Run auth/intl on paths with dots in segments (e.g. user ids). Skip Auth.js
+  // routes so SessionProvider's GET /api/auth/session is not wrapped by auth().
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|[^/]+\\.[^/]+$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|api/auth|[^/]+\\.[^/]+$).*)",
   ],
 };

@@ -62,7 +62,7 @@ export function NotificationsPanel({
     }
     if (selectable.length === 0) {
       setError(
-        "This organization has no active users yet. Invite someone under Users first.",
+        "This organization has no active users yet. Create a user under Users first.",
       );
       return;
     }
@@ -146,7 +146,7 @@ export function NotificationsPanel({
                 No active members in this organization. Entering as platform
                 admin does not count —{" "}
                 <Link href="/admin/users" className="font-semibold underline">
-                  invite users
+                  create a user
                 </Link>{" "}
                 first.
               </p>

@@ -268,7 +268,7 @@ export function BillingPanel({
             disabled={selectableUsers.length === 0}
             placeholder={
               selectableUsers.length === 0
-                ? "No active users — invite someone first"
+                ? "No active users — create one first"
                 : "Search users…"
             }
             emptyMessage="No matching users"

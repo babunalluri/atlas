@@ -1,10 +1,12 @@
 "use client";
 
+import type { Session } from "next-auth";
 import { useSession } from "next-auth/react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AuthControls } from "@/components/auth/AuthControls";
+import { sessionLooksSignedIn } from "@/lib/auth/auth-session";
 import { LanguageSwitcher } from "@/components/i18n/LanguageSwitcher";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
@@ -339,14 +341,23 @@ function NavLinks({
   );
 }
 
-export function AdminShell({ children }: { children: React.ReactNode }) {
+export function AdminShell({
+  children,
+  serverSession = null,
+}: {
+  children: React.ReactNode;
+  serverSession?: Session | null;
+}) {
   const pathname = usePathname();
   const router = useRouter();
+  const locale = useLocale();
   const tNav = useTranslations("nav");
   const tCommon = useTranslations("common");
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
-  const { data: session } = useSession();
+  const { data: clientSession, status } = useSession();
+  const session = clientSession ?? serverSession;
   const orgId = (session as { orgId?: string } | null)?.orgId;
+  const allowDevBypass = process.env.NEXT_PUBLIC_DEV_AUTH === "true";
   const { theme, changeTheme } = useSurfaceTheme("admin");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
@@ -359,6 +370,27 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
   const lastOrgIdRef = useRef<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    if (allowDevBypass) return;
+    if (status === "loading" && !sessionLooksSignedIn(serverSession)) return;
+    if (sessionLooksSignedIn(clientSession) || sessionLooksSignedIn(serverSession)) {
+      return;
+    }
+    if (status !== "unauthenticated") return;
+    const callbackUrl = `/${locale}${pathname === "/" ? "/admin" : pathname}`;
+    router.replace(
+      `/?signin=1&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+    );
+  }, [
+    allowDevBypass,
+    clientSession,
+    locale,
+    pathname,
+    router,
+    serverSession,
+    status,
+  ]);
 
   useEffect(() => {
     const nameCookie = document.cookie
@@ -542,7 +574,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             <ThemeToggle theme={theme} onChange={changeTheme} />
             <LanguageSwitcher />
             <NotificationBell />
-            <AuthControls />
+            <AuthControls serverSession={serverSession} />
           </div>
         </div>
       </header>
@@ -560,7 +592,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
               aria-modal="true"
               aria-label="Navigation"
               tabIndex={-1}
-              className="glass-bar absolute inset-y-0 left-0 w-64 overflow-y-auto border-r border-line/70 px-3 py-6 outline-none"
+              className="overlay-y-auto glass-bar absolute inset-y-0 left-0 w-64 border-r border-line/70 px-3 py-6 outline-none"
             >
               <NavLinks
                 pathname={pathname}
@@ -570,7 +602,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             </aside>
           </div>
         ) : null}
-        <aside className="hidden h-full w-60 shrink-0 overflow-y-auto border-r border-line/70 px-3 py-6 lg:block">
+        <aside className="overlay-y-auto hidden min-h-0 w-60 shrink-0 border-r border-line/70 px-3 py-6 lg:block">
           <NavLinks
             pathname={pathname}
             isPlatformAdmin={isPlatformAdmin}
@@ -580,7 +612,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
           className={
             pathname.startsWith("/admin/metrics")
               ? "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-0"
-              : "min-w-0 flex-1 overflow-y-auto px-5 py-8"
+              : "overlay-y-auto min-h-0 min-w-0 flex-1 px-5 py-8"
           }
         >
           {children}

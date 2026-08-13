@@ -4,16 +4,29 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.actor_labels import resolve_membership_profiles
+from app.api.schemas import (
+    PlatformPythonPackageIn,
+    PlatformPythonPackageOut,
+    PlatformPythonPackageUpdateIn,
+)
 from app.auth.dependencies import require_roles
+from app.auth.identity_admin import (
+    IdentityAdminClient,
+    IdentityProvisionError,
+    validate_password,
+)
 from app.billing.service import BillingService
-from app.db.models import PlatformAuditEvent, Role, Tenant
-from app.db.repositories import PlatformPythonPackageRepository
-from app.db.session import SessionFactory
+from app.core.settings import get_settings
+from app.db.email_uniqueness import EMAIL_ALREADY_IN_USE, email_taken_across_tenants
+from app.db.models import Membership, PlatformAuditEvent, Role, Tenant
+from app.db.repositories import MembershipRepository, PlatformPythonPackageRepository
+from app.db.session import SessionFactory, apply_tenant_guc
 from app.domains.setup import apply_tenant_domain
 from app.domains.types import normalize_domain
 from app.platform.tenant_import import (
@@ -23,11 +36,6 @@ from app.platform.tenant_import import (
 )
 from app.tenancy.context import TenantContext
 from app.tenancy.ids import new_id, validate_slug
-from app.api.schemas import (
-    PlatformPythonPackageIn,
-    PlatformPythonPackageOut,
-    PlatformPythonPackageUpdateIn,
-)
 
 router = APIRouter(prefix="/admin/platform", tags=["platform-admin"])
 PlatformContext = Annotated[
@@ -52,6 +60,10 @@ class TenantCreate(BaseModel):
     branding: dict[str, Any] = Field(default_factory=dict)
     timezone: str = Field(default="UTC", max_length=100)
     domain: str = Field(default="generic", max_length=50)
+    owner_email: str = Field(min_length=3, max_length=320)
+    owner_display_name: str | None = Field(default=None, max_length=255)
+    owner_password: SecretStr = Field(min_length=1, max_length=256)
+    owner_password_confirm: SecretStr | None = Field(default=None, max_length=256)
 
     @field_validator("timezone")
     @classmethod
@@ -65,12 +77,42 @@ class TenantCreate(BaseModel):
     def validate_domain(cls, value: str) -> str:
         return normalize_domain(value)
 
+    @field_validator("owner_email")
+    @classmethod
+    def normalize_owner_email(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if "@" not in cleaned:
+            raise ValueError("A valid owner email is required")
+        return cleaned
+
+    @field_validator("owner_display_name")
+    @classmethod
+    def strip_owner_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def owner_passwords_match(self) -> "TenantCreate":
+        confirm = (
+            self.owner_password_confirm.get_secret_value()
+            if self.owner_password_confirm is not None
+            else None
+        )
+        validate_password(self.owner_password.get_secret_value(), confirm=confirm)
+        return self
+
 
 class TenantUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     is_active: bool | None = None
     branding: dict[str, Any] | None = None
     timezone: str | None = Field(default=None, max_length=100)
+    owner_email: str | None = Field(default=None, max_length=320)
+    owner_display_name: str | None = Field(default=None, max_length=255)
+    owner_password: SecretStr | None = Field(default=None, max_length=256)
+    owner_password_confirm: SecretStr | None = Field(default=None, max_length=256)
 
     @field_validator("timezone")
     @classmethod
@@ -80,6 +122,38 @@ class TenantUpdate(BaseModel):
         from app.core.timezones import normalize_timezone
 
         return normalize_timezone(value)
+
+    @field_validator("owner_email")
+    @classmethod
+    def normalize_owner_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None
+        if "@" not in cleaned:
+            raise ValueError("A valid owner email is required")
+        return cleaned
+
+    @field_validator("owner_display_name")
+    @classmethod
+    def strip_owner_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def owner_passwords_match(self) -> "TenantUpdate":
+        if self.owner_password is None:
+            return self
+        confirm = (
+            self.owner_password_confirm.get_secret_value()
+            if self.owner_password_confirm is not None
+            else None
+        )
+        validate_password(self.owner_password.get_secret_value(), confirm=confirm)
+        return self
 
 
 class TenantOut(BaseModel):
@@ -91,6 +165,7 @@ class TenantOut(BaseModel):
     branding: dict[str, Any]
     timezone: str = "UTC"
     is_active: bool
+    owner_email: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -98,6 +173,8 @@ class TenantOut(BaseModel):
 class PlatformAuditOut(BaseModel):
     id: uuid.UUID
     actor_id: str
+    actor_email: str | None = None
+    actor_name: str | None = None
     action: str
     tenant_id: uuid.UUID | None
     details: dict[str, Any]
@@ -137,8 +214,139 @@ class TenantImportOut(BaseModel):
     counts: dict[str, int]
 
 
-def tenant_out(tenant: Tenant) -> TenantOut:
-    return TenantOut.model_validate(tenant, from_attributes=True)
+def tenant_out(tenant: Tenant, *, owner_email: str | None = None) -> TenantOut:
+    payload = TenantOut.model_validate(tenant, from_attributes=True)
+    return payload.model_copy(update={"owner_email": owner_email})
+
+
+async def _find_owner_membership(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> Membership | None:
+    return await session.scalar(
+        select(Membership)
+        .where(
+            Membership.tenant_id == tenant_id,
+            Membership.role == Role.tenant_admin,
+        )
+        .order_by(Membership.is_active.desc(), Membership.created_at.asc())
+        .limit(1)
+    )
+
+
+async def _owner_email_for_tenant(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> str | None:
+    await apply_tenant_guc(session, tenant_id)
+    owner = await _find_owner_membership(session, tenant_id)
+    if owner is None or not owner.email:
+        return None
+    return owner.email
+
+
+async def serialize_tenant(session: AsyncSession, tenant: Tenant) -> TenantOut:
+    return tenant_out(
+        tenant, owner_email=await _owner_email_for_tenant(session, tenant.id)
+    )
+
+
+async def _provision_owner_identity(
+    *,
+    email: str,
+    display_name: str,
+    organization_id: str,
+    password: str,
+) -> tuple[str, IdentityAdminClient | None]:
+    settings = get_settings()
+    client = IdentityAdminClient(settings)
+    if client.configured():
+        try:
+            identity = await client.provision_org_owner(
+                email=email,
+                display_name=display_name,
+                organization_id=organization_id,
+                password=password,
+            )
+        except IdentityProvisionError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        return identity.user_id, client
+    if settings.auth_disabled:
+        return f"local:{email}", None
+    raise HTTPException(
+        status_code=503,
+        detail="Keycloak admin is not configured",
+    )
+
+
+async def _attach_owner(
+    session: AsyncSession,
+    actor: TenantContext,
+    tenant: Tenant,
+    *,
+    email: str,
+    display_name: str | None,
+    password: str,
+    timezone: str,
+) -> str:
+    from app.domains.access import assign_domain_default_teams
+
+    owner_name = display_name or email.split("@", 1)[0]
+    scoped = _scoped_context(actor, tenant)
+    await apply_tenant_guc(session, tenant.id)
+    memberships = MembershipRepository(session, scoped)
+    if await email_taken_across_tenants(session, email):
+        raise HTTPException(status_code=409, detail=EMAIL_ALREADY_IN_USE)
+
+    owner_user_id, client = await _provision_owner_identity(
+        email=email,
+        display_name=owner_name,
+        organization_id=tenant.auth_org_id,
+        password=password,
+    )
+    try:
+        await memberships.create(
+            user_id=owner_user_id,
+            display_name=owner_name,
+            email=email,
+            role=Role.tenant_admin,
+            timezone=timezone,
+        )
+        await assign_domain_default_teams(session, scoped, owner_user_id)
+    except HTTPException:
+        if client is not None:
+            await client.delete_user(owner_user_id)
+        raise
+    except ValueError as exc:
+        if client is not None:
+            await client.delete_user(owner_user_id)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        if client is not None:
+            await client.delete_user(owner_user_id)
+        raise
+    return owner_user_id
+
+
+async def _set_owner_password(
+    *, user_id: str, email: str | None, password: str
+) -> None:
+    settings = get_settings()
+    client = IdentityAdminClient(settings)
+    if not client.configured():
+        if settings.auth_disabled:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="Keycloak admin is not configured",
+        )
+    try:
+        profile = await client.get_user(user_id)
+        if profile is None and email:
+            profile = await client.find_user_by_email(email)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Identity user not found")
+        await client.set_password(str(profile.get("id") or user_id), password)
+    except IdentityProvisionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def _scoped_context(actor: TenantContext, tenant: Tenant) -> TenantContext:
@@ -184,8 +392,8 @@ async def list_tenants(
     context: PlatformContext, session: PlatformSession
 ) -> list[TenantOut]:
     del context
-    rows = await session.scalars(select(Tenant).order_by(Tenant.name))
-    return [tenant_out(row) for row in rows.all()]
+    rows = (await session.scalars(select(Tenant).order_by(Tenant.name))).all()
+    return [await serialize_tenant(session, row) for row in rows]
 
 
 @router.post(
@@ -198,11 +406,33 @@ async def create_tenant(
     context: PlatformContext,
     session: PlatformSession,
 ) -> TenantOut:
+    slug = validate_slug(payload.slug)
+    org_id = payload.auth_org_id.strip()
+    owner_name = payload.owner_display_name or payload.owner_email.split("@", 1)[0]
+    duplicate = await session.scalar(
+        select(Tenant).where((Tenant.slug == slug) | (Tenant.auth_org_id == org_id))
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A tenant with this slug or organization already exists",
+        )
+    if await email_taken_across_tenants(session, payload.owner_email):
+        raise HTTPException(status_code=409, detail=EMAIL_ALREADY_IN_USE)
+
+    owner_user_id, identity_client = await _provision_owner_identity(
+        email=payload.owner_email,
+        display_name=owner_name,
+        organization_id=org_id,
+        password=payload.owner_password.get_secret_value(),
+    )
+    created_identity = identity_client is not None
+
     tenant = Tenant(
         id=new_id(),
         name=payload.name.strip(),
-        slug=validate_slug(payload.slug),
-        auth_org_id=payload.auth_org_id.strip(),
+        slug=slug,
+        auth_org_id=org_id,
         domain=payload.domain,
         branding={},
         timezone=payload.timezone,
@@ -212,18 +442,48 @@ async def create_tenant(
     try:
         await session.flush()
     except IntegrityError as exc:
+        if created_identity and identity_client is not None:
+            await identity_client.delete_user(owner_user_id)
         raise HTTPException(
             status_code=409,
             detail="A tenant with this slug or organization already exists",
         ) from exc
 
-    provision = await apply_tenant_domain(
-        session,
-        tenant=tenant,
-        actor_user_id=context.user_id,
-        domain=payload.domain,
-        branding=payload.branding,
-    )
+    try:
+        provision = await apply_tenant_domain(
+            session,
+            tenant=tenant,
+            actor_user_id=owner_user_id,
+            domain=payload.domain,
+            branding=payload.branding,
+        )
+        if session.bind and session.bind.dialect.name == "postgresql":
+            await session.execute(
+                text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+                {"tenant_id": str(tenant.id)},
+            )
+        session.info["tenant_id"] = tenant.id
+        owner_context = TenantContext(
+            tenant_id=tenant.id,
+            user_id=owner_user_id,
+            role=Role.tenant_admin,
+            auth_org_id=tenant.auth_org_id,
+        )
+        memberships = MembershipRepository(session, owner_context)
+        await memberships.create(
+            user_id=owner_user_id,
+            display_name=owner_name,
+            email=payload.owner_email,
+            role=Role.tenant_admin,
+            timezone=payload.timezone,
+        )
+        billing = BillingService(session)
+        await billing.provision_tenant_wallets(tenant.id)
+    except Exception:
+        if created_identity and identity_client is not None:
+            await identity_client.delete_user(owner_user_id)
+        raise
+
     await audit(
         session,
         context,
@@ -233,19 +493,13 @@ async def create_tenant(
             "slug": tenant.slug,
             "auth_org_id": tenant.auth_org_id,
             "domain": payload.domain,
+            "owner_email": payload.owner_email,
+            "owner_user_id": owner_user_id,
             "provision": provision,
         },
     )
-    if session.bind and session.bind.dialect.name == "postgresql":
-        await session.execute(
-            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
-            {"tenant_id": str(tenant.id)},
-        )
-    session.info["tenant_id"] = tenant.id
-    billing = BillingService(session)
-    await billing.provision_tenant_wallets(tenant.id)
     await session.refresh(tenant)
-    return tenant_out(tenant)
+    return tenant_out(tenant, owner_email=payload.owner_email)
 
 
 @router.post("/tenants/import", response_model=TenantImportOut)
@@ -311,7 +565,54 @@ async def update_tenant(
             detail="The platform admin's current organization cannot be suspended",
         )
 
+    await apply_tenant_guc(session, tenant.id)
+    owner = await _find_owner_membership(session, tenant.id)
+    owner_email = payload.owner_email
+    password = (
+        payload.owner_password.get_secret_value()
+        if payload.owner_password is not None
+        else None
+    )
+    current_owner_email = (owner.email or "").strip().lower() if owner else ""
+    creating_owner = False
+    if owner is None:
+        creating_owner = bool(owner_email or password)
+    elif owner_email and owner_email != current_owner_email:
+        creating_owner = True
+
     changes: dict[str, Any] = {}
+    if creating_owner:
+        if not owner_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Owner email is required when creating an owner",
+            )
+        if not password:
+            raise HTTPException(
+                status_code=400,
+                detail="Owner password is required when creating an owner",
+            )
+        owner_user_id = await _attach_owner(
+            session,
+            context,
+            tenant,
+            email=owner_email,
+            display_name=payload.owner_display_name,
+            password=password,
+            timezone=payload.timezone or tenant.timezone,
+        )
+        changes["owner_created"] = {
+            "email": owner_email,
+            "owner_user_id": owner_user_id,
+        }
+    elif owner is not None and password:
+        await _set_owner_password(
+            user_id=owner.user_id,
+            email=owner.email,
+            password=password,
+        )
+        changes["owner_password_set"] = True
+
     if payload.name is not None and payload.name.strip() != tenant.name:
         changes["name"] = {"from": tenant.name, "to": payload.name.strip()}
         tenant.name = payload.name.strip()
@@ -329,7 +630,7 @@ async def update_tenant(
         await session.flush()
         await audit(session, context, "tenant.update", tenant.id, changes)
         await session.refresh(tenant)
-    return tenant_out(tenant)
+    return await serialize_tenant(session, tenant)
 
 
 @router.post("/tenants/{tenant_id}/enter", response_model=TenantOut)
@@ -350,7 +651,7 @@ async def enter_tenant_workspace(
         tenant.id,
         {"slug": tenant.slug},
     )
-    return tenant_out(tenant)
+    return await serialize_tenant(session, tenant)
 
 
 @router.get(
@@ -389,15 +690,32 @@ async def list_platform_audit(
 ) -> list[PlatformAuditOut]:
     del context
     safe_limit = min(max(limit, 1), 200)
-    rows = await session.scalars(
-        select(PlatformAuditEvent)
-        .order_by(PlatformAuditEvent.created_at.desc())
-        .limit(safe_limit)
+    rows = (
+        await session.scalars(
+            select(PlatformAuditEvent)
+            .order_by(PlatformAuditEvent.created_at.desc())
+            .limit(safe_limit)
+        )
+    ).all()
+    profiles = await resolve_membership_profiles(
+        session, [row.actor_id for row in rows]
     )
-    return [
-        PlatformAuditOut.model_validate(row, from_attributes=True)
-        for row in rows.all()
-    ]
+    events: list[PlatformAuditOut] = []
+    for row in rows:
+        profile = profiles.get(row.actor_id)
+        events.append(
+            PlatformAuditOut(
+                id=row.id,
+                actor_id=row.actor_id,
+                actor_email=profile.email if profile else None,
+                actor_name=profile.name if profile else None,
+                action=row.action,
+                tenant_id=row.tenant_id,
+                details=row.details or {},
+                created_at=row.created_at,
+            )
+        )
+    return events
 
 
 @router.get("/sandbox-packages", response_model=list[PlatformPythonPackageOut])

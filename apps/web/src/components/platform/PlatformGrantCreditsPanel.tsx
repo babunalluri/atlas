@@ -76,8 +76,8 @@ export function PlatformGrantCreditsPanel({
   }
 
   return (
-    <section className="rounded-xl border border-line bg-raised/40 p-5">
-      <h2 className="font-display text-2xl font-semibold">Grant free credits to an organization</h2>
+    <section className="rounded-xl border border-line bg-raised/40 p-4">
+      <h2 className="font-display text-xl font-semibold">Grant free credits to an organization</h2>
       <p className="mt-1 max-w-2xl text-sm text-slate-muted">
         Add prepaid credits to a customer organization&apos;s wallet at no charge.
         Org admins use this balance for runs and can grant credits to their users.

@@ -16,10 +16,14 @@ export function Label({
 }) {
   return (
     <div className="mb-1.5 flex items-baseline justify-between gap-3">
-      <label htmlFor={htmlFor} className="th-label">
+      <label htmlFor={htmlFor} className="th-label whitespace-nowrap">
         {children}
       </label>
-      {hint ? <span className="text-xs text-slate-muted">{hint}</span> : null}
+      {hint ? (
+        <span className="min-w-0 shrink text-right text-xs text-slate-muted">
+          {hint}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -53,6 +57,11 @@ export function Select({
       {children}
     </select>
   );
+}
+
+export function FieldHint({ children }: { children?: React.ReactNode }) {
+  if (!children) return null;
+  return <p className="mt-1 text-xs text-slate-muted">{children}</p>;
 }
 
 export function FieldError({ message }: { message?: string }) {

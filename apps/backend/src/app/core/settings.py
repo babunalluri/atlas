@@ -74,10 +74,63 @@ class Settings(BaseSettings):
             "AUTH_ADMIN_SECRET",
             "BACKEND_AUTH_ADMIN_SECRET",
         ),
-        description=(
-            "Optional IdP admin API secret. Unused for local pending invites; "
-            "reserved for a future Keycloak Admin client."
+        description="Optional legacy IdP secret. Prefer KEYCLOAK_ADMIN_* settings.",
+    )
+    keycloak_admin_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("KEYCLOAK_ADMIN_URL", "BACKEND_KEYCLOAK_ADMIN_URL"),
+        description="Keycloak origin for Admin API (e.g. http://keycloak:8080).",
+    )
+    keycloak_admin_username: str = Field(
+        default="admin",
+        validation_alias=AliasChoices(
+            "KEYCLOAK_ADMIN_USERNAME",
+            "KEYCLOAK_ADMIN",
+            "BACKEND_KEYCLOAK_ADMIN",
         ),
+    )
+    keycloak_admin_password: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices(
+            "KEYCLOAK_ADMIN_PASSWORD",
+            "BACKEND_KEYCLOAK_ADMIN_PASSWORD",
+        ),
+    )
+    keycloak_admin_realm: str = Field(
+        default="master",
+        validation_alias=AliasChoices(
+            "KEYCLOAK_ADMIN_REALM",
+            "BACKEND_KEYCLOAK_ADMIN_REALM",
+        ),
+    )
+    keycloak_realm: str = Field(
+        default="",
+        validation_alias=AliasChoices("KEYCLOAK_REALM", "BACKEND_KEYCLOAK_REALM"),
+        description="Staff realm name. Empty derives from AUTH_ISSUER (atlas).",
+    )
+    keycloak_client_id: str = Field(
+        default="atlas-web",
+        validation_alias=AliasChoices(
+            "KEYCLOAK_CLIENT_ID",
+            "BACKEND_KEYCLOAK_CLIENT_ID",
+        ),
+        description="Confidential client used to verify the current password.",
+    )
+    keycloak_client_secret: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices(
+            "KEYCLOAK_CLIENT_SECRET",
+            "AUTH_KEYCLOAK_SECRET",
+            "BACKEND_KEYCLOAK_CLIENT_SECRET",
+        ),
+    )
+    identity_invite_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "IDENTITY_INVITE_ENABLED",
+            "BACKEND_IDENTITY_INVITE_ENABLED",
+        ),
+        description="If true, Users create may fall back to pending-invite memberships.",
     )
     auth_provider: str = Field(
         default="oidc",

@@ -5,12 +5,13 @@
   "displayNameHtml": "<span>Atlas Agents</span>",
   "loginTheme": "atlas",
   "accountTheme": "atlas",
-  "registrationAllowed": true,
+  "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
   "resetPasswordAllowed": true,
   "editUsernameAllowed": false,
   "sslRequired": "external",
+  "passwordPolicy": "length(8)",
   "roles": {
     "realm": [
       { "name": "platform_admin", "description": "Atlas platform administrator" },

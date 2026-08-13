@@ -13,6 +13,10 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", "dev-only-change-me-please-32b")
 os.environ.setdefault("REDIS_URL", "memory://")
 os.environ.setdefault("DOCUMENT_BUCKET", "")
+os.environ["KEYCLOAK_ADMIN_URL"] = ""
+os.environ["KEYCLOAK_ADMIN_PASSWORD"] = ""
+os.environ["KEYCLOAK_CLIENT_SECRET"] = ""
+os.environ["IDENTITY_INVITE_ENABLED"] = "false"
 
 from app.core.settings import get_settings
 from app.db.models import Base, Role, Tenant

@@ -2,6 +2,7 @@ import { NextIntlClientProvider } from "next-intl";
 import { getMessages, setRequestLocale } from "next-intl/server";
 import { notFound } from "next/navigation";
 
+import { SignInModalProvider } from "@/components/auth/SignInModalProvider";
 import { LocaleHtmlAttributes } from "@/components/i18n/LocaleHtmlAttributes";
 import { locales, type AppLocale } from "@/i18n/routing";
 
@@ -27,7 +28,7 @@ export default async function LocaleLayout({
   return (
     <NextIntlClientProvider locale={locale} messages={messages}>
       <LocaleHtmlAttributes />
-      {children}
+      <SignInModalProvider>{children}</SignInModalProvider>
     </NextIntlClientProvider>
   );
 }

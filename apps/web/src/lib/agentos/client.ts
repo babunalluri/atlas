@@ -46,10 +46,24 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly detail?: string,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+export function formatApiError(
+  reason: unknown,
+  fallback = "Request failed",
+): string {
+  if (reason instanceof ApiError && reason.detail?.trim()) {
+    return reason.detail.trim();
+  }
+  if (reason instanceof Error && reason.message.trim()) {
+    return reason.message.trim();
+  }
+  return fallback;
 }
 
 const API_ERROR_MESSAGE_MAX = 400;
@@ -161,6 +175,7 @@ export async function apiFetch<T>(
     throw new ApiError(
       `API ${method} ${path} failed (${response.status}): ${detail}`,
       response.status,
+      detail,
     );
   }
 
@@ -301,6 +316,7 @@ async function publicJsonFetch<T>(
     throw new ApiError(
       `API ${method} ${path} failed (${response.status}): ${detail}`,
       response.status,
+      detail,
     );
   }
   if (response.status === 204) {

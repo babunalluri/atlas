@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from app.tools.custom import CUSTOM_TOOL_SPECS
 from app.tools.providers import (
@@ -582,7 +582,7 @@ class WorkflowAssignmentsOut(BaseModel):
 
 
 class TenantUserCreateIn(BaseModel):
-    """Create by email; sign-in account + org mapping are provisioned automatically."""
+    """Create by email + password; Keycloak holds the credential."""
 
     email: str = Field(min_length=3, max_length=320)
     display_name: str = Field(min_length=1, max_length=255)
@@ -592,6 +592,8 @@ class TenantUserCreateIn(BaseModel):
         max_length=255,
         description="Optional manual override (dev/auth-disabled only).",
     )
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=256)
+    password_confirm: SecretStr | None = Field(default=None, max_length=256)
     role: Literal["tenant_admin", "end_user"] = "end_user"
     is_active: bool = True
     timezone: str = Field(default="UTC", max_length=100)
@@ -637,6 +639,55 @@ class TenantUserCreateIn(BaseModel):
         cleaned = value.strip()
         return cleaned or None
 
+    @model_validator(mode="after")
+    def passwords_match(self) -> "TenantUserCreateIn":
+        if self.password is None:
+            return self
+        from app.auth.identity_admin import validate_password
+
+        confirm = (
+            self.password_confirm.get_secret_value()
+            if self.password_confirm is not None
+            else None
+        )
+        validate_password(self.password.get_secret_value(), confirm=confirm)
+        return self
+
+
+class TenantUserPasswordIn(BaseModel):
+    password: SecretStr = Field(min_length=1, max_length=256)
+    password_confirm: SecretStr | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def passwords_match(self) -> "TenantUserPasswordIn":
+        from app.auth.identity_admin import validate_password
+
+        confirm = (
+            self.password_confirm.get_secret_value()
+            if self.password_confirm is not None
+            else None
+        )
+        validate_password(self.password.get_secret_value(), confirm=confirm)
+        return self
+
+
+class TenantUserPasswordChangeIn(BaseModel):
+    current_password: SecretStr = Field(min_length=1, max_length=256)
+    new_password: SecretStr = Field(min_length=1, max_length=256)
+    new_password_confirm: SecretStr | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def passwords_match(self) -> "TenantUserPasswordChangeIn":
+        from app.auth.identity_admin import validate_password
+
+        confirm = (
+            self.new_password_confirm.get_secret_value()
+            if self.new_password_confirm is not None
+            else None
+        )
+        validate_password(self.new_password.get_secret_value(), confirm=confirm)
+        return self
+
 
 class TenantUserUpdateIn(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -647,6 +698,8 @@ class TenantUserUpdateIn(BaseModel):
     timezone: str | None = Field(default=None, max_length=100)
     workflow_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
     team_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=256)
+    password_confirm: SecretStr | None = Field(default=None, max_length=256)
 
     @field_validator("timezone")
     @classmethod
@@ -672,7 +725,12 @@ class TenantUserUpdateIn(BaseModel):
     def normalize_email(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return value.strip().lower() or None
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None
+        if "@" not in cleaned:
+            raise ValueError("A valid email is required")
+        return cleaned
 
     @field_validator("phone")
     @classmethod
@@ -681,6 +739,20 @@ class TenantUserUpdateIn(BaseModel):
             return None
         cleaned = value.strip()
         return cleaned or None
+
+    @model_validator(mode="after")
+    def passwords_match(self) -> "TenantUserUpdateIn":
+        if self.password is None:
+            return self
+        from app.auth.identity_admin import validate_password
+
+        confirm = (
+            self.password_confirm.get_secret_value()
+            if self.password_confirm is not None
+            else None
+        )
+        validate_password(self.password.get_secret_value(), confirm=confirm)
+        return self
 
 
 class TenantUserOut(BaseModel):

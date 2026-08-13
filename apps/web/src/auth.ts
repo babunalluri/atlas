@@ -1,6 +1,18 @@
 import NextAuth from "next-auth";
+import Credentials from "next-auth/providers/credentials";
 import Keycloak from "next-auth/providers/keycloak";
 
+import {
+  applyOAuthAccount,
+  attachSessionFromToken,
+  persistAuthorizedUser,
+  type AtlasAuthToken,
+} from "@/lib/auth/auth-session";
+import {
+  exchangePasswordGrant,
+  firstStringClaim,
+  PasswordGrantAuthError,
+} from "@/lib/auth/keycloak-password";
 import {
   resolveAuthSecret,
   resolveKeycloakClientId,
@@ -14,15 +26,7 @@ const keycloakInternalIssuer = resolveKeycloakInternalIssuer();
 const keycloakId = resolveKeycloakClientId();
 const keycloakSecret = resolveKeycloakSecret();
 
-type RefreshableToken = {
-  accessToken?: string;
-  refreshToken?: string;
-  idToken?: string;
-  expiresAt?: number;
-  orgId?: string;
-  orgRole?: string;
-  error?: string;
-};
+type RefreshableToken = AtlasAuthToken;
 
 async function refreshAccessToken(
   token: RefreshableToken,
@@ -69,14 +73,52 @@ async function refreshAccessToken(
 }
 
 /**
- * Atlas staff auth via self-hosted Keycloak (OIDC).
+ * Atlas staff auth via self-hosted Keycloak.
  *
- * Split-horizon: browser uses the public issuer (authorization redirect + iss);
- * the Next.js server uses AUTH_KEYCLOAK_INTERNAL_ISSUER for token/userinfo/jwks
- * when running in Docker Compose.
+ * Happy-path Sign in uses Resource Owner Password Credentials (modal form) so
+ * the browser never leaves Atlas for Keycloak’s hosted login page. The OIDC
+ * Keycloak provider remains for compatibility. Split-horizon: browser uses the
+ * public issuer; the Next.js server uses AUTH_KEYCLOAK_INTERNAL_ISSUER for
+ * token/userinfo/jwks when running in Docker Compose.
  */
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
+    Credentials({
+      id: "credentials",
+      name: "Atlas",
+      credentials: {
+        username: { label: "Username or email", type: "text" },
+        password: { label: "Password", type: "password" },
+      },
+      async authorize(credentials) {
+        const username =
+          typeof credentials?.username === "string" ? credentials.username : "";
+        const password =
+          typeof credentials?.password === "string" ? credentials.password : "";
+        try {
+          const granted = await exchangePasswordGrant(username, password);
+          return {
+            id: granted.sub,
+            name: granted.name,
+            email: granted.email,
+            accessToken: granted.accessToken,
+            refreshToken: granted.refreshToken,
+            idToken: granted.idToken,
+            expiresAt: granted.expiresAt,
+            orgId: granted.orgId,
+            orgRole: granted.orgRole,
+          };
+        } catch (reason) {
+          if (
+            reason instanceof PasswordGrantAuthError &&
+            reason.code === "invalid_credentials"
+          ) {
+            return null;
+          }
+          throw reason;
+        }
+      },
+    }),
     Keycloak({
       clientId: keycloakId,
       clientSecret: keycloakSecret,
@@ -92,27 +134,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     signIn: "/sign-in",
   },
   callbacks: {
-    async jwt({ token, account, profile }) {
+    async jwt({ token, user, account, profile }) {
       const current = token as typeof token & RefreshableToken;
 
+      if (user) {
+        persistAuthorizedUser(current, user);
+      }
+
       if (account?.access_token) {
-        current.accessToken = account.access_token;
-        current.refreshToken = account.refresh_token;
-        current.idToken = account.id_token;
-        current.expiresAt = account.expires_at;
-        current.error = undefined;
+        applyOAuthAccount(current, account);
       }
 
       if (profile && typeof profile === "object") {
         const p = profile as Record<string, unknown>;
-        if (typeof p.org_id === "string") current.orgId = p.org_id;
-        else if (Array.isArray(p.org_id) && typeof p.org_id[0] === "string") {
-          current.orgId = p.org_id[0];
-        }
-        if (typeof p.org_role === "string") current.orgRole = p.org_role;
-        else if (Array.isArray(p.org_role) && typeof p.org_role[0] === "string") {
-          current.orgRole = p.org_role[0];
-        }
+        const orgId = firstStringClaim(p.org_id);
+        const orgRole = firstStringClaim(p.org_role);
+        const email = firstStringClaim(p.email);
+        const name = firstStringClaim(p.name);
+        if (orgId) current.orgId = orgId;
+        if (orgRole) current.orgRole = orgRole;
+        if (email) current.email = email;
+        if (name) current.name = name;
       }
 
       const expiresAt = current.expiresAt ?? 0;
@@ -125,20 +167,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return current;
     },
     async session({ session, token }) {
-      const t = token as RefreshableToken;
-      const s = session as typeof session & {
-        accessToken?: string;
-        idToken?: string;
-        orgId?: string;
-        error?: string;
-        endSessionUrl?: string;
-      };
-      s.accessToken = t.accessToken;
-      s.idToken = t.idToken;
-      s.orgId = t.orgId;
-      s.error = t.error;
-      s.endSessionUrl = `${keycloakIssuer}/protocol/openid-connect/logout`;
-      return s;
+      return attachSessionFromToken(
+        session,
+        token as RefreshableToken,
+        `${keycloakIssuer}/protocol/openid-connect/logout`,
+      );
     },
   },
   trustHost: true,

@@ -147,6 +147,12 @@ services:
       AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://keycloak:8080/realms/atlas/protocol/openid-connect/certs}
       AUTH_AUDIENCE: ${AUTH_AUDIENCE:-atlas-web}
       AUTH_ADMIN_SECRET: ${AUTH_ADMIN_SECRET:-}
+      KEYCLOAK_ADMIN_URL: http://keycloak:8080
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KEYCLOAK_CLIENT_ID: atlas-web
+      KEYCLOAK_CLIENT_SECRET: ${AUTH_KEYCLOAK_SECRET:-atlas-web-dev-secret-change-me}
+      IDENTITY_INVITE_ENABLED: ${IDENTITY_INVITE_ENABLED:-false}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-dev-only-change-me-please-32b}
       DOCUMENT_UPLOAD_DIR: /data/uploads
       # Force MinIO for compose; empty DOCUMENT_BUCKET= in host .env would otherwise win.

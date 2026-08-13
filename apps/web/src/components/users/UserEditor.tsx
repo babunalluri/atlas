@@ -8,7 +8,7 @@ import { Link, useRouter } from "@/i18n/navigation";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
-import { Input, Label, Select } from "@/components/ui/Field";
+import { FieldError, FieldHint, Input, Label, Select } from "@/components/ui/Field";
 import {
   TimezoneSelect,
   browserTimezone,
@@ -20,15 +20,23 @@ import {
   syncTenantUserIdentity,
   updateTenantUser,
 } from "@/lib/api/admin";
-import type {
-  TeamSummary,
-  TenantUser,
-  TenantUserInput,
-  WorkflowSummary,
+import {
+  isProtectedAdminRole,
+  type TeamSummary,
+  type TenantUser,
+  type TenantUserInput,
+  type WorkflowSummary,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
+import { formatApiError } from "@/lib/agentos/client";
+import {
+  EMAIL_ALREADY_IN_USE,
+  isTakenEmail,
+} from "@/lib/validation/email";
 import { formatRelative } from "@/lib/utils";
 import { UserVaultSection } from "@/components/vault/UserVaultSection";
+import { DeleteUserDialog } from "@/components/users/DeleteUserDialog";
+import { passwordError } from "@/components/users/SetPasswordForm";
 
 export function UserEditor({
   initial,
@@ -36,12 +44,14 @@ export function UserEditor({
   teams,
   mode,
   defaultDisplayName = "",
+  takenEmails = [],
 }: {
   initial?: TenantUser;
   workflows: WorkflowSummary[];
   teams: TeamSummary[];
   mode: "create" | "edit";
   defaultDisplayName?: string;
+  takenEmails?: string[];
 }) {
   const router = useRouter();
   const { getAccessToken } = useAgentOsToken();
@@ -72,6 +82,10 @@ export function UserEditor({
   );
   const [busy, setBusy] = useState<"save" | "delete" | "sync" | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [bannerTone, setBannerTone] = useState<"error" | "success">("success");
+  const [password, setPassword] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const needsIdentitySync =
     mode === "edit" &&
     Boolean(initial?.email) &&
@@ -107,14 +121,41 @@ export function UserEditor({
     }));
   }
 
+  function showError(message: string) {
+    setBannerTone("error");
+    setBanner(message);
+  }
+
+  function showSuccess(message: string) {
+    setBannerTone("success");
+    setBanner(message);
+  }
+
   async function save() {
     if (!form.displayName.trim()) {
-      setBanner("Display name is required");
+      showError("Display name is required");
       return;
     }
     if (mode === "create" && !form.email.trim()) {
-      setBanner("Email is required");
+      showError("Email is required");
       return;
+    }
+    const nextEmail = form.email.trim();
+    const currentEmail = (initial?.email ?? "").trim();
+    if (
+      nextEmail &&
+      (mode === "create" || nextEmail.toLowerCase() !== currentEmail.toLowerCase()) &&
+      isTakenEmail(nextEmail, takenEmails)
+    ) {
+      showError(EMAIL_ALREADY_IN_USE);
+      return;
+    }
+    if (mode === "create" || password || passwordConfirm) {
+      const mismatch = passwordError(password, passwordConfirm);
+      if (mismatch) {
+        showError(mismatch);
+        return;
+      }
     }
     setBusy("save");
     setBanner(null);
@@ -123,27 +164,26 @@ export function UserEditor({
       if (mode === "create") {
         const created = await createTenantUser(token, {
           ...form,
-          email: form.email.trim(),
+          email: nextEmail,
+          password,
+          passwordConfirm,
         });
-        if (created.temporaryPassword) {
-          window.sessionStorage.setItem(
-            `atlas_dev_password_${created.id}`,
-            created.temporaryPassword,
-          );
-        }
         router.push(`/admin/users/${created.id}`);
         return;
       }
       if (!initial) return;
       const updated = await updateTenantUser(token, initial.id, {
         displayName: form.displayName,
-        email: form.email.trim() || "",
+        email: nextEmail || "",
         phone: form.phone?.trim() || "",
         role: form.role,
         isActive: form.isActive,
         timezone: form.timezone,
         workflowIds: form.workflowIds,
         teamIds: form.teamIds,
+        ...(password
+          ? { password, passwordConfirm }
+          : {}),
       });
       setForm({
         userId: updated.userId,
@@ -156,10 +196,12 @@ export function UserEditor({
         workflowIds: updated.workflowIds,
         teamIds: updated.teamIds,
       });
-      setBanner("Saved");
+      setPassword("");
+      setPasswordConfirm("");
+      showSuccess("Saved");
       router.refresh();
     } catch (reason) {
-      setBanner(reason instanceof Error ? reason.message : "Save failed");
+      showError(formatApiError(reason, "Save failed"));
     } finally {
       setBusy(null);
     }
@@ -167,13 +209,18 @@ export function UserEditor({
 
   async function remove() {
     if (!initial || mode !== "edit") return;
+    if (isProtectedAdminRole(initial.role)) {
+      showError("Admin users cannot be deleted");
+      setConfirmDelete(false);
+      return;
+    }
     setBusy("delete");
     setBanner(null);
     try {
       await deleteTenantUser(await getAccessToken(), initial.id);
       router.push("/admin/users");
     } catch (reason) {
-      setBanner(reason instanceof Error ? reason.message : "Delete failed");
+      showError(formatApiError(reason, "Delete failed"));
       setBusy(null);
     }
   }
@@ -198,7 +245,7 @@ export function UserEditor({
         workflowIds: updated.workflowIds,
         teamIds: updated.teamIds,
       });
-      setBanner(
+      showSuccess(
         updated.temporaryPassword
           ? `Synced. Temporary password: ${updated.temporaryPassword}`
           : updated.invitePending || updated.userId.startsWith("pending:")
@@ -207,7 +254,7 @@ export function UserEditor({
       );
       router.refresh();
     } catch (reason) {
-      setBanner(reason instanceof Error ? reason.message : "Sync failed");
+      showError(formatApiError(reason, "Sync failed"));
     } finally {
       setBusy(null);
     }
@@ -250,8 +297,8 @@ export function UserEditor({
               </>
             ) : (
               <span>
-                Enter email and name — Atlas invites them into this organization
-                and maps the account automatically.
+                Enter email, password, and role. Atlas creates their Keycloak
+                sign-in in this organization.
               </span>
             )}
           </div>
@@ -283,11 +330,24 @@ export function UserEditor({
               {busy === "sync" ? "Syncing…" : "Sync to sign-in"}
             </Button>
           ) : null}
-          {mode === "edit" ? (
+          {mode === "edit" && initial && isProtectedAdminRole(initial.role) ? (
+            <span title="Admin users cannot be deleted">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled
+                title="Admin users cannot be deleted"
+                aria-label="Admin users cannot be deleted"
+              >
+                <TrashIcon />
+                Delete
+              </Button>
+            </span>
+          ) : mode === "edit" ? (
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => void remove()}
+              onClick={() => setConfirmDelete(true)}
               disabled={busy !== null}
             >
               <TrashIcon />
@@ -304,14 +364,21 @@ export function UserEditor({
             {busy === "save"
               ? tCommon("saving")
               : mode === "create"
-                ? tCommon("invite")
+                ? "Create"
                 : tCommon("save")}
           </Button>
         </EditorActions>
       </header>
 
       {banner ? (
-        <p className="rounded-md border border-teal/30 bg-teal/10 px-3 py-1.5 text-sm">
+        <p
+          role={bannerTone === "error" ? "alert" : "status"}
+          className={
+            bannerTone === "error"
+              ? "rounded-md border border-rose/30 bg-rose/10 px-3 py-1.5 text-sm text-rose"
+              : "rounded-md border border-teal/30 bg-teal/10 px-3 py-1.5 text-sm"
+          }
+        >
           {banner}
         </p>
       ) : null}
@@ -320,7 +387,7 @@ export function UserEditor({
         <div className="grid gap-2.5 sm:grid-cols-2">
           {mode === "edit" ? (
             <div className="sm:col-span-2">
-              <Label htmlFor="user-id" hint="Assigned automatically on invite / first sign-in">
+              <Label htmlFor="user-id" hint="Keycloak account id (sub)">
                 Account ID
               </Label>
               <Input
@@ -345,7 +412,7 @@ export function UserEditor({
             />
           </div>
           <div>
-            <Label htmlFor="email" hint={mode === "create" ? "Invite is sent to this address" : undefined}>
+            <Label htmlFor="email">
               Email
             </Label>
             <Input
@@ -360,7 +427,44 @@ export function UserEditor({
                 }))
               }
             />
+            {bannerTone === "error" &&
+            banner &&
+            /email/i.test(banner) ? (
+              <FieldError message={banner} />
+            ) : null}
           </div>
+          {mode === "create" ||
+          (mode === "edit" && !needsIdentitySync) ? (
+            <div className="grid grid-cols-2 gap-2.5 sm:col-span-2">
+              <div className="min-w-0">
+                <Label htmlFor="user-password">
+                  {mode === "create" ? "Password" : "New password"}
+                </Label>
+                <Input
+                  id="user-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+                <FieldHint>
+                  {mode === "create"
+                    ? "At least 8 characters"
+                    : "Optional · at least 8 characters"}
+                </FieldHint>
+              </div>
+              <div className="min-w-0">
+                <Label htmlFor="user-password-confirm">Confirm password</Label>
+                <Input
+                  id="user-password-confirm"
+                  type="password"
+                  autoComplete="new-password"
+                  value={passwordConfirm}
+                  onChange={(event) => setPasswordConfirm(event.target.value)}
+                />
+              </div>
+            </div>
+          ) : null}
           <div>
             <Label htmlFor="phone" hint="Optional">
               Phone
@@ -512,6 +616,18 @@ export function UserEditor({
           ) : null}
         </ul>
       </section>
+
+      {confirmDelete && initial ? (
+        <DeleteUserDialog
+          user={{
+            displayName: form.displayName || initial.displayName,
+            email: form.email || initial.email,
+          }}
+          busy={busy === "delete"}
+          onClose={() => setConfirmDelete(false)}
+          onConfirm={() => void remove()}
+        />
+      ) : null}
     </div>
   );
 }
