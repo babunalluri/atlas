@@ -18,6 +18,16 @@ DOMAIN_LABELS: dict[WorkspaceDomain, str] = {
     "dental_clinic": "Dental Clinic",
 }
 
+STOCK_BROKER_DESK_TEAMS: tuple[str, ...] = (
+    "learning",
+    "paper-trading",
+    "live-trading",
+)
+
+DOMAIN_DEFAULT_TEAM_SLUGS: dict[WorkspaceDomain, tuple[str, ...]] = {
+    "stock_broker": STOCK_BROKER_DESK_TEAMS,
+}
+
 
 def normalize_domain(value: str | None) -> WorkspaceDomain:
     normalized = (value or "generic").strip().lower().replace("-", "_")

@@ -35,11 +35,14 @@ export function StockBrokerWorkspace({
   data,
   refreshing,
   onRefresh,
+  variant = "admin",
 }: {
   data: DomainDashboard;
   refreshing?: boolean;
   onRefresh: () => void;
+  variant?: "admin" | "customer";
 }) {
+  const customer = variant === "customer";
   const groups = Object.keys(GROUP_LABELS).filter((group) =>
     data.widgets.some((widget) => (widget.group ?? "ops") === group),
   );
@@ -51,10 +54,13 @@ export function StockBrokerWorkspace({
           <WorkspaceDeskChat
             targets={data.chat_targets}
             brokerTools={data.broker_tools ?? []}
+            allowPreview={!customer}
           />
         ) : (
           <div className="flex h-full items-center justify-center px-6 text-center text-sm text-slate-muted">
-            Provision the Stock Broker domain to chat with Learning, Paper trading, and Live trading.
+            {customer
+              ? "Your Learning, Paper, and Live chats are not ready yet. Ask your administrator if this workspace is still being set up."
+              : "Provision the Stock Broker domain to chat with Learning, Paper trading, and Live trading."}
           </div>
         )}
       </section>
@@ -66,12 +72,12 @@ export function StockBrokerWorkspace({
               {data.domain_label} workspace
             </p>
             <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
-              Trading desk
+              {customer ? "Your trading desk" : "Trading desk"}
             </h1>
             <p className="mt-1 max-w-xl text-sm text-slate-muted">
-              Three chats: Learning (concepts and ticker questions), Paper trading, Live
-              trading. Broker widgets load through Live trading’s assigned toolkit. Chart
-              is TradingView. Refresh loads a new snapshot.
+              {customer
+                ? "Three chats: Learning, Paper trading, and Live trading. Use Refresh to load holdings from the toolkit assigned on Live trading."
+                : "Three chats: Learning (concepts and ticker questions), Paper trading, Live trading. Broker widgets load through Live trading’s assigned toolkit. Chart is TradingView. Refresh loads a new snapshot."}
             </p>
           </div>
           <div className="flex flex-col items-end gap-2">
@@ -108,52 +114,65 @@ export function StockBrokerWorkspace({
           </section>
         ))}
 
-        <section className="mt-5 grid gap-3 sm:grid-cols-3">
-          <div className="surface-panel rounded-xl p-4">
-            <p className="th-label">Agents</p>
-            <p className="mt-2 text-xl font-semibold tnum">
-              {data.catalog.published_agents}/{data.catalog.agents}
-            </p>
-            <p className="mt-1 text-xs text-slate-muted">Published / total</p>
-          </div>
-          <div className="surface-panel rounded-xl p-4">
-            <p className="th-label">Teams</p>
-            <p className="mt-2 text-xl font-semibold tnum">
-              {data.catalog.published_teams}/{data.catalog.teams}
-            </p>
-            <p className="mt-1 text-xs text-slate-muted">Published / total</p>
-          </div>
-          <div className="surface-panel rounded-xl p-4">
-            <p className="th-label">Workflows</p>
-            <p className="mt-2 text-xl font-semibold tnum">
-              {data.catalog.published_workflows}/{data.catalog.workflows}
-            </p>
-            <p className="mt-1 text-xs text-slate-muted">Published / total</p>
-          </div>
-        </section>
+        {customer ? null : (
+          <section className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="surface-panel rounded-xl p-4">
+              <p className="th-label">Agents</p>
+              <p className="mt-2 text-xl font-semibold tnum">
+                {data.catalog.published_agents}/{data.catalog.agents}
+              </p>
+              <p className="mt-1 text-xs text-slate-muted">Published / total</p>
+            </div>
+            <div className="surface-panel rounded-xl p-4">
+              <p className="th-label">Teams</p>
+              <p className="mt-2 text-xl font-semibold tnum">
+                {data.catalog.published_teams}/{data.catalog.teams}
+              </p>
+              <p className="mt-1 text-xs text-slate-muted">Published / total</p>
+            </div>
+            <div className="surface-panel rounded-xl p-4">
+              <p className="th-label">Workflows</p>
+              <p className="mt-2 text-xl font-semibold tnum">
+                {data.catalog.published_workflows}/{data.catalog.workflows}
+              </p>
+              <p className="mt-1 text-xs text-slate-muted">Published / total</p>
+            </div>
+          </section>
+        )}
 
         {data.broker_tools?.length ? (
           <section className="mt-4 flex flex-wrap gap-2">
-            {data.broker_tools.map((tool) => (
-              <Link
-                key={tool.id}
-                href="/admin/teams"
-                className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft transition hover:border-teal/40 hover:text-teal"
-              >
-                {tool.name}
-                {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
-                {!tool.published ? " · draft" : ""}
-              </Link>
-            ))}
+            {data.broker_tools.map((tool) =>
+              customer ? (
+                <span
+                  key={tool.id}
+                  className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft"
+                >
+                  {tool.name}
+                  {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
+                </span>
+              ) : (
+                <Link
+                  key={tool.id}
+                  href="/admin/teams"
+                  className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft transition hover:border-teal/40 hover:text-teal"
+                >
+                  {tool.name}
+                  {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
+                  {!tool.published ? " · draft" : ""}
+                </Link>
+              ),
+            )}
           </section>
         ) : (
           <p className="mt-4 text-xs text-slate-muted">
-            No broker toolkit on Live trading yet. Attach Groww, Kite, or any broker
-            tool on that team (and on Learning for ticker quotes), publish, then refresh.
+            {customer
+              ? "Holdings and orders appear here after your broker is connected. Ask in Live trading, or tap Refresh."
+              : "No broker toolkit on Live trading yet. Attach Groww, Kite, or any broker tool on that team (and on Learning for ticker quotes), publish, then refresh."}
           </p>
         )}
 
-        {data.quick_links.length > 0 ? (
+        {!customer && data.quick_links.length > 0 ? (
           <section className="mt-3 flex flex-wrap gap-2">
             {data.quick_links.map((link) => (
               <Link
@@ -167,9 +186,11 @@ export function StockBrokerWorkspace({
           </section>
         ) : null}
 
-        <div className="mt-6">
-          <MetricsDashboard data={data.metrics} compact />
-        </div>
+        {customer ? null : (
+          <div className="mt-6">
+            <MetricsDashboard data={data.metrics} compact />
+          </div>
+        )}
       </section>
     </div>
   );

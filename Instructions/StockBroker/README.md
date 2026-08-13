@@ -16,6 +16,8 @@ Ops publisher / param / feed / compliance agents are **out of this desk**. Tools
 
 Already-provisioned tenants still have the old Ops Desk / Concierge pack until you add the three teams above (or create a new Stock Broker workspace). The desk chat only lists `learning`, `paper-trading`, and `live-trading`.
 
+End users open **`/t/{slug}/chat`** and get that same three-chat desk. Those teams are auto-assigned on provision and when a user is created.
+
 ## What this covers vs the full PRD
 
 | PRD area | Satisfied by Instructions? | Notes |

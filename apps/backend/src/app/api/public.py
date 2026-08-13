@@ -144,7 +144,11 @@ async def get_tenant_branding(slug: str) -> TenantOut:
         if tenant is None or not tenant.is_active:
             raise HTTPException(status_code=404, detail="Tenant not found")
         return TenantOut(
-            id=tenant.id, slug=tenant.slug, name=tenant.name, branding=tenant.branding or {}
+            id=tenant.id,
+            slug=tenant.slug,
+            name=tenant.name,
+            branding=tenant.branding or {},
+            domain=getattr(tenant, "domain", None) or "generic",
         )
 
 

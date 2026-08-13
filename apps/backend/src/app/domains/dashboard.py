@@ -17,11 +17,11 @@ from app.db.models import (
     WorkflowConfig,
 )
 from app.domains.desk_snapshot import DeskSnapshotService
-from app.domains.types import DOMAIN_LABELS, WorkspaceDomain, normalize_domain
+from app.domains.types import DOMAIN_LABELS, STOCK_BROKER_DESK_TEAMS, WorkspaceDomain, normalize_domain
 from app.metrics.service import MetricsService
 from app.tenancy.context import TenantContext
 
-STOCK_BROKER_CHAT_ORDER = ("learning", "paper-trading", "live-trading")
+STOCK_BROKER_CHAT_ORDER = STOCK_BROKER_DESK_TEAMS
 
 
 class DomainDashboardService:
@@ -65,6 +65,43 @@ class DomainDashboardService:
             "metrics": metrics,
             "catalog": catalog,
         }
+
+    async def customer_desk(self, *, desk_snapshot: bool = False) -> dict[str, Any]:
+        """End-user desk: Learning / Paper / Live chats plus broker widgets."""
+        from app.domains.access import assign_domain_default_teams
+        from app.db.repositories import TeamRepository
+
+        await assign_domain_default_teams(
+            self.session, self.context, self.context.user_id
+        )
+        payload = await self.dashboard(days=30, desk_snapshot=desk_snapshot)
+        if payload["domain"] != "stock_broker":
+            return {
+                **payload,
+                "chat_targets": [],
+                "widgets": [],
+                "quick_links": [],
+                "broker_tools": [],
+                "desk_snapshot": None,
+            }
+        if not self.context.can_administer():
+            allowed = {
+                str(team_id)
+                for team_id in await TeamRepository(
+                    self.session, self.context
+                ).assigned_team_ids(self.context.user_id)
+            }
+            payload["chat_targets"] = [
+                row for row in payload["chat_targets"] if row["id"] in allowed
+            ]
+        keep_ids = {"learning", "paper_flow", "live_approval", "broker_tools"}
+        payload["widgets"] = [
+            widget
+            for widget in payload["widgets"]
+            if widget.get("id") in keep_ids or widget.get("group") == "brokers"
+        ]
+        payload["quick_links"] = []
+        return payload
 
     async def _catalog_counts(self) -> dict[str, Any]:
         agents = list(

@@ -106,6 +106,10 @@ async def provision_domain_workspace(
         await workflow_repo.publish(draft.id)
         workflow_ids[spec.slug] = config.id
 
+    from app.domains.access import assign_domain_default_teams
+
+    assigned = await assign_domain_default_teams(session, context, context.user_id)
+
     return {
         "domain": normalized,
         "provisioned": True,
@@ -114,4 +118,5 @@ async def provision_domain_workspace(
         "workflows": {
             slug: str(workflow_id) for slug, workflow_id in workflow_ids.items()
         },
+        "assigned_teams": assigned,
     }

@@ -94,6 +94,7 @@ export interface RunRequest {
 export interface TenantBranding {
   name: string;
   slug: string;
+  domain?: string;
   primaryColor: string;
   accentColor: string;
   logoUrl?: string | null;

@@ -128,6 +128,9 @@ async def create_user(
             await workflows.replace_user_assignments(membership.user_id, body.workflow_ids)
         if body.team_ids:
             await teams.replace_user_assignments(membership.user_id, body.team_ids)
+        from app.domains.access import assign_domain_default_teams
+
+        await assign_domain_default_teams(session, context, membership.user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -230,6 +233,9 @@ async def update_user(
             await workflows.replace_user_assignments(membership.user_id, body.workflow_ids)
         if body.team_ids is not None:
             await teams.replace_user_assignments(membership.user_id, body.team_ids)
+        from app.domains.access import assign_domain_default_teams
+
+        await assign_domain_default_teams(session, context, membership.user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

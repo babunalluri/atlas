@@ -3248,11 +3248,13 @@ export async function getPublicTenantBranding(
   const result = await apiFetch<{
     slug: string;
     name: string;
+    domain?: string;
     branding: Record<string, unknown>;
   }>(`/public/tenants/${tenantSlug}`, { accessToken: "public" });
   return {
     name: result.name,
     slug: result.slug,
+    domain: result.domain || "generic",
     primaryColor:
       typeof result.branding.primaryColor === "string"
         ? result.branding.primaryColor
@@ -3419,6 +3421,16 @@ export async function getDomainDashboard(
   return apiFetch<DomainDashboard>(`/admin/domains/dashboard?${params}`, {
     accessToken,
   });
+}
+
+export async function getCustomerDesk(
+  accessToken: string,
+  deskSnapshot = false,
+): Promise<DomainDashboard> {
+  const params = new URLSearchParams({
+    desk_snapshot: deskSnapshot ? "true" : "false",
+  });
+  return apiFetch<DomainDashboard>(`/api/desk?${params}`, { accessToken });
 }
 
 export type EvalEvaluator =

@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db.models import AgentConfig, Base, TeamConfig, Tenant, WorkflowConfig
+from app.db.models import AgentConfig, Base, TeamAssignment, TeamConfig, Tenant, WorkflowConfig
 from app.main import app
 
 
@@ -24,6 +24,7 @@ async def domains_db(monkeypatch):
     for target in (
         "app.db.session.SessionFactory",
         "app.api.onboarding.SessionFactory",
+        "app.api.public.SessionFactory",
         "app.auth.dependencies.SessionFactory",
     ):
         monkeypatch.setattr(target, make_session)
@@ -87,6 +88,15 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
             "live-trading",
         }
         assert len(workflows) == 2
+        assignments = (
+            await session.scalars(
+                select(TeamAssignment).where(
+                    TeamAssignment.tenant_id == tenant.id,
+                    TeamAssignment.user_id == "broker-admin",
+                )
+            )
+        ).all()
+        assert len(assignments) == 3
 
 
 @pytest.mark.asyncio
@@ -165,6 +175,76 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
             row["id"] == "desk_broker" and row["value"] == "None"
             for row in snap_body["desk_snapshot"]["widgets"]
         )
+
+
+@pytest.mark.asyncio
+async def test_end_user_gets_stock_broker_customer_desk(domains_db):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/admin/onboarding/workspace",
+            headers={
+                "X-Dev-User-ID": "broker-admin",
+                "X-Dev-Org-ID": "org_stock_broker_end",
+                "X-Dev-Org-Role": "org:admin",
+            },
+            json={
+                "name": "Retail Desk",
+                "slug": "retail-desk",
+                "domain": "stock_broker",
+            },
+        )
+    async with domains_db() as session:
+        tenant = await session.scalar(
+            select(Tenant).where(Tenant.auth_org_id == "org_stock_broker_end")
+        )
+        assert tenant is not None
+        tenant_id = str(tenant.id)
+
+    headers = {
+        "X-Dev-User-ID": "retail-trader",
+        "X-Dev-Org-ID": "org_stock_broker_end",
+        "X-Dev-Tenant-Id": tenant_id,
+        "X-Dev-Role": "end_user",
+    }
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        denied = await client.get(
+            "/admin/domains/dashboard",
+            headers=headers,
+        )
+        assert denied.status_code == 403
+
+        branding = await client.get("/public/tenants/retail-desk")
+        assert branding.status_code == 200, branding.text
+        assert branding.json()["domain"] == "stock_broker"
+
+        desk = await client.get("/api/desk", headers=headers)
+        assert desk.status_code == 200, desk.text
+        body = desk.json()
+        assert [row["slug"] for row in body["chat_targets"]] == [
+            "learning",
+            "paper-trading",
+            "live-trading",
+        ]
+        assert body["quick_links"] == []
+        assert {row["id"] for row in body["widgets"]} <= {
+            "learning",
+            "paper_flow",
+            "live_approval",
+            "broker_tools",
+            "desk_broker",
+        }
+
+    async with domains_db() as session:
+        assigned = (
+            await session.scalars(
+                select(TeamAssignment).where(
+                    TeamAssignment.tenant_id == tenant.id,
+                    TeamAssignment.user_id == "retail-trader",
+                )
+            )
+        ).all()
+        assert len(assigned) == 3
 
 
 def test_desk_snapshot_targets_live_and_paper_teams() -> None:

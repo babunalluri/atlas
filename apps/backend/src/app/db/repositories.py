@@ -1009,6 +1009,38 @@ class TeamRepository(TenantRepository):
         )
         return normalized
 
+    async def ensure_user_assignments(
+        self, user_id: str, team_ids: Sequence[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """Add missing published-team assignments without removing existing ones."""
+        existing = set(await self.assigned_team_ids(user_id))
+        added: list[uuid.UUID] = []
+        for team_id in team_ids:
+            if team_id in existing:
+                continue
+            config = await self.get_config(team_id)
+            if config is None or config.published_version_id is None:
+                continue
+            self.session.add(
+                TeamAssignment(
+                    id=new_id(),
+                    tenant_id=self.context.tenant_id,
+                    team_config_id=team_id,
+                    user_id=user_id,
+                    assigned_by=self.context.user_id,
+                )
+            )
+            added.append(team_id)
+        if added:
+            await self.session.flush()
+            await self.audit(
+                action="user.team_assignments.ensure",
+                resource_type="membership",
+                resource_id=user_id,
+                details={"team_ids": [str(value) for value in added]},
+            )
+        return await self.assigned_team_ids(user_id)
+
 
 class MembershipRepository(TenantRepository):
     async def list_users(self) -> Sequence[Membership]:

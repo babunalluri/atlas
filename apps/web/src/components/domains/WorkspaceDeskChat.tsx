@@ -27,9 +27,11 @@ function newId(prefix: string) {
 export function WorkspaceDeskChat({
   targets,
   brokerTools = [],
+  allowPreview = true,
 }: {
   targets: DomainChatTarget[];
   brokerTools?: DomainBrokerTool[];
+  allowPreview?: boolean;
 }) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [teamId, setTeamId] = useState(targets[0]?.id ?? "");
@@ -157,7 +159,7 @@ export function WorkspaceDeskChat({
         teamConfigId: team.id,
         message: text,
         sessionId,
-        preview: !team.published,
+        preview: allowPreview && !team.published,
         signal: controller.signal,
         onEvent: (event: RunEventBase) => {
           if (typeof event.run_id === "string") {

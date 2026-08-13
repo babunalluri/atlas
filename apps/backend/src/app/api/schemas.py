@@ -891,6 +891,7 @@ class TenantOut(BaseModel):
     slug: str
     name: str
     branding: dict[str, Any]
+    domain: str = "generic"
 
 
 class TraceSummaryOut(BaseModel):
