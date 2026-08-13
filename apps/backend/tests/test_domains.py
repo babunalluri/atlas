@@ -175,6 +175,14 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
             row["id"] == "desk_broker" and row["value"] == "None"
             for row in snap_body["desk_snapshot"]["widgets"]
         )
+        book_tabs = {row["tab"] for row in snap_body["desk_snapshot"]["books"]}
+        assert {"orders", "positions", "holdings", "watchlist"} <= book_tabs
+        orders = next(
+            row for row in snap_body["desk_snapshot"]["books"] if row["id"] == "orders"
+        )
+        assert orders["rows"] == []
+        assert orders["columns"]
+        assert orders["error"] is None
 
 
 @pytest.mark.asyncio
@@ -234,6 +242,22 @@ async def test_end_user_gets_stock_broker_customer_desk(domains_db):
             "broker_tools",
             "desk_broker",
         }
+        assert body["desk_snapshot"] is None
+
+        snap = await client.get(
+            "/api/desk",
+            params={"desk_snapshot": "true"},
+            headers=headers,
+        )
+        assert snap.status_code == 200, snap.text
+        snap_body = snap.json()
+        assert snap_body["desk_snapshot"] is not None
+        book_tabs = {row["tab"] for row in snap_body["desk_snapshot"]["books"]}
+        assert {"orders", "positions", "holdings", "watchlist"} <= book_tabs
+        assert all(
+            "rows" in row and "columns" in row
+            for row in snap_body["desk_snapshot"]["books"]
+        )
 
     async with domains_db() as session:
         assigned = (
@@ -253,3 +277,5 @@ def test_desk_snapshot_targets_live_and_paper_teams() -> None:
     assert DESK_TEAM_SLUGS == ("live-trading", "paper-trading")
     assert "get_user_margins" in READ_CAPABILITIES
     assert "get_user_margin" in READ_CAPABILITIES
+    assert "list_orders" in READ_CAPABILITIES
+    assert "get_holdings" in READ_CAPABILITIES

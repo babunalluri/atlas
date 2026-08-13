@@ -3349,6 +3349,22 @@ export interface DomainDashboardWidget {
   value: string;
   hint: string;
   group?: string;
+  kind?: string;
+  columns?: string[];
+  rows?: Array<Record<string, string | number | boolean | null>>;
+}
+
+export interface DomainDeskBook {
+  id: string;
+  label: string;
+  tab: string;
+  via: string | null;
+  team_slug: string | null;
+  source: string | null;
+  columns: string[];
+  rows: Array<Record<string, string | number | boolean | null>>;
+  error: string | null;
+  empty_hint: string;
 }
 
 export interface DomainChatTarget {
@@ -3384,6 +3400,7 @@ export interface DomainDashboard {
     team: { id: string; slug: string; name: string } | null;
     tools: DomainBrokerTool[];
     widgets: DomainDashboardWidget[];
+    books?: DomainDeskBook[];
     error: string | null;
   } | null;
   metrics: MetricsDashboard;

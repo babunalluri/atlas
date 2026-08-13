@@ -2,33 +2,17 @@
 
 import { Link } from "@/i18n/navigation";
 
+import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
 import { MetricsDashboard } from "@/components/metrics/MetricsDashboard";
 import { Button } from "@/components/ui/Button";
-import type { DomainDashboard, DomainDashboardWidget } from "@/lib/api/admin";
-
-const GROUP_LABELS: Record<string, string> = {
-  ops: "Desk activity",
-  risk: "Live trading",
-  signals: "Learning & paper",
-  brokers: "Broker tools",
-};
+import type { DomainDashboard } from "@/lib/api/admin";
 
 function formatFetchedAt(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
   return date.toLocaleString();
-}
-
-function WidgetCard({ widget }: { widget: DomainDashboardWidget }) {
-  return (
-    <div className="surface-panel rounded-xl p-4">
-      <p className="th-label">{widget.label}</p>
-      <p className="mt-2 text-xl font-semibold tnum">{widget.value}</p>
-      <p className="mt-1 text-xs text-slate-muted">{widget.hint}</p>
-    </div>
-  );
 }
 
 export function StockBrokerWorkspace({
@@ -43,9 +27,6 @@ export function StockBrokerWorkspace({
   variant?: "admin" | "customer";
 }) {
   const customer = variant === "customer";
-  const groups = Object.keys(GROUP_LABELS).filter((group) =>
-    data.widgets.some((widget) => (widget.group ?? "ops") === group),
-  );
 
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row">
@@ -76,8 +57,8 @@ export function StockBrokerWorkspace({
             </h1>
             <p className="mt-1 max-w-xl text-sm text-slate-muted">
               {customer
-                ? "Three chats: Learning, Paper trading, and Live trading. Use Refresh to load holdings from the toolkit assigned on Live trading."
-                : "Three chats: Learning (concepts and ticker questions), Paper trading, Live trading. Broker widgets load through Live trading’s assigned toolkit. Chart is TradingView. Refresh loads a new snapshot."}
+                ? "Three chats: Learning, Paper trading, and Live trading. Use Refresh to load orders, positions, and watchlist from the toolkit assigned on Live trading."
+                : "Three chats: Learning (concepts and ticker questions), Paper trading, Live trading. Desk books load through Live trading’s assigned toolkit. Chart is TradingView. Refresh loads a new snapshot."}
             </p>
           </div>
           <div className="flex flex-col items-end gap-2">
@@ -99,20 +80,11 @@ export function StockBrokerWorkspace({
           <TradingViewChartWidget />
         </div>
 
-        {groups.map((group) => (
-          <section key={group} className="mt-5">
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-muted">
-              {GROUP_LABELS[group]}
-            </p>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {data.widgets
-                .filter((widget) => (widget.group ?? "ops") === group)
-                .map((widget) => (
-                  <WidgetCard key={widget.id} widget={widget} />
-                ))}
-            </div>
-          </section>
-        ))}
+        <DeskBooksPanel
+          snapshot={data.desk_snapshot}
+          customer={customer}
+          brokerTools={data.broker_tools ?? []}
+        />
 
         {customer ? null : (
           <section className="mt-5 grid gap-3 sm:grid-cols-3">
@@ -138,38 +110,6 @@ export function StockBrokerWorkspace({
               <p className="mt-1 text-xs text-slate-muted">Published / total</p>
             </div>
           </section>
-        )}
-
-        {data.broker_tools?.length ? (
-          <section className="mt-4 flex flex-wrap gap-2">
-            {data.broker_tools.map((tool) =>
-              customer ? (
-                <span
-                  key={tool.id}
-                  className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft"
-                >
-                  {tool.name}
-                  {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
-                </span>
-              ) : (
-                <Link
-                  key={tool.id}
-                  href="/admin/teams"
-                  className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft transition hover:border-teal/40 hover:text-teal"
-                >
-                  {tool.name}
-                  {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
-                  {!tool.published ? " · draft" : ""}
-                </Link>
-              ),
-            )}
-          </section>
-        ) : (
-          <p className="mt-4 text-xs text-slate-muted">
-            {customer
-              ? "Holdings and orders appear here after your broker is connected. Ask in Live trading, or tap Refresh."
-              : "No broker toolkit on Live trading yet. Attach Groww, Kite, or any broker tool on that team (and on Learning for ticker quotes), publish, then refresh."}
-          </p>
         )}
 
         {!customer && data.quick_links.length > 0 ? (

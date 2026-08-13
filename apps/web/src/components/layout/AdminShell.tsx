@@ -20,9 +20,11 @@ import {
   useSurfaceTheme,
 } from "@/components/layout/ThemeToggle";
 import { Link, usePathname, useRouter } from "@/i18n/navigation";
+import { filterAdminNavItems } from "@/lib/admin-nav";
 import { cn } from "@/lib/utils";
 
 type NavItem = {
+  navKey: string;
   href: string;
   label: string;
   hint: string;
@@ -198,12 +200,13 @@ function useLocalizedNav(isPlatformAdmin: boolean) {
   return useMemo(() => {
     const item = (
       href: string,
-      key: string,
+      navKey: string,
       icon: React.ReactNode,
     ): NavItem => ({
+      navKey,
       href,
-      label: t(`items.${key}`),
-      hint: t(`items.${key}Hint`),
+      label: t(`items.${navKey}`),
+      hint: t(`items.${navKey}Hint`),
       icon,
     });
     const groups = [
@@ -242,7 +245,12 @@ function useLocalizedNav(isPlatformAdmin: boolean) {
           item("/admin/mcp", "mcpServer", icons.mcp),
         ],
       },
-    ];
+    ]
+      .map((group) => ({
+        ...group,
+        items: filterAdminNavItems(group.items, isPlatformAdmin),
+      }))
+      .filter((group) => group.items.length > 0);
     if (!isPlatformAdmin) return groups;
     return [
       {
