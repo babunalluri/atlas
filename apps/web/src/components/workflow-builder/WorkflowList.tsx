@@ -3,6 +3,8 @@
 import { Link, useRouter } from "@/i18n/navigation";
 import { useEffect, useRef, useState } from "react";
 
+import { BuildCatalogNav } from "@/components/catalog/BuildCatalogNav";
+import { CatalogGroupedList } from "@/components/catalog/CatalogGroupedList";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import {
@@ -36,6 +38,7 @@ import type {
   WorkflowSummary,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
+import type { CatalogDomainFilter } from "@/lib/catalog/domain-groups";
 import { formatRelative } from "@/lib/utils";
 
 function toSummary(workflow: WorkflowConfig): WorkflowSummary {
@@ -47,6 +50,7 @@ function toSummary(workflow: WorkflowConfig): WorkflowSummary {
     status: workflow.status,
     stepCount: workflow.steps.length,
     publishedVersion: workflow.publishedVersion,
+    domain: workflow.domain,
     updatedAt: workflow.updatedAt,
   };
 }
@@ -60,6 +64,8 @@ export function WorkflowList({
   const { getAccessToken } = useAgentOsToken();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
+  const [domainFilter, setDomainFilter] =
+    useState<CatalogDomainFilter>("all");
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
@@ -321,6 +327,7 @@ export function WorkflowList({
           Create
         </Link>
       </header>
+      <BuildCatalogNav />
       {error ? <p className="text-sm text-rose">{error}</p> : null}
 
       <section className="table-shell rounded-xl">
@@ -329,6 +336,8 @@ export function WorkflowList({
           total={pageData.total}
           noun="workflows"
           loading={loading}
+          domainFilter={domainFilter}
+          onDomainFilterChange={setDomainFilter}
           onChange={setQuery}
         />
         <div className="flex items-center gap-3 border-b border-line px-4 py-2">
@@ -343,11 +352,20 @@ export function WorkflowList({
           </span>
         </div>
         <ul>
-          {pageData.items.map((workflow) => (
-            <li
-              key={workflow.id}
-              className="border-b border-line/60 last:border-0"
-            >
+          <CatalogGroupedList
+            items={pageData.items}
+            domainFilter={domainFilter}
+            empty={
+              <li className="px-4 py-10 text-center text-sm text-slate-muted">
+                No workflows yet — create one above.
+              </li>
+            }
+            filteredEmpty={
+              <li className="px-4 py-10 text-center text-sm text-slate-muted">
+                No workflows in this domain.
+              </li>
+            }
+            renderItem={(workflow) => (
               <div className="flex items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70">
                 <Link
                   href={`/admin/workflows/${workflow.id}`}
@@ -420,13 +438,8 @@ export function WorkflowList({
                   </Button>
                 </div>
               </div>
-            </li>
-          ))}
-          {pageData.items.length === 0 ? (
-            <li className="px-4 py-10 text-center text-sm text-slate-muted">
-              No workflows yet — create one above.
-            </li>
-          ) : null}
+            )}
+          />
         </ul>
       </section>
 

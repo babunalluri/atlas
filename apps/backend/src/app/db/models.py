@@ -103,6 +103,7 @@ class AgentConfig(Base, TenantScoped, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    domain: Mapped[str] = mapped_column(String(50), default="generic", nullable=False)
     published_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     __table_args__ = (
         Index("uq_agent_tenant_slug", "tenant_id", "slug", unique=True),
@@ -138,6 +139,7 @@ class TeamConfig(Base, TenantScoped, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    domain: Mapped[str] = mapped_column(String(50), default="generic", nullable=False)
     published_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     __table_args__ = (
         Index("uq_team_tenant_slug", "tenant_id", "slug", unique=True),
@@ -226,6 +228,7 @@ class WorkflowConfig(Base, TenantScoped, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    domain: Mapped[str] = mapped_column(String(50), default="generic", nullable=False)
     published_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     __table_args__ = (
         Index("uq_workflow_tenant_slug", "tenant_id", "slug", unique=True),

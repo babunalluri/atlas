@@ -32,6 +32,7 @@ import {
   PLATFORM_TENANT_NAME_COOKIE,
 } from "@/lib/auth/access-context";
 import { useAgentOsToken } from "@/lib/auth/token";
+import { groupCatalogItems } from "@/lib/catalog/domain-groups";
 import { cn } from "@/lib/utils";
 
 type StatusFilter = "all" | "active" | "suspended";
@@ -94,6 +95,11 @@ export function PlatformTenantsPanel({
   const start = (safePage - 1) * PAGE_SIZE;
   const pageItems = filteredTenants.slice(start, start + PAGE_SIZE);
   const end = Math.min(filteredTenants.length, start + PAGE_SIZE);
+
+  const groupedCatalog = useMemo(
+    () => groupCatalogItems(catalog),
+    [catalog],
+  );
 
   useEffect(() => {
     if (!sourceTenantId) {
@@ -479,31 +485,49 @@ export function PlatformTenantsPanel({
               No teams or workflows in this tenant yet.
             </p>
           ) : (
-            <div className="overlay-y-auto max-h-64 space-y-2 rounded-lg border border-line bg-canvas/40 p-3">
-              {catalog.map((item) => {
-                const checked = selectedIds.includes(item.id);
-                return (
-                  <label
-                    key={item.id}
-                    className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 hover:bg-raised/80"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleCatalogItem(item.id)}
-                      className="size-4 accent-teal"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">
-                        {item.name}
-                      </span>
-                      <span className="mono-cell text-slate-muted">
-                        {item.kind} · /{item.slug} · {item.status}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
+            <div className="overlay-y-auto max-h-64 space-y-3 rounded-lg border border-line bg-canvas/40 p-3">
+              {groupedCatalog.map((group) => (
+                <div key={group.domain}>
+                  <p className="th-label mb-1.5">{group.label}</p>
+                  {(["team", "workflow"] as const).map((kind) => {
+                    const rows = group.desks.flatMap((desk) =>
+                      desk.items.filter((item) => item.kind === kind),
+                    );
+                    if (rows.length === 0) return null;
+                    return (
+                      <div key={kind} className="mb-2 last:mb-0">
+                        <p className="px-1 pb-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-muted">
+                          {kind === "team" ? "Teams" : "Workflows"}
+                        </p>
+                        {rows.map((item) => {
+                          const checked = selectedIds.includes(item.id);
+                          return (
+                            <label
+                              key={item.id}
+                              className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 hover:bg-raised/80"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleCatalogItem(item.id)}
+                                className="size-4 accent-teal"
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm font-medium">
+                                  {item.name}
+                                </span>
+                                <span className="mono-cell text-slate-muted">
+                                  {item.kind} · /{item.slug} · {item.status}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           )}
         </div>

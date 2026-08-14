@@ -218,6 +218,7 @@ export interface AgentSummary {
   slug: string;
   status: AgentStatus;
   model: ModelId;
+  domain?: string;
   updatedAt: string;
   publishedVersion?: number | null;
 }
@@ -247,6 +248,7 @@ export interface AgentConfig {
   name: string;
   slug: string;
   description: string;
+  domain?: string;
   instructions: string;
   model: ModelId;
   temperature: number;
@@ -291,6 +293,7 @@ export interface TeamConfig {
   name: string;
   slug: string;
   description: string;
+  domain?: string;
   instructions: string;
   mode: TeamMode;
   model: ModelId;
@@ -332,6 +335,7 @@ export interface TeamSummary {
   status: AgentStatus;
   mode: TeamMode;
   memberCount: number;
+  domain?: string;
   publishedVersion: number | null;
   updatedAt: string;
 }
@@ -365,6 +369,7 @@ export interface WorkflowConfig {
   name: string;
   slug: string;
   description: string;
+  domain?: string;
   mode: WorkflowMode;
   status: AgentStatus;
   steps: WorkflowStep[];
@@ -380,6 +385,7 @@ export interface WorkflowSummary {
   mode: WorkflowMode;
   status: AgentStatus;
   stepCount: number;
+  domain?: string;
   publishedVersion: number | null;
   updatedAt: string;
 }

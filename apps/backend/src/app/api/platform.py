@@ -187,6 +187,7 @@ class TenantCatalogItemOut(BaseModel):
     slug: str
     kind: str
     status: str
+    domain: str = "generic"
 
 
 class TenantImportIn(BaseModel):
@@ -676,6 +677,7 @@ async def get_tenant_catalog(
                 slug=item.slug,
                 kind=item.kind,
                 status=item.status,
+                domain=item.domain,
             )
             for item in items
         ]

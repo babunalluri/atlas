@@ -3,6 +3,8 @@
 import { Link, useRouter } from "@/i18n/navigation";
 import { useEffect, useRef, useState } from "react";
 
+import { BuildCatalogNav } from "@/components/catalog/BuildCatalogNav";
+import { CatalogGroupedList } from "@/components/catalog/CatalogGroupedList";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import {
@@ -35,6 +37,7 @@ import type {
   TeamVersionDetail,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
+import type { CatalogDomainFilter } from "@/lib/catalog/domain-groups";
 import { formatRelative } from "@/lib/utils";
 
 function toSummary(team: TeamConfig): TeamSummary {
@@ -45,6 +48,7 @@ function toSummary(team: TeamConfig): TeamSummary {
     status: team.status,
     mode: team.mode,
     memberCount: team.members.length,
+    domain: team.domain,
     publishedVersion: team.publishedVersion,
     updatedAt: team.updatedAt,
   };
@@ -59,6 +63,8 @@ export function TeamList({
   const { getAccessToken } = useAgentOsToken();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
+  const [domainFilter, setDomainFilter] =
+    useState<CatalogDomainFilter>("all");
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
@@ -304,6 +310,7 @@ export function TeamList({
           Create
         </Link>
       </header>
+      <BuildCatalogNav />
       {error ? <p className="text-sm text-rose">{error}</p> : null}
 
       <section className="table-shell rounded-xl">
@@ -312,6 +319,8 @@ export function TeamList({
           total={pageData.total}
           noun="teams"
           loading={loading}
+          domainFilter={domainFilter}
+          onDomainFilterChange={setDomainFilter}
           onChange={setQuery}
         />
         <div className="flex items-center gap-3 border-b border-line px-4 py-2">
@@ -326,8 +335,20 @@ export function TeamList({
           </span>
         </div>
         <ul>
-          {pageData.items.map((team) => (
-            <li key={team.id} className="border-b border-line/60 last:border-0">
+          <CatalogGroupedList
+            items={pageData.items}
+            domainFilter={domainFilter}
+            empty={
+              <li className="px-4 py-10 text-center text-sm text-slate-muted">
+                No teams yet — create one above, then add published agents.
+              </li>
+            }
+            filteredEmpty={
+              <li className="px-4 py-10 text-center text-sm text-slate-muted">
+                No teams in this domain.
+              </li>
+            }
+            renderItem={(team) => (
               <div className="flex items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70">
                 <Link
                   href={`/admin/teams/${team.id}`}
@@ -400,13 +421,8 @@ export function TeamList({
                   </Button>
                 </div>
               </div>
-            </li>
-          ))}
-          {pageData.items.length === 0 ? (
-            <li className="px-4 py-10 text-center text-sm text-slate-muted">
-              No teams yet — create one above, then add published agents.
-            </li>
-          ) : null}
+            )}
+          />
         </ul>
       </section>
 

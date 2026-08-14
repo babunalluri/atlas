@@ -145,6 +145,7 @@ async def list_workflow_catalog(
                 status="published" if published else "draft",
                 mode=editable.mode if editable else "sequential",
                 step_count=step_count,
+                domain=config.domain or "generic",
                 published_version=published.version if published else None,
                 updated_at=config.updated_at,
             )
@@ -279,6 +280,7 @@ async def clone_workflow(
         slug=new_slug,
         name=copy_name(source.name),
         description=source.description,
+        domain=source.domain,
     )
     if editable is not None:
         steps = await repo.steps(editable.id)

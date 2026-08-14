@@ -252,3 +252,88 @@ async def test_catalog_lists_source_teams_and_workflows(
     assert team.id in ids
     assert workflow.id in ids
     assert all(item.kind in {"team", "workflow"} for item in items)
+
+
+@pytest.mark.asyncio
+async def test_import_preserves_stock_broker_domain_into_generic_tenant(
+    session, tenant_a, tenant_b
+):
+    source = await session.get(Tenant, tenant_a.tenant_id)
+    destination = await session.get(Tenant, tenant_b.tenant_id)
+    assert source is not None and destination is not None
+    source.domain = "stock_broker"
+    destination.domain = "generic"
+    await session.flush()
+
+    session.info["tenant_id"] = tenant_a.tenant_id
+    agents = AgentRepository(session, tenant_a)
+    agent = await agents.create_config(slug="learning-guide", name="Learning Guide")
+    await agents.create_draft(
+        config_id=agent.id,
+        instructions="Teach",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+    )
+    teams = TeamRepository(session, tenant_a)
+    team = await teams.create_config(slug="learning", name="Learning")
+    await teams.create_draft(
+        config_id=team.id,
+        instructions="Route",
+        mode="route",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[agent.id],
+        tools=[],
+    )
+    custom = await agents.create_config(slug="research-bot", name="Research")
+    await agents.create_draft(
+        config_id=custom.id,
+        instructions="Research",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+    )
+    custom_team = await teams.create_config(slug="research-desk", name="Research desk")
+    await teams.create_draft(
+        config_id=custom_team.id,
+        instructions="Coordinate research",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[custom.id],
+        tools=[],
+    )
+
+    bundle = await collect_import_bundle(
+        session,
+        tenant_a,
+        team_ids=[team.id, custom_team.id],
+        workflow_ids=[],
+    )
+    assert bundle.source_domain == "stock_broker"
+    assert bundle.agents[agent.id].domain == "stock_broker"
+    assert bundle.teams[team.id].domain == "stock_broker"
+    assert bundle.agents[custom.id].domain == "stock_broker"
+    assert bundle.teams[custom_team.id].domain == "stock_broker"
+
+    session.info["tenant_id"] = tenant_b.tenant_id
+    dest_context = TenantContext(
+        tenant_id=tenant_b.tenant_id,
+        user_id="platform-owner",
+        role=Role.platform_admin,
+        auth_org_id=tenant_b.auth_org_id,
+    )
+    result = await materialize_import_bundle(session, dest_context, bundle)
+
+    dest_agents = AgentRepository(session, dest_context)
+    dest_teams = TeamRepository(session, dest_context)
+    dest_guide = await dest_agents.get_config(uuid.UUID(result.agents[str(agent.id)]))
+    dest_learning = await dest_teams.get_config(uuid.UUID(result.teams[str(team.id)]))
+    dest_custom = await dest_agents.get_config(uuid.UUID(result.agents[str(custom.id)]))
+    assert dest_guide is not None
+    assert dest_learning is not None
+    assert dest_custom is not None
+    assert dest_guide.domain == "stock_broker"
+    assert dest_learning.domain == "stock_broker"
+    assert dest_custom.domain == "stock_broker"
+    assert dest_guide.slug == "learning-guide"
+

@@ -2,6 +2,10 @@
 
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
+import {
+  CATALOG_DOMAIN_FILTERS,
+  type CatalogDomainFilter,
+} from "@/lib/catalog/domain-groups";
 import { cn } from "@/lib/utils";
 
 export type CatalogStatusFilter = "all" | "published" | "draft";
@@ -32,12 +36,16 @@ export function CatalogControls({
   noun,
   onChange,
   loading = false,
+  domainFilter,
+  onDomainFilterChange,
 }: {
   query: CatalogQuery;
   total: number;
   noun: string;
   onChange: (next: CatalogQuery) => void;
   loading?: boolean;
+  domainFilter?: CatalogDomainFilter;
+  onDomainFilterChange?: (next: CatalogDomainFilter) => void;
 }) {
   const totalPages = Math.max(1, Math.ceil(total / query.pageSize));
   const start = total === 0 ? 0 : (query.page - 1) * query.pageSize + 1;
@@ -73,6 +81,25 @@ export function CatalogControls({
             </button>
           ))}
         </div>
+        {domainFilter && onDomainFilterChange ? (
+          <div className="flex flex-wrap gap-1">
+            {CATALOG_DOMAIN_FILTERS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => onDomainFilterChange(option.value)}
+                className={cn(
+                  "rounded-md border px-2.5 py-1.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas",
+                  domainFilter === option.value
+                    ? "border-line-strong bg-mist text-ink"
+                    : "border-transparent bg-raised text-slate-muted hover:bg-mist",
+                )}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-muted">
         <p>

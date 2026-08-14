@@ -37,6 +37,7 @@ async def provision_domain_workspace(
             slug=spec.slug,
             name=spec.name,
             description=spec.description,
+            domain=normalized,
         )
         draft = await agent_repo.create_draft(
             config_id=config.id,
@@ -53,6 +54,7 @@ async def provision_domain_workspace(
             slug=spec.slug,
             name=spec.name,
             description=spec.description,
+            domain=normalized,
         )
         draft = await team_repo.create_draft(
             config_id=config.id,
@@ -97,6 +99,7 @@ async def provision_domain_workspace(
             slug=spec.slug,
             name=spec.name,
             description=spec.description,
+            domain=normalized,
         )
         draft = await workflow_repo.create_draft(
             config_id=config.id,

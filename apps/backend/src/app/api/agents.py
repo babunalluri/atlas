@@ -127,6 +127,7 @@ async def list_agent_catalog(
                 name=config.name,
                 status="published" if published else "draft",
                 model_id=editable.model_id if editable else "openai:gpt-4.1-mini",
+                domain=config.domain or "generic",
                 published_version=published.version if published else None,
                 updated_at=config.updated_at,
             )
@@ -235,6 +236,7 @@ async def clone_agent(
         slug=new_slug,
         name=copy_name(source.name),
         description=source.description,
+        domain=source.domain,
     )
     try:
         await repo.create_draft(

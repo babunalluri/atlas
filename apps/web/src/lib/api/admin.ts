@@ -435,6 +435,7 @@ export async function listAgentCatalog(
       name: string;
       status: "draft" | "published" | "archived";
       model_id: string;
+      domain?: string;
       published_version: number | null;
       updated_at: string;
     }>;
@@ -449,6 +450,7 @@ export async function listAgentCatalog(
       slug: item.slug,
       status: item.status,
       model: frontendModel(item.model_id),
+      domain: item.domain || "generic",
       publishedVersion: item.published_version,
       updatedAt: item.updated_at,
     })),
@@ -470,6 +472,7 @@ export async function listTeamCatalog(
       status: "draft" | "published" | "archived";
       mode: "route" | "coordinate";
       member_count: number;
+      domain?: string;
       published_version: number | null;
       updated_at: string;
     }>;
@@ -485,6 +488,7 @@ export async function listTeamCatalog(
       status: item.status,
       mode: item.mode,
       memberCount: item.member_count,
+      domain: item.domain || "generic",
       publishedVersion: item.published_version,
       updatedAt: item.updated_at,
     })),
@@ -506,6 +510,7 @@ export async function listWorkflowCatalog(
       status: "draft" | "published" | "archived";
       mode: "sequential" | "parallel";
       step_count: number;
+      domain?: string;
       published_version: number | null;
       updated_at: string;
     }>;
@@ -521,6 +526,7 @@ export async function listWorkflowCatalog(
       mode: item.mode,
       status: item.status,
       stepCount: item.step_count,
+      domain: item.domain || "generic",
       publishedVersion: item.published_version,
       updatedAt: item.updated_at,
     })),
@@ -3961,6 +3967,7 @@ export interface PlatformCatalogItem {
   slug: string;
   kind: "team" | "workflow";
   status: "draft" | "published";
+  domain: string;
 }
 
 export async function listPlatformTenantCatalog(
@@ -3974,6 +3981,7 @@ export async function listPlatformTenantCatalog(
       slug: string;
       kind: "team" | "workflow";
       status: "draft" | "published";
+      domain?: string;
     }>
   >(`/admin/platform/tenants/${tenantId}/catalog`, { accessToken });
   return rows.map((row) => ({
@@ -3982,6 +3990,7 @@ export async function listPlatformTenantCatalog(
     slug: row.slug,
     kind: row.kind,
     status: row.status,
+    domain: row.domain || "generic",
   }));
 }
 

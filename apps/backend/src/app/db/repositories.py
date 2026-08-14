@@ -49,6 +49,16 @@ from app.tenancy.context import TenantContext
 from app.tenancy.ids import new_id, validate_slug
 
 
+async def _stored_config_domain(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    domain: str | None,
+) -> str:
+    from app.domains.catalog_groups import stored_config_domain
+
+    return await stored_config_domain(session, tenant_id, domain)
+
+
 def _validate_cel_condition_expression(expression: str) -> None:
     """Reject invalid CEL; fail closed when the evaluator is unavailable."""
     try:
@@ -174,7 +184,12 @@ class AgentRepository(TenantRepository):
         )
 
     async def create_config(
-        self, *, slug: str, name: str, description: str | None = None
+        self,
+        *,
+        slug: str,
+        name: str,
+        description: str | None = None,
+        domain: str | None = None,
     ) -> AgentConfig:
         config = AgentConfig(
             id=new_id(),
@@ -182,6 +197,9 @@ class AgentRepository(TenantRepository):
             slug=validate_slug(slug),
             name=name,
             description=description,
+            domain=await _stored_config_domain(
+                self.session, self.context.tenant_id, domain
+            ),
         )
         self.session.add(config)
         await self.session.flush()
@@ -570,7 +588,12 @@ class TeamRepository(TenantRepository):
         )
 
     async def create_config(
-        self, *, slug: str, name: str, description: str | None = None
+        self,
+        *,
+        slug: str,
+        name: str,
+        description: str | None = None,
+        domain: str | None = None,
     ) -> TeamConfig:
         config = TeamConfig(
             id=new_id(),
@@ -578,6 +601,9 @@ class TeamRepository(TenantRepository):
             slug=validate_slug(slug),
             name=name,
             description=description,
+            domain=await _stored_config_domain(
+                self.session, self.context.tenant_id, domain
+            ),
         )
         self.session.add(config)
         await self.session.flush()
@@ -1465,7 +1491,12 @@ class WorkflowRepository(TenantRepository):
         )
 
     async def create_config(
-        self, *, slug: str, name: str, description: str | None = None
+        self,
+        *,
+        slug: str,
+        name: str,
+        description: str | None = None,
+        domain: str | None = None,
     ) -> WorkflowConfig:
         config = WorkflowConfig(
             id=new_id(),
@@ -1473,6 +1504,9 @@ class WorkflowRepository(TenantRepository):
             slug=validate_slug(slug),
             name=name,
             description=description,
+            domain=await _stored_config_domain(
+                self.session, self.context.tenant_id, domain
+            ),
         )
         self.session.add(config)
         await self.session.flush()

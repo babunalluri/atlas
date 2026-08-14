@@ -125,6 +125,7 @@ async def list_team_catalog(
                 status="published" if published else "draft",
                 mode=editable.mode if editable else "coordinate",
                 member_count=member_count,
+                domain=config.domain or "generic",
                 published_version=published.version if published else None,
                 updated_at=config.updated_at,
             )
@@ -232,6 +233,7 @@ async def clone_team(
         slug=new_slug,
         name=copy_name(source.name),
         description=source.description,
+        domain=source.domain,
     )
     try:
         await repo.create_draft(

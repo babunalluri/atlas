@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.copy_helpers import unique_copy_slug
+from app.db.models import Tenant
 from app.db.repositories import (
     AgentRepository,
     KnowledgeRepository,
@@ -21,6 +22,7 @@ from app.db.repositories import (
     ToolDefinitionVersionRepository,
     WorkflowRepository,
 )
+from app.domains.catalog_groups import resolve_catalog_domain
 from app.tenancy.context import TenantContext
 
 
@@ -31,6 +33,7 @@ class ImportCatalogItem:
     slug: str
     kind: str  # team | workflow
     status: str  # draft | published
+    domain: str = "generic"
 
 
 @dataclass
@@ -66,6 +69,7 @@ class _AgentSnap:
     slug: str
     name: str
     description: str | None
+    domain: str
     instructions: str
     model_id: str
     temperature: float
@@ -80,6 +84,7 @@ class _TeamSnap:
     slug: str
     name: str
     description: str | None
+    domain: str
     instructions: str
     mode: str
     model_id: str
@@ -94,6 +99,7 @@ class _WorkflowSnap:
     slug: str
     name: str
     description: str | None
+    domain: str
     mode: str
     steps: list[dict[str, Any]]
 
@@ -120,7 +126,16 @@ class ImportBundle:
     workflows: dict[uuid.UUID, _WorkflowSnap] = field(default_factory=dict)
     tools: dict[uuid.UUID, _ToolSnap] = field(default_factory=dict)
     knowledge_bases: dict[uuid.UUID, _KnowledgeSnap] = field(default_factory=dict)
+    source_domain: str = "generic"
     had_credentials: bool = False
+
+
+def _resource_domain(config: Any, bundle: ImportBundle) -> str:
+    return resolve_catalog_domain(
+        slug=config.slug,
+        stored_domain=getattr(config, "domain", None),
+        tenant_domain=bundle.source_domain,
+    )
 
 
 def _binding_dict(binding: Any) -> dict[str, Any]:
@@ -136,6 +151,8 @@ async def list_tenant_catalog(
     session: AsyncSession, context: TenantContext
 ) -> list[ImportCatalogItem]:
     """List teams and workflows available to pick for import."""
+    tenant = await session.get(Tenant, context.tenant_id)
+    tenant_domain = tenant.domain if tenant else "generic"
     items: list[ImportCatalogItem] = []
     for config in await TeamRepository(session, context).list_configs():
         items.append(
@@ -145,6 +162,11 @@ async def list_tenant_catalog(
                 slug=config.slug,
                 kind="team",
                 status="published" if config.published_version_id else "draft",
+                domain=resolve_catalog_domain(
+                    slug=config.slug,
+                    stored_domain=getattr(config, "domain", None),
+                    tenant_domain=tenant_domain,
+                ),
             )
         )
     for config in await WorkflowRepository(session, context).list_configs():
@@ -155,9 +177,14 @@ async def list_tenant_catalog(
                 slug=config.slug,
                 kind="workflow",
                 status="published" if config.published_version_id else "draft",
+                domain=resolve_catalog_domain(
+                    slug=config.slug,
+                    stored_domain=getattr(config, "domain", None),
+                    tenant_domain=tenant_domain,
+                ),
             )
         )
-    items.sort(key=lambda item: (item.kind, item.name.lower()))
+    items.sort(key=lambda item: (item.domain, item.kind, item.name.lower()))
     return items
 
 
@@ -291,6 +318,7 @@ async def _collect_agent(
         slug=config.slug,
         name=config.name,
         description=config.description,
+        domain=_resource_domain(config, bundle),
         instructions=editable.instructions,
         model_id=editable.model_id,
         temperature=editable.temperature,
@@ -337,6 +365,7 @@ async def _collect_team(
         slug=config.slug,
         name=config.name,
         description=config.description,
+        domain=_resource_domain(config, bundle),
         instructions=editable.instructions,
         mode=editable.mode,
         model_id=editable.model_id,
@@ -390,6 +419,7 @@ async def _collect_workflow(
         slug=config.slug,
         name=config.name,
         description=config.description,
+        domain=_resource_domain(config, bundle),
         mode=editable.mode,
         steps=steps_out,
     )
@@ -405,6 +435,8 @@ async def collect_import_bundle(
     if not team_ids and not workflow_ids:
         raise ValueError("Select at least one team or workflow to import")
     bundle = ImportBundle()
+    tenant = await session.get(Tenant, context.tenant_id)
+    bundle.source_domain = tenant.domain if tenant else "generic"
     for team_id in team_ids:
         await _collect_team(session, context, bundle, team_id)
     for workflow_id in workflow_ids:
@@ -532,6 +564,7 @@ async def materialize_import_bundle(
             slug=await _allocate_slug(snap.slug, agent_slug_taken),
             name=snap.name,
             description=snap.description,
+            domain=snap.domain,
         )
         tools = _remap_tools(snap.tools, tool_map, result.warnings)
         kb_id = kb_map.get(snap.knowledge_base_id) if snap.knowledge_base_id else None
@@ -558,6 +591,7 @@ async def materialize_import_bundle(
             slug=await _allocate_slug(snap.slug, team_slug_taken),
             name=snap.name,
             description=snap.description,
+            domain=snap.domain,
         )
         member_ids = []
         for member_id in snap.member_config_ids:
@@ -588,6 +622,7 @@ async def materialize_import_bundle(
             slug=await _allocate_slug(snap.slug, workflow_slug_taken),
             name=snap.name,
             description=snap.description,
+            domain=snap.domain,
         )
         steps = []
         for step in snap.steps:

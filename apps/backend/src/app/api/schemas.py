@@ -44,6 +44,7 @@ class AgentCatalogItemOut(BaseModel):
     name: str
     status: str
     model_id: str
+    domain: str = "generic"
     published_version: int | None = None
     updated_at: datetime
 
@@ -55,6 +56,7 @@ class TeamCatalogItemOut(BaseModel):
     status: str
     mode: str
     member_count: int = 0
+    domain: str = "generic"
     published_version: int | None = None
     updated_at: datetime
 
@@ -66,6 +68,7 @@ class WorkflowCatalogItemOut(BaseModel):
     status: str
     mode: str
     step_count: int = 0
+    domain: str = "generic"
     published_version: int | None = None
     updated_at: datetime
 
