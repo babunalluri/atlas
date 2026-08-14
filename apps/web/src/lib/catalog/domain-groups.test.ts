@@ -69,7 +69,7 @@ describe("groupCatalogItems", () => {
     ]);
   });
 
-  it("filters by domain pill", () => {
+  it("filters by selected domain", () => {
     const groups = groupCatalogItems(
       [
         { id: "1", slug: "learning", domain: "stock_broker" },

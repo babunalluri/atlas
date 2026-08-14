@@ -1,3 +1,4 @@
+import { composeDisplayName } from "@/lib/auth/user-identity";
 import {
   resolveKeycloakClientId,
   resolveKeycloakInternalIssuer,
@@ -34,6 +35,27 @@ export function firstStringClaim(value: unknown): string | undefined {
   return undefined;
 }
 
+const ADMIN_ORG_ROLE_PREFERENCE = [
+  "platform_admin",
+  "org:owner",
+  "org:admin",
+  "admin",
+  "tenant_admin",
+];
+
+/** Prefer an admin org_role when Keycloak emits a mixed list. */
+export function privilegedOrgRole(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    const roles = value.filter(
+      (item): item is string => typeof item === "string" && Boolean(item.trim()),
+    );
+    for (const preferred of ADMIN_ORG_ROLE_PREFERENCE) {
+      if (roles.includes(preferred)) return preferred;
+    }
+  }
+  return firstStringClaim(value);
+}
+
 export function decodeJwtPayload(token: string): Record<string, unknown> {
   const segment = token.split(".")[1];
   if (!segment) {
@@ -64,10 +86,6 @@ export function sessionFromPasswordGrant(tokens: {
   if (!sub) {
     throw new PasswordGrantAuthError("unavailable");
   }
-  const given = firstStringClaim(claims.given_name);
-  const family = firstStringClaim(claims.family_name);
-  const composed =
-    given && family ? `${given} ${family}` : given || family || undefined;
   return {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
@@ -75,13 +93,16 @@ export function sessionFromPasswordGrant(tokens: {
     expiresAt: Math.floor(Date.now() / 1000) + Number(tokens.expires_in ?? 300),
     sub,
     email: firstStringClaim(claims.email),
-    name:
-      firstStringClaim(claims.name) ||
-      composed ||
-      firstStringClaim(claims.preferred_username) ||
-      firstStringClaim(claims.email),
+    name: composeDisplayName({
+      name: firstStringClaim(claims.name),
+      givenName: firstStringClaim(claims.given_name),
+      familyName: firstStringClaim(claims.family_name),
+      fallback:
+        firstStringClaim(claims.preferred_username) ||
+        firstStringClaim(claims.email),
+    }),
     orgId: firstStringClaim(claims.org_id),
-    orgRole: firstStringClaim(claims.org_role),
+    orgRole: privilegedOrgRole(claims.org_role),
   };
 }
 

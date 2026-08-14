@@ -6,7 +6,10 @@ import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AuthControls } from "@/components/auth/AuthControls";
-import { sessionLooksSignedIn } from "@/lib/auth/auth-session";
+import {
+  sessionLooksSignedIn,
+  visibleAuthSession,
+} from "@/lib/auth/auth-session";
 import { LanguageSwitcher } from "@/components/i18n/LanguageSwitcher";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
@@ -355,7 +358,7 @@ export function AdminShell({
   const tCommon = useTranslations("common");
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const { data: clientSession, status } = useSession();
-  const session = clientSession ?? serverSession;
+  const session = visibleAuthSession(status, clientSession, serverSession);
   const orgId = (session as { orgId?: string } | null)?.orgId;
   const allowDevBypass = process.env.NEXT_PUBLIC_DEV_AUTH === "true";
   const { theme, changeTheme } = useSurfaceTheme("admin");
@@ -373,8 +376,8 @@ export function AdminShell({
 
   useEffect(() => {
     if (allowDevBypass) return;
-    if (status === "loading" && !sessionLooksSignedIn(serverSession)) return;
-    if (sessionLooksSignedIn(clientSession) || sessionLooksSignedIn(serverSession)) {
+    if (status === "loading") return;
+    if (status === "authenticated" || sessionLooksSignedIn(clientSession)) {
       return;
     }
     if (status !== "unauthenticated") return;
@@ -388,7 +391,6 @@ export function AdminShell({
     locale,
     pathname,
     router,
-    serverSession,
     status,
   ]);
 

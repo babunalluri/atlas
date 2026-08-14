@@ -13,7 +13,9 @@ from app.auth.identity_admin import (
     IdentityAdminClient,
     IdentityForbiddenError,
     IdentityPasswordError,
+    IdentityProvisionError,
     IdentityUserExistsError,
+    humanize_identity_error,
     validate_password,
 )
 from app.core.settings import Settings
@@ -45,6 +47,7 @@ class FakeKeycloak:
         self.group_members: dict[str, set[str]] = {}
         self.search_misses = 0
         self.seq = 0
+        self.profile_put_error: str | None = None
 
     def _id(self, prefix: str) -> str:
         self.seq += 1
@@ -173,8 +176,22 @@ class FakeKeycloak:
             if extra == "" and method == "PUT":
                 if user is None:
                     return httpx.Response(404, json={"error": "User not found"})
+                if self.profile_put_error:
+                    return httpx.Response(
+                        400, json={"errorMessage": self.profile_put_error}
+                    )
                 new_email = str(body.get("email") or "").strip().lower()
                 new_username = str(body.get("username") or "").strip().lower()
+                current_username = str(user.get("username") or "").strip().lower()
+                if new_username and new_username != current_username:
+                    return httpx.Response(
+                        400,
+                        json={
+                            "field": "username",
+                            "errorMessage": "error-user-attribute-read-only",
+                            "params": ["username"],
+                        },
+                    )
                 for other_id, other in self.users.items():
                     if other_id == user_id:
                         continue
@@ -400,13 +417,62 @@ async def test_update_org_user_profile_email_role_and_password():
         password=updated_password,
     )
     user = fake.users[created.user_id]
-    assert user["username"] == "ops.lead@acme.test"
+    assert user["username"] == "ops@acme.test"
     assert user["email"] == "ops.lead@acme.test"
     assert user["firstName"] == "Ops"
     assert user["lastName"] == "Lead"
     assert user["attributes"]["org_role"] == ["org:admin"]
     assert fake.passwords[created.user_id] == updated_password
     assert updated_password not in str(user)
+
+
+@pytest.mark.asyncio
+async def test_create_org_user_single_word_display_name_sets_last_name():
+    fake = FakeKeycloak()
+    client = _client(fake)
+    created = await client.create_org_user(
+        email="babu@atlas.test",
+        display_name="Babu",
+        role=Role.end_user,
+        organization_id="org_demo_acme",
+        password=MEMBER_PASSWORD,
+    )
+    user = fake.users[created.user_id]
+    assert user["firstName"] == "Babu"
+    assert user["lastName"] == "Babu"
+
+
+@pytest.mark.asyncio
+async def test_update_org_user_applies_password_when_profile_is_read_only():
+    fake = FakeKeycloak()
+    client = _client(fake)
+    created = await client.create_org_user(
+        email="ops@acme.test",
+        display_name="Ops",
+        role=Role.end_user,
+        organization_id="org_demo_acme",
+        password=MEMBER_PASSWORD,
+    )
+    fake.profile_put_error = "error-user-attribute-read-only"
+    updated_password = "updated-pass-1"  # noqa: S105
+    with pytest.raises(IdentityProvisionError, match="cannot be changed"):
+        await client.update_org_user(
+            created.user_id,
+            email="ops.lead@acme.test",
+            display_name="Ops Lead",
+            password=updated_password,
+        )
+    assert fake.passwords[created.user_id] == updated_password
+    assert fake.users[created.user_id]["email"] == "ops@acme.test"
+
+
+def test_humanize_read_only_attribute_error():
+    assert "cannot be changed" in humanize_identity_error(
+        "error-user-attribute-read-only"
+    )
+    assert humanize_identity_error("User exists with same email") == (
+        "User exists with same email"
+    )
 
 
 @pytest.mark.asyncio

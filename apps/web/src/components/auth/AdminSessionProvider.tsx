@@ -5,10 +5,11 @@ import { SessionProvider } from "next-auth/react";
 import type { ReactNode } from "react";
 
 /**
- * Hydrate the admin tree with the same `auth()` session that rendered the page
+ * Hydrate a route tree with the same `auth()` session that rendered the page
  * so useSession() is authenticated on first paint (not "Sign in").
+ * Sign out must hard-navigate off this tree so this snapshot cannot stick.
  */
-export function AdminSessionProvider({
+export function HydratedSessionProvider({
   session,
   children,
 }: {

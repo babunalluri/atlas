@@ -17,9 +17,6 @@ async def list_available_teams(
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> list[dict[str, object]]:
     """List published teams the current user may run."""
-    from app.domains.access import assign_domain_default_teams
-
-    await assign_domain_default_teams(session, context, context.user_id)
     membership = await MembershipRepository(session, context).get_by_user_id(
         context.user_id
     )

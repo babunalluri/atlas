@@ -15,13 +15,56 @@ import {
   cancelConfiguredRun,
   streamConfiguredTeam,
 } from "@/lib/agentos/client";
+import { DeskChatPills } from "@/components/domains/DeskChat";
 import type { DomainBrokerTool, DomainChatTarget } from "@/lib/api/admin";
 import type { ChatMessage } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
-import { cn } from "@/lib/utils";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function deskWelcome(
+  target: DomainChatTarget | null,
+  brokerLabel: string,
+): string {
+  if (!target) {
+    return "No desk chats are assigned to you yet. Ask your administrator to assign a team.";
+  }
+  if (target.slug === "learning") {
+    return "You're in Learning. Ask concepts, or generic ticker questions like “What’s TCS doing?” — I can use quotes if a toolkit is assigned, but I won’t predict prices. Paper fills go to Paper trading; holdings to Live trading.";
+  }
+  if (target.slug === "paper-trading") {
+    return `You're in Paper trading. Practice signals with virtual capital. Live demat uses ${brokerLabel} in Live trading.`;
+  }
+  if (target.slug === "live-trading") {
+    return `You're in Live trading. Holdings, margin, and live orders use ${brokerLabel}. Paper practice stays in Paper trading.`;
+  }
+  return `You're in ${target.name}. Ask anything this team is set up to handle.`;
+}
+
+function deskStarters(
+  target: DomainChatTarget | null,
+  brokerNames: string[],
+): string[] {
+  if (target?.slug === "learning") {
+    return [
+      "How do I learn trading safely?",
+      "Can you predict TCS for the next few hours?",
+    ];
+  }
+  if (target?.slug === "paper-trading") {
+    return ["Show my latest signals", "Walk me through a paper trade"];
+  }
+  if (target?.slug === "live-trading") {
+    return [
+      brokerNames.length
+        ? `Check ${brokerNames[0]} holdings and positions`
+        : "Show my holdings and margin",
+      "Why is live disarmed?",
+    ];
+  }
+  return [];
 }
 
 export function WorkspaceDeskChat({
@@ -57,21 +100,11 @@ export function WorkspaceDeskChat({
 
   const welcome = useCallback(
     (target: DomainChatTarget | null): ChatMessage[] => {
-      let content =
-        "Publish Learning, Paper trading, and Live trading to start chatting.";
-      if (target?.slug === "learning") {
-        content =
-          "You're in Learning. Ask concepts, or generic ticker questions like “What’s TCS doing?” — I can use quotes if a toolkit is assigned, but I won’t predict prices. Paper fills go to Paper trading; holdings to Live trading.";
-      } else if (target?.slug === "paper-trading") {
-        content = `You're in Paper trading. Practice signals with virtual capital. Live demat uses ${brokerLabel} in Live trading.`;
-      } else if (target?.slug === "live-trading") {
-        content = `You're in Live trading. Holdings, margin, and live orders use ${brokerLabel}. Paper practice stays in Paper trading.`;
-      }
       return [
         {
           id: newId("welcome"),
           role: "assistant",
-          content,
+          content: deskWelcome(target, brokerLabel),
           createdAt: new Date().toISOString(),
           status: "complete",
         },
@@ -79,6 +112,11 @@ export function WorkspaceDeskChat({
     },
     [brokerLabel],
   );
+
+  useEffect(() => {
+    if (targets.some((row) => row.id === teamId)) return;
+    setTeamId(targets[0]?.id ?? "");
+  }, [targets, teamId]);
 
   useEffect(() => {
     abortRef.current?.abort();
@@ -250,23 +288,11 @@ export function WorkspaceDeskChat({
         <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-teal">
           Desk chat
         </p>
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {targets.map((target) => (
-            <button
-              key={target.id}
-              type="button"
-              onClick={() => setTeamId(target.id)}
-              className={cn(
-                "rounded-full border px-2.5 py-1 text-xs font-medium transition",
-                target.id === team?.id
-                  ? "border-teal/40 bg-teal/10 text-teal"
-                  : "border-line text-slate-muted hover:border-teal/30 hover:text-ink",
-              )}
-            >
-              {target.name}
-            </button>
-          ))}
-        </div>
+        <DeskChatPills
+          targets={targets}
+          selectedId={team?.id}
+          onSelect={setTeamId}
+        />
         {team && !team.published ? (
           <p className="mt-2 text-[11px] text-amber">Preview — publish this team for live runs.</p>
         ) : null}
@@ -281,26 +307,7 @@ export function WorkspaceDeskChat({
         messages={messages}
         markdown
         targetName={team?.name}
-        starters={
-          team?.slug === "learning"
-            ? [
-                "How do I learn trading safely?",
-                "Can you predict TCS for the next few hours?",
-              ]
-            : team?.slug === "paper-trading"
-              ? [
-                  "Show my latest signals",
-                  "Walk me through a paper trade",
-                ]
-            : team?.slug === "live-trading"
-              ? [
-                  brokerNames.length
-                    ? `Check ${brokerNames[0]} holdings and positions`
-                    : "Show my holdings and margin",
-                  "Why is live disarmed?",
-                ]
-              : []
-        }
+        starters={deskStarters(team, brokerNames)}
         onStarter={(text) => void send(text)}
       />
       <MessageComposer

@@ -108,15 +108,47 @@ def _first_attr(values: Any) -> str | None:
     return None
 
 
+def _names_from_display(display_name: str, *, fallback: str) -> tuple[str, str]:
+    """Split a display name. Keycloak requires lastName for password-grant login."""
+    cleaned = display_name.strip()
+    parts = cleaned.split(None, 1) if cleaned else []
+    first_name = parts[0] if parts else (fallback.strip() or "User")
+    last_name = parts[1] if len(parts) > 1 else first_name
+    return first_name, last_name
+
+
+def _heal_required_names(user: dict[str, Any]) -> None:
+    first = str(user.get("firstName") or "").strip()
+    last = str(user.get("lastName") or "").strip()
+    if first and not last:
+        user["lastName"] = first
+    elif last and not first:
+        user["firstName"] = last
+    user["firstName"] = str(user.get("firstName") or "").strip()
+    user["lastName"] = str(user.get("lastName") or "").strip()
+
+
+def humanize_identity_error(message: str) -> str:
+    """Map IdP error codes to admin-facing copy (never mention the IdP by name)."""
+    text = message.strip()
+    lowered = text.lower()
+    if "error-user-attribute-read-only" in lowered:
+        return (
+            "That sign-in field cannot be changed. You can still update the "
+            "display name or password."
+        )
+    return text
+
+
 def _keycloak_message(payload: Any, fallback: str) -> str:
     if isinstance(payload, str) and payload.strip():
-        return payload.strip()
+        return humanize_identity_error(payload)
     if not isinstance(payload, dict):
         return fallback
     for key in ("errorMessage", "error_description", "error"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return humanize_identity_error(value)
     return fallback
 
 
@@ -427,9 +459,9 @@ class IdentityAdminClient:
         if existing is not None:
             raise IdentityUserExistsError(EMAIL_ALREADY_IN_USE)
         group_id = await self.ensure_org_group(organization_id)
-        parts = display_name.strip().split(None, 1)
-        first_name = parts[0] if parts else normalized.split("@", 1)[0]
-        last_name = parts[1] if len(parts) > 1 else ""
+        first_name, last_name = _names_from_display(
+            display_name, fallback=normalized.split("@", 1)[0]
+        )
         created = await self._admin_request(
             "POST",
             "/users",
@@ -527,10 +559,11 @@ class IdentityAdminClient:
         role: Role | None = None,
         password: str | None = None,
     ) -> dict[str, Any]:
-        """Update Keycloak profile, org_role, and optional password.
+        """Update profile, org_role, and optional password.
 
-        Passwords are sent only to Keycloak reset-password. Email/username
-        changes 409 when another user already owns that address.
+        Passwords are sent only to the IdP reset-password endpoint. Username is
+        never rewritten on email change — the realm keeps username immutable.
+        Email/username collisions 409 when another user already owns that address.
         """
         user = await self.get_user(user_id)
         if user is None:
@@ -549,15 +582,18 @@ class IdentityAdminClient:
                 existing = await self.find_user_by_email(normalized)
                 if existing is not None and str(existing.get("id") or "") != keycloak_id:
                     raise IdentityUserExistsError(EMAIL_ALREADY_IN_USE)
-                user["username"] = normalized
                 user["email"] = normalized
                 user["emailVerified"] = True
 
         if display_name is not None:
-            parts = display_name.strip().split(None, 1)
             fallback = str(user.get("username") or user.get("email") or "user")
-            user["firstName"] = parts[0] if parts else fallback
-            user["lastName"] = parts[1] if len(parts) > 1 else ""
+            first_name, last_name = _names_from_display(
+                display_name, fallback=fallback
+            )
+            user["firstName"] = first_name
+            user["lastName"] = last_name
+
+        _heal_required_names(user)
 
         if role is not None:
             attrs = (
@@ -571,22 +607,29 @@ class IdentityAdminClient:
         profile_changed = (
             email is not None or display_name is not None or role is not None
         )
+        profile_error: IdentityProvisionError | None = None
         if profile_changed:
-            await self._admin_request(
-                "PUT",
-                f"/users/{keycloak_id}",
-                json_body={
-                    "id": keycloak_id,
-                    "username": user.get("username"),
-                    "email": user.get("email"),
-                    "enabled": user.get("enabled", True),
-                    "emailVerified": user.get("emailVerified", True),
-                    "firstName": user.get("firstName") or "",
-                    "lastName": user.get("lastName") or "",
-                    "attributes": user.get("attributes") or {},
-                },
-                expected={204, 200},
-            )
+            body: dict[str, Any] = {
+                "id": keycloak_id,
+                "username": user.get("username"),
+                "email": user.get("email"),
+                "enabled": user.get("enabled", True),
+                "emailVerified": user.get("emailVerified", True),
+                "firstName": user.get("firstName") or "",
+                "lastName": user.get("lastName") or "",
+            }
+            attrs = user.get("attributes")
+            if isinstance(attrs, dict) and attrs:
+                body["attributes"] = attrs
+            try:
+                await self._admin_request(
+                    "PUT",
+                    f"/users/{keycloak_id}",
+                    json_body=body,
+                    expected={204, 200},
+                )
+            except IdentityProvisionError as exc:
+                profile_error = exc
 
         if secret:
             await self._admin_request(
@@ -595,6 +638,8 @@ class IdentityAdminClient:
                 json_body={"type": "password", "temporary": False, "value": secret},
                 expected={204, 200},
             )
+        if profile_error:
+            raise profile_error
         return user
 
     async def change_password(

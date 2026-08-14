@@ -6,6 +6,7 @@ import {
   fillClaimsFromAccessToken,
   persistAuthorizedUser,
   sessionLooksSignedIn,
+  visibleAuthSession,
   type AtlasClientSession,
 } from "@/lib/auth/auth-session";
 
@@ -40,6 +41,17 @@ describe("persistAuthorizedUser", () => {
     expect(token.email).toBe("ops@acme.atlas.local");
     expect(token.accessToken).toBe(access);
     expect(token.orgId).toBe("org_demo_acme");
+  });
+
+  it("does not concatenate identical given and family names", () => {
+    const access = jwtWithPayload({
+      sub: "user-3",
+      email: "babu@atlas.ai",
+      given_name: "Babu",
+      family_name: "Babu",
+    });
+    const token = persistAuthorizedUser({}, { id: "user-3", accessToken: access });
+    expect(token.name).toBe("Babu");
   });
 
   it("fills missing email/name from the access token", () => {
@@ -91,6 +103,7 @@ describe("attachSessionFromToken", () => {
         email: "ops@acme.atlas.local",
         accessToken: "access",
         orgId: "org_demo_acme",
+        orgRole: "org:member",
       },
       "http://localhost:8080/realms/atlas/protocol/openid-connect/logout",
     );
@@ -98,6 +111,7 @@ describe("attachSessionFromToken", () => {
     expect(session.user?.email).toBe("ops@acme.atlas.local");
     expect(session.user?.name).toBe("Acme Ops");
     expect(session.accessToken).toBe("access");
+    expect(session.orgRole).toBe("org:member");
     expect(sessionLooksSignedIn(session)).toBe(true);
   });
 });
@@ -110,6 +124,26 @@ describe("sessionLooksSignedIn", () => {
 
   it("is true when only an access token is present", () => {
     expect(sessionLooksSignedIn({ accessToken: "access" })).toBe(true);
+  });
+});
+
+describe("visibleAuthSession", () => {
+  const hydrated = {
+    accessToken: "server-access",
+    user: { email: "ops@acme.atlas.local" },
+  };
+
+  it("uses the server session only while Auth.js is still loading", () => {
+    expect(visibleAuthSession("loading", null, hydrated)).toEqual(hydrated);
+  });
+
+  it("does not resurrect a hydrated session after Sign out", () => {
+    expect(visibleAuthSession("unauthenticated", null, hydrated)).toBeNull();
+  });
+
+  it("prefers the live client session once authenticated", () => {
+    const live = { accessToken: "fresh", user: { email: "ops@acme.atlas.local" } };
+    expect(visibleAuthSession("authenticated", live, hydrated)).toEqual(live);
   });
 });
 
@@ -127,5 +161,17 @@ describe("fillClaimsFromAccessToken", () => {
     fillClaimsFromAccessToken(token);
     expect(token.email).toBe("ops@acme.atlas.local");
     expect(token.name).toBe("Acme Ops");
+  });
+
+  it("upgrades org:member to org:admin when the JWT lists both", () => {
+    const access = jwtWithPayload({
+      org_role: ["org:member", "org:admin"],
+    });
+    const token = {
+      orgRole: "org:member",
+      accessToken: access,
+    };
+    fillClaimsFromAccessToken(token);
+    expect(token.orgRole).toBe("org:admin");
   });
 });

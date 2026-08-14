@@ -16,7 +16,11 @@ async def assign_domain_default_teams(
     context: TenantContext,
     user_id: str,
 ) -> list[str]:
-    """Ensure published default desk teams are assigned to ``user_id``."""
+    """Assign published default desk teams on create/provision.
+
+    Callers must not use this on user update or desk load — admins can
+    unassign starter teams, and that choice should persist.
+    """
     if not user_id.strip():
         return []
     tenant = await session.scalar(select(Tenant).where(Tenant.id == context.tenant_id))

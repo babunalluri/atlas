@@ -1,7 +1,9 @@
 import {
   decodeJwtPayload,
   firstStringClaim,
+  privilegedOrgRole,
 } from "@/lib/auth/keycloak-password";
+import { composeDisplayName } from "@/lib/auth/user-identity";
 
 export type AtlasAuthToken = {
   accessToken?: string;
@@ -40,6 +42,7 @@ export type AtlasClientSession = {
   accessToken?: string;
   idToken?: string;
   orgId?: string;
+  orgRole?: string;
   error?: string;
   endSessionUrl?: string;
 };
@@ -95,18 +98,19 @@ export function fillClaimsFromAccessToken(token: AtlasAuthToken): void {
     const claims = decodeJwtPayload(token.accessToken);
     token.sub = token.sub ?? firstStringClaim(claims.sub);
     token.email = token.email ?? firstStringClaim(claims.email);
-    const given = firstStringClaim(claims.given_name);
-    const family = firstStringClaim(claims.family_name);
-    const composed =
-      given && family ? `${given} ${family}` : given || family || undefined;
     token.name =
-      token.name ??
-      firstStringClaim(claims.name) ??
-      composed ??
-      firstStringClaim(claims.preferred_username) ??
-      firstStringClaim(claims.email);
+      composeDisplayName({
+        name: token.name ?? firstStringClaim(claims.name),
+        givenName: firstStringClaim(claims.given_name),
+        familyName: firstStringClaim(claims.family_name),
+        fallback:
+          firstStringClaim(claims.preferred_username) ??
+          firstStringClaim(claims.email),
+      }) ?? token.name;
     token.orgId = token.orgId ?? firstStringClaim(claims.org_id);
-    token.orgRole = token.orgRole ?? firstStringClaim(claims.org_role);
+    token.orgRole =
+      privilegedOrgRole([token.orgRole, claims.org_role].flat()) ??
+      token.orgRole;
   } catch {
     // Ignore malformed access tokens; session still carries whatever we have.
   }
@@ -120,13 +124,15 @@ export function attachSessionFromToken<S extends AtlasClientSession>(
   session.user = {
     ...session.user,
     id: token.sub ?? session.user?.id,
-    name: token.name ?? session.user?.name ?? null,
+    name:
+      composeDisplayName({ name: token.name ?? session.user?.name }) ?? null,
     email: token.email ?? session.user?.email ?? null,
     image: token.picture ?? session.user?.image ?? null,
   };
   session.accessToken = token.accessToken;
   session.idToken = token.idToken;
   session.orgId = token.orgId;
+  session.orgRole = token.orgRole;
   session.error = token.error;
   session.endSessionUrl = endSessionUrl;
   return session;
@@ -142,4 +148,22 @@ export function sessionLooksSignedIn(
       session.user?.name ||
       session.user?.id,
   );
+}
+
+export type AuthSessionStatus = "loading" | "authenticated" | "unauthenticated";
+
+/**
+ * First paint may use the server-hydrated session. After Sign out, Auth.js
+ * reports `unauthenticated` while the layout prop still holds the old
+ * session — never fall back to that hydrate or the header stays signed in.
+ */
+export function visibleAuthSession<S extends AtlasClientSession>(
+  status: AuthSessionStatus,
+  clientSession: S | null | undefined,
+  serverSession: S | null | undefined,
+): S | null {
+  if (status === "unauthenticated") return null;
+  if (clientSession) return clientSession;
+  if (status === "loading") return serverSession ?? null;
+  return clientSession ?? null;
 }

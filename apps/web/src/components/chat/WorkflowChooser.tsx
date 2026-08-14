@@ -1,6 +1,6 @@
 "use client";
 
-import { Link, useRouter } from "@/i18n/navigation";
+import type { Session } from "next-auth";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { ChatAccountBar } from "@/components/chat/ChatAccountBar";
@@ -10,7 +10,6 @@ import {
   useSurfaceTheme,
 } from "@/components/layout/ThemeToggle";
 import {
-  getWorkspaceInfo,
   listAvailableTeams,
   listAvailableWorkflows,
 } from "@/lib/api/admin";
@@ -21,6 +20,7 @@ import type {
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
+import { Link, useRouter } from "@/i18n/navigation";
 
 type FilterKind = "all" | "workflow" | "team";
 
@@ -28,7 +28,13 @@ type PortalItem =
   | { kind: "workflow"; item: AvailableWorkflow }
   | { kind: "team"; item: AvailableTeam };
 
-export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
+export function WorkflowChooser({
+  tenant,
+  serverSession = null,
+}: {
+  tenant: TenantBranding;
+  serverSession?: Session | null;
+}) {
   const router = useRouter();
   const { getAccessToken, isSignedIn, isLoaded } = useAgentOsToken();
   const [workflows, setWorkflows] = useState<AvailableWorkflow[]>([]);
@@ -37,7 +43,6 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterKind>("all");
-  const [canAdminister, setCanAdminister] = useState(false);
   const { theme, dark, changeTheme } = useSurfaceTheme("workspace");
 
   useEffect(() => {
@@ -53,15 +58,13 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
     void (async () => {
       try {
         const token = await getAccessToken();
-        const [workflowRows, teamRows, workspace] = await Promise.all([
+        const [workflowRows, teamRows] = await Promise.all([
           listAvailableWorkflows(token),
           listAvailableTeams(token),
-          getWorkspaceInfo(token).catch(() => null),
         ]);
         if (!cancelled) {
           setWorkflows(workflowRows);
           setTeams(teamRows);
-          setCanAdminister(workspace == null ? false : workspace.can_administer !== false);
           setError(null);
         }
       } catch (reason) {
@@ -144,17 +147,10 @@ export function WorkflowChooser({ tenant }: { tenant: TenantBranding }) {
             <div className="flex items-center gap-2">
               <NotificationBell />
               <ThemeToggle theme={theme} onChange={changeTheme} />
-              {canAdminister ? (
-                <Link
-                  href="/admin/agents"
-                  className="rounded-lg border border-line bg-raised/70 px-3 py-1.5 text-xs font-medium text-slate-muted transition hover:border-[var(--tenant-accent)]/60 hover:text-ink"
-                >
-                  Admin
-                </Link>
-              ) : null}
               <ChatAccountBar
                 tenantSlug={tenant.slug}
                 signInRedirect={`/t/${tenant.slug}/chat`}
+                serverSession={serverSession}
               />
             </div>
           </header>

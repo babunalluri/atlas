@@ -15,6 +15,7 @@ declare module "next-auth" {
     accessToken?: string;
     idToken?: string;
     orgId?: string;
+    orgRole?: string;
     error?: string;
     endSessionUrl?: string;
     user: {

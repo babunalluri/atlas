@@ -4,7 +4,11 @@ import type { Session } from "next-auth";
 import { useSession } from "next-auth/react";
 import { useLocale, useTranslations } from "next-intl";
 
-import { sessionLooksSignedIn } from "@/lib/auth/auth-session";
+import { UserIdentityChip } from "@/components/auth/UserIdentityChip";
+import {
+  sessionLooksSignedIn,
+  visibleAuthSession,
+} from "@/lib/auth/auth-session";
 import { signOutFederated } from "@/lib/auth/federated-signout";
 
 function devAuthEnabled(): boolean {
@@ -19,7 +23,7 @@ export function AuthControls({
   const t = useTranslations("common");
   const locale = useLocale();
   const { data: clientSession, status } = useSession();
-  const session = clientSession ?? serverSession;
+  const session = visibleAuthSession(status, clientSession, serverSession);
 
   if (status === "loading" && !sessionLooksSignedIn(serverSession)) {
     return (
@@ -39,10 +43,8 @@ export function AuthControls({
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <span className="hidden text-sm text-slate-muted sm:inline">
-        {session?.user?.email || session?.user?.name || "Signed in"}
-      </span>
+    <div className="flex min-w-0 items-center gap-2">
+      <UserIdentityChip user={session?.user} />
       <button
         type="button"
         onClick={() => void signOutFederated(`/${locale}`)}

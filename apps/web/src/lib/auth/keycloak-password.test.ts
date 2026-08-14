@@ -51,6 +51,27 @@ describe("sessionFromPasswordGrant", () => {
     expect(session.refreshToken).toBe("refresh");
     expect(session.idToken).toBe("id");
   });
+
+  it("prefers org:admin when the token lists member first", () => {
+    const access = jwtWithPayload({
+      sub: "owner-1",
+      org_id: "org_acme",
+      org_role: ["org:member", "org:admin"],
+    });
+    const session = sessionFromPasswordGrant({ access_token: access });
+    expect(session.orgRole).toBe("org:admin");
+  });
+
+  it("does not concatenate identical given and family names", () => {
+    const access = jwtWithPayload({
+      sub: "user-2",
+      email: "babu@atlas.ai",
+      given_name: "Babu",
+      family_name: "Babu",
+    });
+    const session = sessionFromPasswordGrant({ access_token: access });
+    expect(session.name).toBe("Babu");
+  });
 });
 
 describe("decodeJwtPayload", () => {

@@ -1,32 +1,69 @@
 "use client";
 
+import type { Session } from "next-auth";
 import { useSession } from "next-auth/react";
 import { useLocale } from "next-intl";
+import { useEffect, useState } from "react";
 
+import { UserIdentityChip } from "@/components/auth/UserIdentityChip";
 import { useSignInModal } from "@/components/auth/SignInModalProvider";
 import { Link } from "@/i18n/navigation";
+import { getWorkspaceInfo } from "@/lib/api/admin";
+import {
+  sessionLooksSignedIn,
+  visibleAuthSession,
+} from "@/lib/auth/auth-session";
+import { canOpenOrgAdmin, ORG_ADMIN_HREF } from "@/lib/auth/desk-admin";
 import { signOutFederated } from "@/lib/auth/federated-signout";
+import { localePrefixedPath } from "@/lib/auth/post-login";
+import { useAgentOsToken } from "@/lib/auth/token";
 import { Button, buttonClassName } from "@/components/ui/Button";
 
 /**
- * Compact account control for hosted chat.
+ * Compact account control for hosted chat and customer desks.
  */
 export function ChatAccountBar({
   tenantSlug,
   signInRedirect,
+  serverSession = null,
 }: {
   tenantSlug: string;
   signInRedirect: string;
+  serverSession?: Session | null;
 }) {
   const locale = useLocale();
-  const { data: session, status } = useSession();
+  const { data: clientSession, status } = useSession();
   const { openSignIn } = useSignInModal();
+  const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
+  const session = visibleAuthSession(status, clientSession, serverSession);
+  const [canAdminister, setCanAdminister] = useState(false);
 
-  if (status === "loading") {
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn) {
+      setCanAdminister(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await getAccessToken();
+        const workspace = await getWorkspaceInfo(token);
+        if (!cancelled) setCanAdminister(canOpenOrgAdmin(workspace));
+      } catch {
+        if (!cancelled) setCanAdminister(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- getAccessToken is stable via callback
+  }, [isLoaded, isSignedIn]);
+
+  if (status === "loading" && !sessionLooksSignedIn(serverSession)) {
     return <span className="size-8 rounded-full bg-raised" />;
   }
 
-  if (!session) {
+  if (!sessionLooksSignedIn(session)) {
     return (
       <Button
         type="button"
@@ -44,15 +81,27 @@ export function ChatAccountBar({
   }
 
   return (
-    <Button
-      type="button"
-      size="sm"
-      variant="secondary"
-      onClick={() => void signOutFederated(`/${locale}`)}
-      title={session.user?.email || "Signed in"}
-    >
-      Sign out
-    </Button>
+    <div className="flex min-w-0 items-center gap-2">
+      <UserIdentityChip user={session?.user} compact />
+      {canAdminister ? (
+        <a
+          href={localePrefixedPath(locale, ORG_ADMIN_HREF)}
+          title="Open organization admin"
+          className={buttonClassName({ variant: "secondary", size: "sm" })}
+        >
+          Admin
+        </a>
+      ) : null}
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        onClick={() => void signOutFederated(`/${locale}`)}
+        title={session?.user?.email || "Signed in"}
+      >
+        Sign out
+      </Button>
+    </div>
   );
 }
 

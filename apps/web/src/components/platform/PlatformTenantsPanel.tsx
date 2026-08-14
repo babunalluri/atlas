@@ -242,7 +242,7 @@ export function PlatformTenantsPanel({
           </h1>
           <p className="mt-0.5 text-sm text-slate-muted">
             Provision organizations with an owner email and password. Atlas
-            creates the Keycloak org group and owner account.
+            creates the organization and owner account.
           </p>
         </div>
         <Button variant="accent" onClick={() => setProvisioning(true)}>

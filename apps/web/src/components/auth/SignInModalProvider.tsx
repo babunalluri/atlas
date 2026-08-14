@@ -11,7 +11,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useLocale } from "next-intl";
 import { useSearchParams } from "next/navigation";
 
 import { SignInDialog } from "@/components/auth/SignInDialog";
@@ -33,19 +32,15 @@ export function useSignInModal(): SignInModalApi {
 }
 
 export function SignInModalProvider({ children }: { children: ReactNode }) {
-  const locale = useLocale();
   const [open, setOpen] = useState(false);
-  const [callbackUrl, setCallbackUrl] = useState(`/${locale}/admin`);
+  const [callbackUrl, setCallbackUrl] = useState("");
 
-  const openSignIn = useCallback(
-    (options?: { callbackUrl?: string }) => {
-      setCallbackUrl(
-        safeAuthCallbackUrl(options?.callbackUrl, `/${locale}/admin`),
-      );
-      setOpen(true);
-    },
-    [locale],
-  );
+  const openSignIn = useCallback((options?: { callbackUrl?: string }) => {
+    setCallbackUrl(
+      options?.callbackUrl ? safeAuthCallbackUrl(options.callbackUrl, "") : "",
+    );
+    setOpen(true);
+  }, []);
 
   const api = useMemo(() => ({ openSignIn }), [openSignIn]);
 
@@ -73,7 +68,6 @@ function SignInQueryOpener({
   const searchParams = useSearchParams();
   const pathname = usePathname();
   const router = useRouter();
-  const locale = useLocale();
   const consumed = useRef<string | null>(null);
 
   useEffect(() => {
@@ -90,7 +84,7 @@ function SignInQueryOpener({
         searchParams.get("callbackUrl") ??
         searchParams.get("redirect_url") ??
         searchParams.get("next") ??
-        `/${locale}/admin`,
+        "",
     });
     const next = new URLSearchParams(searchParams.toString());
     next.delete("signin");
@@ -99,7 +93,7 @@ function SignInQueryOpener({
     next.delete("next");
     const query = next.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  }, [locale, openSignIn, pathname, router, searchParams]);
+  }, [openSignIn, pathname, router, searchParams]);
 
   return null;
 }

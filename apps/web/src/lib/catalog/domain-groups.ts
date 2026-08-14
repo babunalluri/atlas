@@ -1,24 +1,16 @@
 /**
- * Group admin catalog rows (agents, teams, workflows) by workspace domain.
+ * Classify catalog entities by workspace domain.
  *
  * Domain comes from the API when present. Slugs from domain starter packs
  * (including `{slug}-copy`) still classify after export → import into another
  * org, so Stock Broker desks are not dumped into General.
+ *
+ * Admin list pages stay flat. Grouping is only for pack copy (platform import).
  */
 
 export type CatalogDomainId = "stock_broker" | "dental_clinic" | "generic";
 export type CatalogDomainFilter = "all" | CatalogDomainId;
 export type CatalogDeskId = "learning" | "paper" | "live" | "other";
-
-export const CATALOG_DOMAIN_FILTERS: Array<{
-  value: CatalogDomainFilter;
-  label: string;
-}> = [
-  { value: "all", label: "All" },
-  { value: "stock_broker", label: "Stock Broker" },
-  { value: "dental_clinic", label: "Dental" },
-  { value: "generic", label: "General" },
-];
 
 export const CATALOG_DOMAIN_LABELS: Record<CatalogDomainId, string> = {
   stock_broker: "Stock Broker",

@@ -89,7 +89,7 @@ export function ProvisionTenantDialog({
   return (
     <AdminFormDialog
       title="Provision tenant"
-      subtitle="Atlas creates the Keycloak org group and owner account. Passwords stay in Keycloak — Atlas never stores them."
+      subtitle="Atlas creates the organization and owner account. Password is required for the owner."
       titleId="provision-tenant-title"
       onClose={onClose}
     >

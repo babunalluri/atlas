@@ -266,7 +266,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
       {editingUser ? (
         <AdminFormDialog
           title="Edit user"
-          subtitle={`Update ${editingUser.displayName} in this organization. Passwords stay in Keycloak — Atlas never stores them.`}
+          subtitle={`Update ${editingUser.displayName} in this organization. Password is optional. Leave blank to keep the current password.`}
           titleId="edit-user-title"
           onClose={() => setEditingUser(null)}
         >

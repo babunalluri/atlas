@@ -1,14 +1,19 @@
 "use client";
 
 import { getSession, signIn } from "next-auth/react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useState } from "react";
 
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
 import { EyeIcon, EyeOffIcon } from "@/components/ui/icons";
+import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
 import { keycloakResetCredentialsUrl } from "@/lib/auth/keycloak-public";
+import {
+  localePrefixedPath,
+  resolvePostLoginHref,
+} from "@/lib/auth/post-login";
 
 export function SignInDialog({
   callbackUrl,
@@ -19,6 +24,7 @@ export function SignInDialog({
 }) {
   const t = useTranslations("auth");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -41,13 +47,31 @@ export function SignInDialog({
         setBusy(false);
         return;
       }
-      const session = (await getSession()) as { accessToken?: string } | null;
+      const session = (await getSession()) as {
+        accessToken?: string;
+        orgRole?: string;
+      } | null;
       if (!session?.accessToken) {
         setError(t("invalidCredentials"));
         setBusy(false);
         return;
       }
-      window.location.assign(callbackUrl);
+      const dest = await resolvePostLoginHref({
+        accessToken: session.accessToken,
+        orgRole: session.orgRole,
+        callbackUrl,
+        loadWorkspace: async () => {
+          const [status, workspace] = await Promise.all([
+            getOnboardingStatus(session.accessToken!).catch(() => null),
+            getWorkspaceInfo(session.accessToken!),
+          ]);
+          return {
+            slug: workspace.slug || status?.tenant_slug || null,
+            can_administer: workspace.can_administer,
+          };
+        },
+      });
+      window.location.assign(localePrefixedPath(locale, dest));
     } catch {
       setError(t("invalidCredentials"));
       setBusy(false);

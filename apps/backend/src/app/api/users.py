@@ -15,6 +15,7 @@ from app.auth.dependencies import require_roles, require_tenant
 from app.auth.identity_admin import (
     IdentityAdminClient,
     IdentityProvisionError,
+    humanize_identity_error,
     is_pending_user_id,
 )
 from app.core.settings import get_settings
@@ -65,7 +66,10 @@ async def _user_out(
 
 
 def _raise_identity(exc: IdentityProvisionError) -> NoReturn:
-    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail=humanize_identity_error(str(exc)),
+    ) from exc
 
 
 async def _resolve_identity_profile(client: IdentityAdminClient, membership: Membership):
@@ -121,9 +125,13 @@ async def _sync_identity_update(
         profile = await _resolve_identity_profile(client, membership)
         if profile is None:
             raise HTTPException(status_code=404, detail="Identity user not found")
+        current_email = (membership.email or "").strip().lower()
+        identity_email = email
+        if identity_email is not None and identity_email.strip().lower() == current_email:
+            identity_email = None
         await client.update_org_user(
             str(profile.get("id") or membership.user_id),
-            email=email,
+            email=identity_email,
             display_name=display_name,
             role=role,
             password=password,
@@ -257,6 +265,7 @@ async def create_user(
             await workflows.replace_user_assignments(membership.user_id, body.workflow_ids)
         if body.team_ids:
             await teams.replace_user_assignments(membership.user_id, body.team_ids)
+        # Starter desk teams are a create-time default, not a lock on later edits.
         from app.domains.access import assign_domain_default_teams
 
         await assign_domain_default_teams(session, context, membership.user_id)
@@ -432,9 +441,6 @@ async def update_user(
             await workflows.replace_user_assignments(membership.user_id, body.workflow_ids)
         if body.team_ids is not None:
             await teams.replace_user_assignments(membership.user_id, body.team_ids)
-        from app.domains.access import assign_domain_default_teams
-
-        await assign_domain_default_teams(session, context, membership.user_id)
         await session.refresh(membership)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

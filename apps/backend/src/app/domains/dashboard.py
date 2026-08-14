@@ -17,11 +17,46 @@ from app.db.models import (
     WorkflowConfig,
 )
 from app.domains.desk_snapshot import DeskSnapshotService
-from app.domains.types import DOMAIN_LABELS, STOCK_BROKER_DESK_TEAMS, WorkspaceDomain, normalize_domain
+from app.domains.types import (
+    DOMAIN_LABELS,
+    STOCK_BROKER_DESK_TEAMS,
+    WorkspaceDomain,
+    normalize_domain,
+)
 from app.metrics.service import MetricsService
 from app.tenancy.context import TenantContext
 
 STOCK_BROKER_CHAT_ORDER = STOCK_BROKER_DESK_TEAMS
+
+
+def order_desk_chat_targets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable desk-tab order: default pack slugs first, then remaining by name.
+
+    Unpublished (draft) rows never become tabs. Callers should pass assigned
+    published teams; this still drops drafts if a catalog dump is supplied.
+    """
+    by_slug: dict[str, dict[str, Any]] = {}
+    extras: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("published"):
+            continue
+        slug = str(row.get("slug") or "")
+        if slug in STOCK_BROKER_DESK_TEAMS and slug not in by_slug:
+            by_slug[slug] = row
+        else:
+            extras.append(row)
+    ordered = [by_slug[slug] for slug in STOCK_BROKER_CHAT_ORDER if slug in by_slug]
+    extras.sort(key=lambda row: str(row.get("name") or "").lower())
+    return ordered + extras
+
+
+def _team_chat_target(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "slug": row.slug,
+        "name": row.name,
+        "published": bool(row.published_version_id),
+    }
 
 
 class DomainDashboardService:
@@ -50,7 +85,7 @@ class DomainDashboardService:
                 widget for widget in widgets if widget.get("group") != "brokers"
             ] + list(snapshot["widgets"])
         quick_links = self._quick_links(tenant_domain, catalog)
-        chat_targets = self._chat_targets(tenant_domain, catalog)
+        chat_targets = await self._chat_targets(tenant_domain, catalog)
 
         return {
             "domain": tenant_domain,
@@ -67,13 +102,14 @@ class DomainDashboardService:
         }
 
     async def customer_desk(self, *, desk_snapshot: bool = False) -> dict[str, Any]:
-        """End-user desk: Learning / Paper / Live chats plus broker widgets."""
-        from app.domains.access import assign_domain_default_teams
-        from app.db.repositories import TeamRepository
+        """End-user desk: assigned team chats plus broker widgets.
 
-        await assign_domain_default_teams(
-            self.session, self.context, self.context.user_id
-        )
+        Tabs come from assigned published teams (same rule as the admin
+        workspace), not a hardcoded Learning / Paper / Live set and not every
+        catalog team. Workflows stay off this payload: desk chat streams teams,
+        and the desk API has never exposed workflow sessions. Default desk teams
+        are assigned on create/provision, not on every desk load.
+        """
         payload = await self.dashboard(days=30, desk_snapshot=desk_snapshot)
         if payload["domain"] != "stock_broker":
             return {
@@ -84,16 +120,6 @@ class DomainDashboardService:
                 "broker_tools": [],
                 "desk_snapshot": None,
             }
-        if not self.context.can_administer():
-            allowed = {
-                str(team_id)
-                for team_id in await TeamRepository(
-                    self.session, self.context
-                ).assigned_team_ids(self.context.user_id)
-            }
-            payload["chat_targets"] = [
-                row for row in payload["chat_targets"] if row["id"] in allowed
-            ]
         keep_ids = {"learning", "paper_flow", "live_approval", "broker_tools"}
         payload["widgets"] = [
             widget
@@ -341,14 +367,21 @@ class DomainDashboardService:
             },
         ]
 
-    def _chat_targets(
+    async def _chat_targets(
         self, domain: WorkspaceDomain, catalog: dict[str, Any]
     ) -> list[dict[str, Any]]:
         detail = list(catalog.get("teams_detail") or [])
         if domain != "stock_broker":
             return detail
-        by_slug = {row["slug"]: row for row in detail}
-        return [by_slug[slug] for slug in STOCK_BROKER_CHAT_ORDER if slug in by_slug]
+        from app.db.repositories import TeamRepository
+
+        assigned = await TeamRepository(
+            self.session, self.context
+        ).list_available_for_user(self.context.user_id)
+        rows = [_team_chat_target(row) for row in assigned]
+        if not rows and self.context.can_administer():
+            rows = [row for row in detail if row.get("published")]
+        return order_desk_chat_targets(rows)
 
     def _quick_links(
         self, domain: WorkspaceDomain, catalog: dict[str, Any]

@@ -127,7 +127,9 @@ export function EditUserForm({
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
-              <FieldHint>Optional · at least 8 characters</FieldHint>
+              <FieldHint>
+                Password is optional. Leave blank to keep the current password.
+              </FieldHint>
             </div>
             <div className="min-w-0">
               <Label htmlFor="edit-password-confirm">Confirm password</Label>

@@ -297,8 +297,8 @@ export function UserEditor({
               </>
             ) : (
               <span>
-                Enter email, password, and role. Atlas creates their Keycloak
-                sign-in in this organization.
+                Enter email, password, and role to create their sign-in for this
+                organization.
               </span>
             )}
           </div>
@@ -387,7 +387,7 @@ export function UserEditor({
         <div className="grid gap-2.5 sm:grid-cols-2">
           {mode === "edit" ? (
             <div className="sm:col-span-2">
-              <Label htmlFor="user-id" hint="Keycloak account id (sub)">
+              <Label htmlFor="user-id" hint="Sign-in account id">
                 Account ID
               </Label>
               <Input
@@ -450,7 +450,7 @@ export function UserEditor({
                 <FieldHint>
                   {mode === "create"
                     ? "At least 8 characters"
-                    : "Optional · at least 8 characters"}
+                    : "Password is optional. Leave blank to keep the current password."}
                 </FieldHint>
               </div>
               <div className="min-w-0">
@@ -583,7 +583,8 @@ export function UserEditor({
           <div>
             <h2 className="text-sm font-semibold">Assigned teams</h2>
             <p className="text-xs text-slate-muted">
-              Published teams this user can open in chat.
+              Published teams this user can open in chat. Uncheck a team to
+              remove access.
             </p>
           </div>
           <Badge tone="info">{form.teamIds.length} selected</Badge>

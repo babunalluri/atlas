@@ -100,7 +100,7 @@ export function EditTenantDialog({
       title="Edit tenant"
       subtitle={
         hasOwner
-          ? `Update ${tenant.name}. Passwords stay in Keycloak — Atlas never stores them.`
+          ? `Update ${tenant.name}. Password is optional. Leave blank to keep the current password.`
           : "This tenant has no org owner. Add email and password so someone can sign in."
       }
       titleId="edit-tenant-title"

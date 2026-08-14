@@ -1,6 +1,6 @@
 "use client";
 
-import { Link, useRouter } from "@/i18n/navigation";
+import type { Session } from "next-auth";
 import { useTranslations } from "next-intl";
 import {
   useCallback,
@@ -33,7 +33,6 @@ import {
   streamConfiguredTeam,
   streamConfiguredWorkflow,
 } from "@/lib/agentos/client";
-import { getWorkspaceInfo } from "@/lib/api/admin";
 import type {
   ChatMessage,
   ConversationSession,
@@ -41,6 +40,7 @@ import type {
   PublicWorkflowSurface,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
+import { Link, useRouter } from "@/i18n/navigation";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -68,10 +68,12 @@ function sourceLabels(value: unknown): string[] {
 export function CustomerChat({
   surface,
   embedded = false,
+  serverSession = null,
 }: {
   surface: PublicTeamSurface | PublicWorkflowSurface;
   /** Compact layout for iframe embeds (no session sidebar). */
   embedded?: boolean;
+  serverSession?: Session | null;
 }) {
   const tCommon = useTranslations("common");
   const workflowTeams =
@@ -104,7 +106,6 @@ export function CustomerChat({
   const router = useRouter();
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const { theme, dark, changeTheme } = useSurfaceTheme("workspace");
-  const [canAdminister, setCanAdminister] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   // Org-only product: hosted and embed chat require Clerk sign-in.
   const useStaffAuth = isLoaded && isSignedIn;
@@ -130,22 +131,7 @@ export function CustomerChat({
       return;
     }
     setAuthReady(true);
-    let cancelled = false;
-    void (async () => {
-      try {
-        const token = await getAccessToken();
-        const workspace = await getWorkspaceInfo(token);
-        if (!cancelled) {
-          setCanAdminister(workspace.can_administer === true);
-        }
-      } catch {
-        if (!cancelled) setCanAdminister(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [getAccessToken, isLoaded, isSignedIn, router, surface.tenant.slug]);
+  }, [isLoaded, isSignedIn, router, surface.tenant.slug]);
 
   const welcomeMessages = useCallback(
     (): ChatMessage[] => [
@@ -721,18 +707,11 @@ export function CustomerChat({
                       {tCommon("backToWorkspace")}
                     </Link>
                   ) : null}
-                  {canAdminister ? (
-                    <Link
-                      href="/admin/agents"
-                      className="rounded-lg border border-line bg-raised/70 px-3 py-1.5 text-xs font-medium text-slate-muted transition hover:border-[var(--tenant-accent)]/60 hover:text-ink"
-                    >
-                      Admin
-                    </Link>
-                  ) : null}
                   {!embedded ? (
                     <ChatAccountBar
                       tenantSlug={surface.tenant.slug}
                       signInRedirect={`/t/${surface.tenant.slug}/chat`}
+                      serverSession={serverSession}
                     />
                   ) : null}
                 </div>

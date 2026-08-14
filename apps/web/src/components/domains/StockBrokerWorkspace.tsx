@@ -3,6 +3,7 @@
 import { Link } from "@/i18n/navigation";
 
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
+import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
 import { MetricsDashboard } from "@/components/metrics/MetricsDashboard";
@@ -39,9 +40,7 @@ export function StockBrokerWorkspace({
           />
         ) : (
           <div className="flex h-full items-center justify-center px-6 text-center text-sm text-slate-muted">
-            {customer
-              ? "Your Learning, Paper, and Live chats are not ready yet. Ask your administrator if this workspace is still being set up."
-              : "Provision the Stock Broker domain to chat with Learning, Paper trading, and Live trading."}
+            {deskChatEmptyCopy(customer)}
           </div>
         )}
       </section>
@@ -57,8 +56,8 @@ export function StockBrokerWorkspace({
             </h1>
             <p className="mt-1 max-w-xl text-sm text-slate-muted">
               {customer
-                ? "Three chats: Learning, Paper trading, and Live trading. Use Refresh to load orders, positions, and watchlist from the toolkit assigned on Live trading."
-                : "Three chats: Learning (concepts and ticker questions), Paper trading, Live trading. Desk books load through Live trading’s assigned toolkit. Chart is TradingView. Refresh loads a new snapshot."}
+                ? "Chat tabs match the teams assigned to you. Use Refresh to load orders, positions, and watchlist from the toolkit on a trading team."
+                : "Chat tabs match assigned teams. Desk books load through the toolkit assigned on a trading team. Chart is TradingView. Refresh loads a new snapshot."}
             </p>
           </div>
           <div className="flex flex-col items-end gap-2">

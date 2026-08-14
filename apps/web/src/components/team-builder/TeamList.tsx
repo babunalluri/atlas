@@ -3,8 +3,6 @@
 import { Link, useRouter } from "@/i18n/navigation";
 import { useEffect, useRef, useState } from "react";
 
-import { BuildCatalogNav } from "@/components/catalog/BuildCatalogNav";
-import { CatalogGroupedList } from "@/components/catalog/CatalogGroupedList";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import {
@@ -37,7 +35,6 @@ import type {
   TeamVersionDetail,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
-import type { CatalogDomainFilter } from "@/lib/catalog/domain-groups";
 import { formatRelative } from "@/lib/utils";
 
 function toSummary(team: TeamConfig): TeamSummary {
@@ -63,8 +60,6 @@ export function TeamList({
   const { getAccessToken } = useAgentOsToken();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState<CatalogQuery>(DEFAULT_CATALOG_QUERY);
-  const [domainFilter, setDomainFilter] =
-    useState<CatalogDomainFilter>("all");
   const [pageData, setPageData] = useState(initial);
   const [loading, setLoading] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
@@ -310,7 +305,6 @@ export function TeamList({
           Create
         </Link>
       </header>
-      <BuildCatalogNav />
       {error ? <p className="text-sm text-rose">{error}</p> : null}
 
       <section className="table-shell rounded-xl">
@@ -319,44 +313,28 @@ export function TeamList({
           total={pageData.total}
           noun="teams"
           loading={loading}
-          domainFilter={domainFilter}
-          onDomainFilterChange={setDomainFilter}
           onChange={setQuery}
         />
-        <div className="flex items-center gap-3 border-b border-line px-4 py-2">
+        <div className="hidden items-center gap-3 border-b border-line px-4 py-2 md:flex">
           <div className="grid min-w-0 flex-1 grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] gap-3">
             <span className="th-label">Name</span>
             <span className="th-label">Mode</span>
             <span className="th-label">Status</span>
             <span className="th-label text-right">Updated</span>
           </div>
-          <span className="th-label hidden w-auto shrink-0 text-right md:block">
-            Actions
-          </span>
+          <span className="th-label w-auto shrink-0 text-right">Actions</span>
         </div>
         <ul>
-          <CatalogGroupedList
-            items={pageData.items}
-            domainFilter={domainFilter}
-            empty={
-              <li className="px-4 py-10 text-center text-sm text-slate-muted">
-                No teams yet — create one above, then add published agents.
-              </li>
-            }
-            filteredEmpty={
-              <li className="px-4 py-10 text-center text-sm text-slate-muted">
-                No teams in this domain.
-              </li>
-            }
-            renderItem={(team) => (
+          {pageData.items.map((team) => (
+            <li key={team.id} className="border-b border-line/60 last:border-0">
               <div className="flex items-center gap-3 px-4 py-2.5 transition hover:bg-mist/70">
                 <Link
                   href={`/admin/teams/${team.id}`}
-                  className="grid min-w-0 flex-1 grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr] items-center gap-3"
+                  className="grid min-w-0 flex-1 items-center gap-3 md:grid-cols-[1.4fr_0.7fr_0.7fr_0.6fr]"
                 >
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{team.name}</p>
-                    <p className="truncate text-xs text-slate-muted">
+                    <p className="mono-cell truncate text-slate-muted">
                       {team.memberCount} agent{team.memberCount === 1 ? "" : "s"}
                     </p>
                   </div>
@@ -421,8 +399,15 @@ export function TeamList({
                   </Button>
                 </div>
               </div>
-            )}
-          />
+            </li>
+          ))}
+          {pageData.items.length === 0 ? (
+            <li className="px-4 py-10 text-center text-sm text-slate-muted">
+              {query.q || query.status !== "all"
+                ? "No teams match this search."
+                : "No teams yet — create one above, then add published agents."}
+            </li>
+          ) : null}
         </ul>
       </section>
 

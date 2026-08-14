@@ -1,5 +1,6 @@
 "use client";
 
+import type { Session } from "next-auth";
 import { useEffect, useState } from "react";
 
 import { ChatAccountBar } from "@/components/chat/ChatAccountBar";
@@ -14,7 +15,13 @@ import type { TenantBranding } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { useRouter } from "@/i18n/navigation";
 
-export function StockBrokerCustomerDesk({ tenant }: { tenant: TenantBranding }) {
+export function StockBrokerCustomerDesk({
+  tenant,
+  serverSession = null,
+}: {
+  tenant: TenantBranding;
+  serverSession?: Session | null;
+}) {
   const router = useRouter();
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const { theme, dark, changeTheme } = useSurfaceTheme("workspace");
@@ -82,12 +89,13 @@ export function StockBrokerCustomerDesk({ tenant }: { tenant: TenantBranding }) 
           </p>
           <p className="text-sm font-medium">Trading desk</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <NotificationBell />
           <ThemeToggle theme={theme} onChange={changeTheme} />
           <ChatAccountBar
             tenantSlug={tenant.slug}
             signInRedirect={`/t/${tenant.slug}/chat`}
+            serverSession={serverSession}
           />
         </div>
       </header>

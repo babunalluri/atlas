@@ -1,0 +1,17 @@
+/**
+ * Desk → org admin. Tenant admins and Super Admin leave the customer /
+ * trading desk for the admin app (Workflows, Agents, Configure).
+ * End users never see this control.
+ */
+
+/** Existing admin shell home — sidebar includes Workflows, Agents, Configure. */
+export const ORG_ADMIN_HREF = "/admin/agents";
+
+export function canOpenOrgAdmin(workspace: {
+  can_administer?: boolean;
+  role?: string | null;
+} | null | undefined): boolean {
+  if (!workspace || workspace.can_administer === false) return false;
+  if (workspace.can_administer === true) return true;
+  return workspace.role === "tenant_admin" || workspace.role === "platform_admin";
+}

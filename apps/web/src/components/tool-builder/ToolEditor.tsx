@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "@/i18n/navigation";
+import { Link, useRouter } from "@/i18n/navigation";
 import { useState } from "react";
 
 import { PythonCodeEditor } from "@/components/tool-builder/PythonCodeEditor";
@@ -856,7 +856,15 @@ export function ToolEditor({
               {form.kind === "tenant_python" ? (
                 <>
                   <div>
-                    <Label htmlFor="tool-credential">Credential</Label>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <Label htmlFor="tool-credential">Credential</Label>
+                      <Link
+                        href="/admin/credentials"
+                        className="mb-1.5 text-xs font-semibold text-teal hover:underline"
+                      >
+                        Manage credentials
+                      </Link>
+                    </div>
                     <SearchableSelect
                       id="tool-credential"
                       value={form.credentialId ?? ""}
@@ -1061,7 +1069,17 @@ export function ToolEditor({
             >
               {form.kind !== "tenant_python" ? (
                 <div>
-                  <Label htmlFor="tool-credential-shared">Server-side credential</Label>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <Label htmlFor="tool-credential-shared">
+                      Server-side credential
+                    </Label>
+                    <Link
+                      href="/admin/credentials"
+                      className="mb-1.5 text-xs font-semibold text-teal hover:underline"
+                    >
+                      Manage credentials
+                    </Link>
+                  </div>
                   <SearchableSelect
                     id="tool-credential-shared"
                     value={form.credentialId ?? ""}

@@ -58,12 +58,21 @@ export function formatApiError(
   fallback = "Request failed",
 ): string {
   if (reason instanceof ApiError && reason.detail?.trim()) {
-    return reason.detail.trim();
+    return humanizeApiError(reason.detail.trim());
   }
   if (reason instanceof Error && reason.message.trim()) {
-    return reason.message.trim();
+    return humanizeApiError(reason.message.trim());
   }
   return fallback;
+}
+
+function humanizeApiError(message: string): string {
+  if (/error-user-attribute-read-only/i.test(message)) {
+    return (
+      "That sign-in field cannot be changed. You can still update the display name or password."
+    );
+  }
+  return message;
 }
 
 const API_ERROR_MESSAGE_MAX = 400;

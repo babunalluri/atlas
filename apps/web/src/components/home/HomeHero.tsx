@@ -1,7 +1,7 @@
 "use client";
 
 import { Link, useRouter } from "@/i18n/navigation";
-import { useLocale, useTranslations } from "next-intl";
+import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
 import { useSignInModal } from "@/components/auth/SignInModalProvider";
@@ -117,7 +117,6 @@ function SignedOutLanding({
   tCommon: ReturnType<typeof useTranslations<"common">>;
   tHome: ReturnType<typeof useTranslations<"home">>;
 }) {
-  const locale = useLocale();
   const { openSignIn } = useSignInModal();
 
   return (
@@ -161,9 +160,7 @@ function SignedOutLanding({
                 type="button"
                 variant="accent"
                 className="min-w-[9.5rem]"
-                onClick={() =>
-                  openSignIn({ callbackUrl: `/${locale}/admin` })
-                }
+                onClick={() => openSignIn()}
               >
                 {tCommon("signIn")}
               </Button>
