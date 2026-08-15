@@ -19,6 +19,7 @@ from app.db.email_uniqueness import EMAIL_ALREADY_IN_USE
 from app.db.models import Membership, PlatformAuditEvent, Role, Tenant
 from app.db.repositories import TeamRepository
 from app.domains.setup import apply_tenant_domain
+from app.domains.types import STOCK_BROKER_DESK_TEAMS
 from app.tenancy.context import TenantContext
 from app.tenancy.ids import new_id
 
@@ -138,7 +139,7 @@ async def test_create_tenant_assigns_desk_teams_to_owner_sub(
         ),
     )
     assigned = await teams.assigned_team_ids("kc-owner-sub")
-    assert len(assigned) == 3
+    assert len(assigned) == len(STOCK_BROKER_DESK_TEAMS)
     assert await teams.assigned_team_ids("platform-owner") == []
 
 
@@ -354,7 +355,9 @@ async def test_update_tenant_without_owner_creates_keycloak_owner(
             "org_stockbroker_legacy",
         ),
     )
-    assert len(await teams.assigned_team_ids(membership.user_id)) == 3
+    assert len(await teams.assigned_team_ids(membership.user_id)) == len(
+        STOCK_BROKER_DESK_TEAMS
+    )
 
     events = (
         await session.scalars(

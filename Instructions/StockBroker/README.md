@@ -11,7 +11,7 @@ This folder is the **Atlas end-user desk** for Stock Broker: four workspace chat
 | Learning | `learning` | Learning Guide | KB + generic market questions (no price predictions) |
 | Paper trading | `paper-trading` | Paper Trader | Signals → paper fills |
 | Live trading | `live-trading` | Live Trader | Assigned broker + live status/orders |
-| Research | `research` | Researcher | Tool-required stock / F&O analysis (no orders) |
+| Research | `research` | _(leader-only — no agent)_ | Tool-required stock / F&O analysis (no orders) |
 
 Research is for analysis; live orders stay on Live trading. This is **not** a Sensibull/Tradetron option-chain product.
 
@@ -38,7 +38,7 @@ Instructions/StockBroker/
   README.md
   SKILL.md
   teams/          learning.md  paper_trading.md  live_trading.md  research.md
-  agents/         learning_guide.md  paper_trader.md  live_trader.md  researcher.md
+  agents/         learning_guide.md  paper_trader.md  live_trader.md
   workflows/
   tools/          stock_broker_toolkit.py  research_toolkit.py  groww_toolkit.py  kite_toolkit.py
 ```
@@ -50,7 +50,6 @@ Instructions/StockBroker/
 | Agent | `learning-guide` | `agents/learning_guide.md` |
 | Agent | `paper-trader` | `agents/paper_trader.md` |
 | Agent | `live-trader` | `agents/live_trader.md` |
-| Agent | `researcher` | `agents/researcher.md` |
 | Team | `learning` | `teams/learning.md` |
 | Team | `paper-trading` | `teams/paper_trading.md` |
 | Team | `live-trading` | `teams/live_trading.md` |

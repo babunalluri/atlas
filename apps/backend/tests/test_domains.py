@@ -40,21 +40,23 @@ def test_stock_broker_pack_includes_research_and_auto_assign() -> None:
         "learning-guide",
         "paper-trader",
         "live-trader",
-        "researcher",
     }
+    assert "researcher" not in {row.slug for row in STOCK_BROKER.agents}
     assert {row.slug for row in STOCK_BROKER.teams} >= {
         "learning",
         "paper-trading",
         "live-trading",
         "research",
     }
+    # Research is leader-only: no member agent, so the team itself must carry the
+    # tool-required rules and run in a mode that does not route to members.
     research = next(row for row in STOCK_BROKER.teams if row.slug == "research")
-    assert research.member_slugs == ["researcher"]
-    researcher = next(row for row in STOCK_BROKER.agents if row.slug == "researcher")
-    assert "MUST call tools" in researcher.instructions
-    assert "tool-required" in researcher.description or "You MUST call tools" in researcher.instructions
-    assert "place_order" in researcher.instructions
-    assert "Never invent" in researcher.instructions
+    assert research.member_slugs == []
+    assert research.mode == "coordinate"
+    assert "MUST call tools" in research.instructions
+    assert "research_option_payoff" in research.instructions
+    assert "place_order" in research.instructions
+    assert "Never invent" in research.instructions
 
 
 @pytest.fixture
@@ -121,12 +123,11 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
                 select(WorkflowConfig).where(WorkflowConfig.tenant_id == tenant.id)
             )
         ).all()
-        assert len(agents) == 4
+        assert len(agents) == 3
         assert {row.slug for row in agents} == {
             "learning-guide",
             "paper-trader",
             "live-trader",
-            "researcher",
         }
         assert len(teams) == 4
         assert {row.slug for row in teams} == {

@@ -29,6 +29,14 @@ STOCK_BROKER_DESKS: dict[str, str] = {
     "researcher": "research",
 }
 
+# Slugs retired from the live pack that still exist in tenants provisioned
+# earlier. Research is leader-only now, but pre-existing tenants kept their
+# ``researcher`` agent — keep classifying it so pack copy does not dump it into
+# General. A template reintroducing the slug wins over this map.
+LEGACY_SLUG_DOMAINS: dict[str, WorkspaceDomain] = {
+    "researcher": "stock_broker",
+}
+
 
 def canonical_catalog_slug(slug: str) -> str:
     """Strip clone/import ``-copy`` / ``-copy-N`` suffixes for grouping."""
@@ -45,7 +53,7 @@ def coerce_workspace_domain(value: str | None) -> WorkspaceDomain:
 
 
 def slug_domain_map() -> dict[str, WorkspaceDomain]:
-    mapping: dict[str, WorkspaceDomain] = {}
+    mapping: dict[str, WorkspaceDomain] = dict(LEGACY_SLUG_DOMAINS)
     for domain, template in DOMAIN_TEMPLATES.items():
         for spec in (*template.agents, *template.teams, *template.workflows):
             mapping[spec.slug] = domain  # type: ignore[assignment]

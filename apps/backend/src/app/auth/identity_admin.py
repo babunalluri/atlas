@@ -133,9 +133,11 @@ def humanize_identity_error(message: str) -> str:
     text = message.strip()
     lowered = text.lower()
     if "error-user-attribute-read-only" in lowered:
+        # Email, display name, and role travel in one profile write, so none of
+        # them stick when the realm rejects it. Only the password applies alone.
         return (
-            "That sign-in field cannot be changed. You can still update the "
-            "display name or password."
+            "That sign-in field is read-only and cannot be changed. Any "
+            "password you entered was still saved."
         )
     return text
 

@@ -83,25 +83,6 @@ STOCK_BROKER = DomainTemplate(
             ),
         ),
         AgentTemplate(
-            slug="researcher",
-            name="Researcher",
-            description="Tool-required stock and F&O analysis. No orders.",
-            instructions=(
-                "You are the Stock Broker Researcher. This window is analysis only. "
-                "You MUST call tools for any price, position, Greek, IV, payoff, or what-if. "
-                "If a tool fails or returns no data, say so. Never invent quotes, option chains, "
-                "candles, IV, Greeks, or P&L. "
-                "Use research_stock_snapshot, research_compare_symbols, and research_option_payoff "
-                "after fetching prints from assigned read-only quote tools (get_ltp / get_quote / "
-                "get_ohlc) or taking user-supplied strikes/LTPs. "
-                "Defined structures only: long_call, long_put, covered_call, bull_call_spread, "
-                "iron_condor. Groww/Kite quote tools have no live option chain — do not fake one. "
-                "Never call place_order, modify_order, cancel_order, or place_paper_order. "
-                "Research is for analysis; live orders stay on Live trading (HITL). "
-                "Hand concepts to Learning; paper practice to Paper trading."
-            ),
-        ),
-        AgentTemplate(
             slug="live-trader",
             name="Live Trader",
             description="Assigned broker account, holdings, and live orders.",
@@ -164,15 +145,29 @@ STOCK_BROKER = DomainTemplate(
             name="Research",
             description="Tool-required stock and F&O analysis. No orders.",
             instructions=(
-                "This is the Research workspace. Route to Researcher. "
+                "This is the Research workspace. You run leader-only — there is no member "
+                "agent to route to, so answer directly with the toolkits bound on this team. "
+                "This window is analysis only. "
                 "You MUST call tools for any price, position, Greek, IV, payoff, or what-if. "
-                "If a tool fails or returns no data, say so. Never invent quotes, chains, or P&L. "
-                "Research is for analysis; live orders stay on Live trading. "
-                "Never place, modify, or cancel paper or live orders. "
+                "If a tool fails or returns no data, say so. Never invent quotes, option chains, "
+                "candles, IV, Greeks, or P&L. "
+                "Use research_stock_snapshot, research_compare_symbols, and research_option_payoff "
+                "after fetching prints from assigned read-only quote tools (get_ltp / get_quote / "
+                "get_ohlc) or taking user-supplied strikes/LTPs. "
+                "Always try the bound quote tools first — ask the user for a price only after a "
+                "tool call actually failed or no quote tool is bound. "
+                "If no quote toolkit is bound to this team, say so plainly: analysis needs a "
+                "quote-capable broker toolkit bound to the Research team, and an admin does that "
+                "in Team Builder. Then offer to run the math on a price the user supplies. "
+                "Defined structures only: long_call, long_put, covered_call, bull_call_spread, "
+                "iron_condor. Groww/Kite quote tools have no live option chain — do not fake one. "
+                "Never call place_order, modify_order, cancel_order, or place_paper_order. "
+                "Research is for analysis; live orders stay on Live trading (HITL). "
                 "Hand concepts to Learning; paper practice to Paper trading."
             ),
-            mode="route",
-            member_slugs=["researcher"],
+            # Leader-only: Agno Team runs with no members and calls Team.tools itself.
+            mode="coordinate",
+            member_slugs=[],
         ),
     ],
     workflows=[

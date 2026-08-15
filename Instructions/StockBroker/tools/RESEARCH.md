@@ -6,6 +6,9 @@ Compute-only strategy math for the **Research** desk team. It does **not** call
 Groww, Kite, or any broker. Live prints come from whichever vendor toolkit is
 assigned on Research (`get_ltp` / `get_quote` / `get_ohlc`).
 
+Research runs **leader-only** — the team has no member agent, so every toolkit
+below binds to the **team**, not to an agent.
+
 This is **not** Sensibull / Tradetron / OpenAlgo. No option-chain UI, no
 strategy builder, no live order routing.
 
@@ -14,9 +17,10 @@ strategy builder, no live order routing.
 1. Tool Builder → Editable Python → paste `research_toolkit.py`.
 2. No host allowlist and no credentials — there is no HTTP client.
 3. Validate → Publish. Do **not** mark any capability mutating.
-4. Attach to the **Research** team (and the Researcher agent). Optionally attach
-   the tenant’s broker toolkit on the same team for **read-only** quotes
-   (`get_ltp`, `get_quote`, `get_ohlc`). Do not auto-bind Groww.
+4. Attach to the **Research** team. There is no Researcher agent to bind — the
+   team leader calls these tools itself. Optionally attach the tenant’s broker
+   toolkit on the same team for **read-only** quotes (`get_ltp`, `get_quote`,
+   `get_ohlc`). Do not auto-bind Groww.
 5. Never attach `place_order` / `modify_order` / `cancel_order` for Research use.
 
 ## Capabilities
@@ -30,7 +34,7 @@ strategy builder, no live order routing.
 Defined F&O structures only: `long_call`, `long_put`, `covered_call`,
 `bull_call_spread`, `iron_condor`.
 
-## Agent usage notes
+## Team usage notes
 
 - You MUST fetch or collect every price before calling these tools.
 - If quote tools fail or return nothing, say so. Never invent LTP, IV, Greeks, or a chain.

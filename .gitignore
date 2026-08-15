@@ -1,5 +1,7 @@
 .env
-.venv/
+# No trailing slash: the repo root .venv is a symlink to apps/backend/.venv,
+# and a directory-only pattern would not match it.
+.venv
 __pycache__/
 *.py[cod]
 .pytest_cache/

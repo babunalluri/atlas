@@ -85,8 +85,10 @@ export function formatApiError(
 
 function humanizeApiError(message: string): string {
   if (/error-user-attribute-read-only/i.test(message)) {
+    // Email, display name, and role travel in one profile write, so none of
+    // them stick when the realm rejects it. Only the password applies alone.
     return (
-      "That sign-in field cannot be changed. You can still update the display name or password."
+      "That sign-in field is read-only and cannot be changed. Any password you entered was still saved."
     );
   }
   if (
