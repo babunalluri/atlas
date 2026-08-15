@@ -12,8 +12,10 @@ import {
 
 export function LanguageSwitcher({
   className,
+  labeled = false,
 }: {
   className?: string;
+  labeled?: boolean;
 }) {
   const t = useTranslations("common");
   const locale = useLocale() as AppLocale;
@@ -23,7 +25,13 @@ export function LanguageSwitcher({
 
   return (
     <label className={className}>
-      <span className="sr-only">{t("language")}</span>
+      {labeled ? (
+        <span className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-muted">
+          {t("language")}
+        </span>
+      ) : (
+        <span className="sr-only">{t("language")}</span>
+      )}
       <select
         value={locale}
         disabled={pending}
@@ -34,7 +42,11 @@ export function LanguageSwitcher({
             router.replace(pathname, { locale: next });
           });
         }}
-        className="max-w-[9.5rem] truncate rounded-md border border-line bg-raised px-2 py-1.5 text-xs font-medium text-ink outline-none focus:border-teal focus:ring-2 focus:ring-teal/20"
+        className={
+          labeled
+            ? "w-full truncate rounded-md border border-line bg-raised px-2 py-1.5 text-xs font-medium text-ink outline-none focus:border-teal focus:ring-2 focus:ring-teal/20"
+            : "max-w-[9.5rem] truncate rounded-md border border-line bg-raised px-2 py-1.5 text-xs font-medium text-ink outline-none focus:border-teal focus:ring-2 focus:ring-teal/20"
+        }
       >
         {locales.map((code) => (
           <option key={code} value={code}>

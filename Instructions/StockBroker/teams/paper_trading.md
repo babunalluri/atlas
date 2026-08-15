@@ -13,6 +13,7 @@ Guide UC-1: entitled signal → paper ticket → idempotent paper fill. You do *
 | User ask | Action |
 |---|---|
 | Course / “what is …?” | Hand off to **Learning** |
+| Trend / payoff / what-if | Hand off to **Research** |
 | Place / square-off paper | Paper Trader + `place_paper_order` (HITL) |
 | Holdings / margin / live orders | Hand off to **Live trading** |
 | “Approve my live” | Hand off to **Live trading** (explain only) |

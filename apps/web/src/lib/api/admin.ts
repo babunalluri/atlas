@@ -2870,6 +2870,96 @@ export async function getTrace(
   };
 }
 
+export type UserTraceSummary = TraceSummary & {
+  sessionTitle: string | null;
+  targetName: string | null;
+  error: string | null;
+};
+
+export type UserTraceDetail = TraceDetail & {
+  sessionTitle: string | null;
+  targetName: string | null;
+  error: string | null;
+};
+
+interface BackendUserTraceSummary extends BackendTraceSummary {
+  session_title: string | null;
+  target_name: string | null;
+  error: string | null;
+}
+
+function mapUserTrace(row: BackendUserTraceSummary): UserTraceSummary {
+  return {
+    ...mapTrace(row),
+    sessionTitle: row.session_title,
+    targetName: row.target_name,
+    error: row.error,
+  };
+}
+
+export async function listMyTraces(
+  accessToken: string,
+  options?: { limit?: number },
+): Promise<UserTraceSummary[]> {
+  const params = new URLSearchParams();
+  if (options?.limit) params.set("limit", String(options.limit));
+  const query = params.toString();
+  const rows = await apiFetch<BackendUserTraceSummary[]>(
+    `/api/me/traces${query ? `?${query}` : ""}`,
+    { accessToken },
+  );
+  return rows.map(mapUserTrace);
+}
+
+export async function getMyTrace(
+  accessToken: string,
+  traceId: string,
+): Promise<UserTraceDetail> {
+  const row = await apiFetch<
+    BackendUserTraceSummary & {
+      input: Record<string, unknown>;
+      output: Record<string, unknown>;
+      metadata: Record<string, unknown>;
+      spans: Array<{
+        id: string;
+        parent_span_id: string | null;
+        name: string;
+        kind: string;
+        status: string;
+        sequence: number;
+        attributes: Record<string, unknown>;
+        input: Record<string, unknown>;
+        output: Record<string, unknown>;
+        error: string | null;
+        started_at: string;
+        ended_at: string | null;
+        duration_ms: number | null;
+      }>;
+    }
+  >(`/api/me/traces/${traceId}`, { accessToken });
+  return {
+    ...mapUserTrace(row),
+    input: row.input,
+    output: row.output,
+    metadata: row.metadata,
+    spans: row.spans.map((span) => ({
+      id: span.id,
+      parentSpanId: span.parent_span_id,
+      name: span.name,
+      kind: span.kind,
+      status: span.status,
+      sequence: span.sequence,
+      attributes: span.attributes,
+      input: span.input,
+      output: span.output,
+      error: span.error,
+      startedAt: span.started_at,
+      endedAt: span.ended_at,
+      durationMs: span.duration_ms,
+    })),
+  };
+}
+
 interface BackendToolDefinition {
   id: string;
   name: string;

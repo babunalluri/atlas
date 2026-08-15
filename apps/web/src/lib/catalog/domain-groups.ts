@@ -10,7 +10,7 @@
 
 export type CatalogDomainId = "stock_broker" | "dental_clinic" | "generic";
 export type CatalogDomainFilter = "all" | CatalogDomainId;
-export type CatalogDeskId = "learning" | "paper" | "live" | "other";
+export type CatalogDeskId = "learning" | "paper" | "live" | "research" | "other";
 
 export const CATALOG_DOMAIN_LABELS: Record<CatalogDomainId, string> = {
   stock_broker: "Stock Broker",
@@ -22,6 +22,7 @@ const DESK_LABELS: Record<Exclude<CatalogDeskId, "other">, string> = {
   learning: "Learning",
   paper: "Paper trading",
   live: "Live trading",
+  research: "Research",
 };
 
 const DOMAIN_ORDER: CatalogDomainId[] = [
@@ -30,7 +31,7 @@ const DOMAIN_ORDER: CatalogDomainId[] = [
   "generic",
 ];
 
-const DESK_ORDER: CatalogDeskId[] = ["learning", "paper", "live", "other"];
+const DESK_ORDER: CatalogDeskId[] = ["learning", "paper", "live", "research", "other"];
 
 const STOCK_BROKER_SLUGS: Record<string, CatalogDeskId> = {
   learning: "learning",
@@ -41,6 +42,8 @@ const STOCK_BROKER_SLUGS: Record<string, CatalogDeskId> = {
   "live-trading": "live",
   "live-trader": "live",
   "live-approval": "live",
+  research: "research",
+  researcher: "research",
 };
 
 const DENTAL_SLUGS = new Set([

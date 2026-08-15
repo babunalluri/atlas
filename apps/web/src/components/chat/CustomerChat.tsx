@@ -29,6 +29,7 @@ import {
 } from "@/lib/agentos/sse";
 import {
   cancelConfiguredRun,
+  formatApiError,
   resumeConfiguredRun,
   streamConfiguredTeam,
   streamConfiguredWorkflow,
@@ -550,39 +551,35 @@ export function CustomerChat({
               ),
             );
           } else {
+            const readable = formatApiError(resumeErr, formatApiError(err, "Stream failed"));
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
                   ? {
                       ...m,
-                      content: m.content || "The run could not be completed.",
+                      content: m.content || readable,
                       status: "error",
                     }
                   : m,
               ),
             );
-            setError(
-              resumeErr instanceof Error
-                ? resumeErr.message
-                : err instanceof Error
-                  ? err.message
-                  : "Stream failed",
-            );
+            setError(readable);
           }
         }
       } else {
+        const readable = formatApiError(err, "Stream failed");
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
               ? {
                   ...m,
-                  content: m.content || "The run could not be completed.",
+                  content: m.content || readable,
                   status: "error",
                 }
               : m,
           ),
         );
-        setError(err instanceof Error ? err.message : "Stream failed");
+        setError(readable);
       }
     } finally {
       setStreaming(false);

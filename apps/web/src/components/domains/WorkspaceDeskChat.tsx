@@ -13,6 +13,7 @@ import {
 } from "@/lib/agentos/sse";
 import {
   cancelConfiguredRun,
+  formatApiError,
   streamConfiguredTeam,
 } from "@/lib/agentos/client";
 import { DeskChatPills } from "@/components/domains/DeskChat";
@@ -32,13 +33,16 @@ function deskWelcome(
     return "No desk chats are assigned to you yet. Ask your administrator to assign a team.";
   }
   if (target.slug === "learning") {
-    return "You're in Learning. Ask concepts, or generic ticker questions like “What’s TCS doing?” — I can use quotes if a toolkit is assigned, but I won’t predict prices. Paper fills go to Paper trading; holdings to Live trading.";
+    return "You're in Learning. Ask concepts, or generic ticker questions like “What’s TCS doing?” — I can use quotes if a toolkit is assigned, but I won’t predict prices. Strategy math goes to Research; paper fills to Paper trading; holdings to Live trading.";
   }
   if (target.slug === "paper-trading") {
-    return `You're in Paper trading. Practice signals with virtual capital. Live demat uses ${brokerLabel} in Live trading.`;
+    return `You're in Paper trading. Practice signals with virtual capital. Research is for analysis; live orders stay on Live trading (${brokerLabel}).`;
   }
   if (target.slug === "live-trading") {
-    return `You're in Live trading. Holdings, margin, and live orders use ${brokerLabel}. Paper practice stays in Paper trading.`;
+    return `You're in Live trading. Holdings, margin, and live orders use ${brokerLabel}. Research is for analysis; paper practice stays in Paper trading.`;
+  }
+  if (target.slug === "research") {
+    return "You're in Research. I analyze stocks and defined F&O structures with tools — I won’t invent quotes, chains, or P&L. Research is for analysis; live orders stay on Live trading.";
   }
   return `You're in ${target.name}. Ask anything this team is set up to handle.`;
 }
@@ -62,6 +66,12 @@ function deskStarters(
         ? `Check ${brokerNames[0]} holdings and positions`
         : "Show my holdings and margin",
       "Why is live disarmed?",
+    ];
+  }
+  if (target?.slug === "research") {
+    return [
+      "What’s the trend on RELIANCE from the latest quote?",
+      "Payoff for a bull call spread — I’ll need strikes and LTPs",
     ];
   }
   return [];
@@ -255,13 +265,14 @@ export function WorkspaceDeskChat({
           ),
         );
       } else {
-        setError(err instanceof Error ? err.message : "Stream failed");
+        const readable = formatApiError(err, "Stream failed");
+        setError(readable);
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
               ? {
                   ...m,
-                  content: m.content || "The run could not be completed.",
+                  content: m.content || readable,
                   status: "error",
                 }
               : m,

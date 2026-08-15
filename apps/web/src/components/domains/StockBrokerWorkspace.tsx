@@ -56,8 +56,8 @@ export function StockBrokerWorkspace({
             </h1>
             <p className="mt-1 max-w-xl text-sm text-slate-muted">
               {customer
-                ? "Chat tabs match the teams assigned to you. Use Refresh to load orders, positions, and watchlist from the toolkit on a trading team."
-                : "Chat tabs match assigned teams. Desk books load through the toolkit assigned on a trading team. Chart is TradingView. Refresh loads a new snapshot."}
+                ? "Research is for analysis; live orders stay on Live trading. Chat tabs match the teams assigned to you. Use Refresh to load orders, positions, and watchlist from the toolkit on a trading team."
+                : "Research is for analysis; live orders stay on Live trading. Chat tabs match assigned teams. Desk books load through the toolkit assigned on a trading team. Chart is TradingView. Refresh loads a new snapshot."}
             </p>
           </div>
           <div className="flex flex-col items-end gap-2">

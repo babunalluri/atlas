@@ -93,6 +93,7 @@ class TraceRepository:
         status: str | None = None,
         target_type: str | None = None,
         external_session_id: str | None = None,
+        user_id: str | None = None,
         limit: int = 100,
     ) -> Sequence[TraceRecord]:
         statement = select(TraceRecord).where(TraceRecord.tenant_id == self.context.tenant_id)
@@ -102,6 +103,8 @@ class TraceRepository:
             statement = statement.where(TraceRecord.target_type == target_type)
         if external_session_id:
             statement = statement.where(TraceRecord.external_session_id == external_session_id)
+        if user_id:
+            statement = statement.where(TraceRecord.user_id == user_id)
         rows = await self.session.scalars(
             statement.order_by(TraceRecord.started_at.desc()).limit(limit)
         )

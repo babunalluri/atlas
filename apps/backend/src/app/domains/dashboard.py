@@ -120,7 +120,7 @@ class DomainDashboardService:
                 "broker_tools": [],
                 "desk_snapshot": None,
             }
-        keep_ids = {"learning", "paper_flow", "live_approval", "broker_tools"}
+        keep_ids = {"learning", "paper_flow", "live_approval", "research", "broker_tools"}
         payload["widgets"] = [
             widget
             for widget in payload["widgets"]
@@ -208,7 +208,7 @@ class DomainDashboardService:
                     "id": "desk_runs",
                     "label": "Desk runs",
                     "value": str(kpis.get("runs", 0)),
-                    "hint": "Learning, paper, and live chats in range",
+                    "hint": "Learning, paper, live, and research chats in range",
                     "group": "ops",
                 },
                 {
@@ -254,6 +254,13 @@ class DomainDashboardService:
                     "group": "signals",
                 },
                 {
+                    "id": "research",
+                    "label": "Research",
+                    "value": "Ready" if "research" in team_slugs else "Setup",
+                    "hint": "Analysis only — live orders stay on Live trading",
+                    "group": "signals",
+                },
+                {
                     "id": "customer_sessions",
                     "label": "Chat sessions",
                     "value": str(kpis.get("unique_sessions", 0)),
@@ -267,10 +274,11 @@ class DomainDashboardService:
                         sum(
                             1
                             for slug in team_slugs
-                            if slug in {"learning", "paper-trading", "live-trading"}
+                            if slug
+                            in {"learning", "paper-trading", "live-trading", "research"}
                         )
                     ),
-                    "hint": "Learning, Paper trading, Live trading",
+                    "hint": "Learning, Paper trading, Live trading, Research",
                     "group": "signals",
                 },
                 {
@@ -388,7 +396,7 @@ class DomainDashboardService:
     ) -> list[dict[str, str]]:
         if domain == "stock_broker":
             return [
-                {"label": "Learning / Paper / Live", "href": "/admin/teams"},
+                {"label": "Learning / Paper / Live / Research", "href": "/admin/teams"},
                 {"label": "Broker tools", "href": "/admin/tools"},
                 {"label": "Workflows", "href": "/admin/workflows"},
                 {"label": "Approvals", "href": "/admin/approvals"},

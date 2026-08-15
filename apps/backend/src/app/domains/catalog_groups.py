@@ -25,6 +25,8 @@ STOCK_BROKER_DESKS: dict[str, str] = {
     "live-trading": "live",
     "live-trader": "live",
     "live-approval": "live",
+    "research": "research",
+    "researcher": "research",
 }
 
 
@@ -63,7 +65,7 @@ def _slug_domains() -> dict[str, WorkspaceDomain]:
 def classify_catalog_slug(slug: str) -> tuple[WorkspaceDomain, str | None]:
     """Return ``(domain, desk)`` from a catalog slug.
 
-    ``desk`` is set only for Stock Broker learning / paper / live resources.
+    ``desk`` is set only for Stock Broker learning / paper / live / research resources.
     """
     canonical = canonical_catalog_slug(slug)
     domain = _slug_domains().get(canonical, "generic")

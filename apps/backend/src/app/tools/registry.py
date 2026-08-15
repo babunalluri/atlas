@@ -59,8 +59,13 @@ class SafeRestClient:
         """Validate scheme/host allowlist and return resolved global IPs."""
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower().rstrip(".")
+        display_host = host or (parsed.netloc or "missing")
         if parsed.scheme != "https" or not host or host not in self.allowed_hosts:
-            raise UnsafeOutboundRequest("Only allowlisted HTTPS hosts are permitted")
+            raise UnsafeOutboundRequest(
+                f"Host {display_host!r} is not permitted: only allowlisted HTTPS "
+                "hosts are allowed (add it to REST_TOOL_ALLOWED_HOSTS / "
+                "BACKEND_ALLOWED_OUTBOUND_HOSTS)."
+            )
         try:
             addresses = await _resolve(host, parsed.port or 443)
         except OSError as exc:

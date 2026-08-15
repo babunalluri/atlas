@@ -5,8 +5,9 @@ import { useSession } from "next-auth/react";
 import { useLocale } from "next-intl";
 import { useEffect, useState } from "react";
 
-import { UserIdentityChip } from "@/components/auth/UserIdentityChip";
 import { useSignInModal } from "@/components/auth/SignInModalProvider";
+import { WorkspaceProfileMenu } from "@/components/chat/WorkspaceProfileMenu";
+import { WorkspaceTracesButton } from "@/components/chat/WorkspaceTracesPanel";
 import { Link } from "@/i18n/navigation";
 import { getWorkspaceInfo } from "@/lib/api/admin";
 import {
@@ -14,7 +15,6 @@ import {
   visibleAuthSession,
 } from "@/lib/auth/auth-session";
 import { canOpenOrgAdmin, ORG_ADMIN_HREF } from "@/lib/auth/desk-admin";
-import { signOutFederated } from "@/lib/auth/federated-signout";
 import { localePrefixedPath } from "@/lib/auth/post-login";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { Button, buttonClassName } from "@/components/ui/Button";
@@ -82,7 +82,8 @@ export function ChatAccountBar({
 
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <UserIdentityChip user={session?.user} compact />
+      <WorkspaceTracesButton />
+      <WorkspaceProfileMenu user={session?.user} />
       {canAdminister ? (
         <a
           href={localePrefixedPath(locale, ORG_ADMIN_HREF)}
@@ -92,15 +93,6 @@ export function ChatAccountBar({
           Admin
         </a>
       ) : null}
-      <Button
-        type="button"
-        size="sm"
-        variant="secondary"
-        onClick={() => void signOutFederated(`/${locale}`)}
-        title={session?.user?.email || "Signed in"}
-      >
-        Sign out
-      </Button>
     </div>
   );
 }

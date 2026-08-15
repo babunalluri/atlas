@@ -4,6 +4,15 @@ from typing import Annotated
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Exact hostnames only (no wildcards). Groww hosts are included so local Stock
+# Broker orgs can save Groww MCP and the Python groww_toolkit without a
+# separate ops change.
+DEFAULT_ALLOWED_OUTBOUND_HOSTS: frozenset[str] = frozenset(
+    {"api.example.com", "httpbin.org", "mcp.groww.in", "api.groww.in"}
+)
+GROWW_MCP_HOST = "mcp.groww.in"
+GROWW_API_HOST = "api.groww.in"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -183,8 +192,9 @@ class Settings(BaseSettings):
         default=10, ge=0, le=128, validation_alias="DB_MAX_OVERFLOW"
     )
     allowed_outbound_hosts: Annotated[set[str], NoDecode] = Field(
-        default_factory=lambda: {"api.example.com", "httpbin.org"},
+        default_factory=lambda: set(DEFAULT_ALLOWED_OUTBOUND_HOSTS),
         validation_alias=AliasChoices("REST_TOOL_ALLOWED_HOSTS", "BACKEND_ALLOWED_OUTBOUND_HOSTS"),
+        description="Exact HTTPS hostnames tools may call (REST_TOOL_ALLOWED_HOSTS).",
     )
     openai_api_key: SecretStr = Field(
         default=SecretStr(""),
@@ -431,7 +441,11 @@ class Settings(BaseSettings):
     @classmethod
     def split_hosts(cls, value: object) -> object:
         if isinstance(value, str):
-            return {item.strip().lower() for item in value.split(",") if item.strip()}
+            return {
+                item.strip().lower().rstrip(".")
+                for item in value.split(",")
+                if item.strip()
+            }
         return value
 
     @property
@@ -470,6 +484,18 @@ class Settings(BaseSettings):
     @property
     def effective_migration_database_url(self) -> str:
         return self.migration_database_url or self.database_url
+
+    @model_validator(mode="after")
+    def include_local_groww_mcp_host(self) -> "Settings":
+        hosts = {host.lower().rstrip(".") for host in self.allowed_outbound_hosts}
+        # Env replaces the Python default; keep Groww hosts on local stacks so
+        # Stock Broker orgs can save MCP / groww_toolkit without editing
+        # REST_TOOL_ALLOWED_HOSTS.
+        if self.environment.lower() in {"development", "dev", "local"}:
+            hosts.add(GROWW_MCP_HOST)
+            hosts.add(GROWW_API_HOST)
+        self.allowed_outbound_hosts = hosts
+        return self
 
     @model_validator(mode="after")
     def reject_auth_bypass_outside_dev(self) -> "Settings":

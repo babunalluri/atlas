@@ -17,6 +17,8 @@ def test_classify_stock_broker_and_dental_slugs() -> None:
     assert classify_catalog_slug("learning-guide") == ("stock_broker", "learning")
     assert classify_catalog_slug("paper-trading-copy") == ("stock_broker", "paper")
     assert classify_catalog_slug("live-approval") == ("stock_broker", "live")
+    assert classify_catalog_slug("research") == ("stock_broker", "research")
+    assert classify_catalog_slug("researcher-copy") == ("stock_broker", "research")
     assert classify_catalog_slug("front-desk") == ("dental_clinic", None)
     assert classify_catalog_slug("research-bot") == ("generic", None)
 

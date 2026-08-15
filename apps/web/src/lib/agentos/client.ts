@@ -1,4 +1,5 @@
 import { streamAgentRun, streamPublicRun, type StreamRunOptions } from "./sse";
+import { SseError } from "./types";
 import type {
   ChatMessage,
   ConversationSession,
@@ -57,8 +58,24 @@ export function formatApiError(
   reason: unknown,
   fallback = "Request failed",
 ): string {
-  if (reason instanceof ApiError && reason.detail?.trim()) {
-    return humanizeApiError(reason.detail.trim());
+  if (reason instanceof SseError) {
+    const detail = summarizeApiErrorBody(reason.bodyText ?? "", "");
+    if (detail) {
+      return humanizeApiError(
+        reason.status ? `${reason.status}: ${detail}` : detail,
+      );
+    }
+    if (reason.message.trim()) {
+      return humanizeApiError(reason.message.trim());
+    }
+  }
+  if (reason instanceof ApiError) {
+    if (reason.status > 0 && reason.detail?.trim()) {
+      return humanizeApiError(`${reason.status}: ${reason.detail.trim()}`);
+    }
+    if (reason.message.trim()) {
+      return humanizeApiError(reason.message.trim());
+    }
   }
   if (reason instanceof Error && reason.message.trim()) {
     return humanizeApiError(reason.message.trim());
@@ -72,7 +89,56 @@ function humanizeApiError(message: string): string {
       "That sign-in field cannot be changed. You can still update the display name or password."
     );
   }
+  if (
+    /^failed to fetch$/i.test(message) ||
+    /networkerror when attempting to fetch/i.test(message) ||
+    /^load failed$/i.test(message)
+  ) {
+    return (
+      "Could not reach the Atlas API. The browser never received a response " +
+      "(backend down, CORS, DNS, or the connection was reset). " +
+      "Remote MCP endpoints are called from the Atlas backend, not the browser."
+    );
+  }
+  if (/select at least one reviewed mcp tool/i.test(message)) {
+    return (
+      "An MCP tool is attached but has no reviewed tools selected " +
+      "(enumerate usually failed with 401 / no usable credential). " +
+      "Detach that MCP tool from the team and keep the published Python groww_toolkit for Live trading."
+    );
+  }
   return message;
+}
+
+function describeFetchFailure(
+  reason: unknown,
+  method: string,
+  path: string,
+): ApiError {
+  const target = agentOsUrl(path);
+  const raw =
+    reason instanceof Error && reason.message.trim()
+      ? reason.message.trim()
+      : String(reason);
+  const aborted =
+    (typeof DOMException !== "undefined" &&
+      reason instanceof DOMException &&
+      reason.name === "AbortError") ||
+    (reason instanceof Error && reason.name === "AbortError");
+  if (aborted) {
+    return new ApiError(
+      `Atlas API ${method} ${path} timed out or was cancelled (${target}).`,
+      0,
+      raw,
+    );
+  }
+  return new ApiError(
+    `Could not reach Atlas API ${method} ${path} (${target}). ` +
+      "The browser never received a response — backend down, CORS, DNS, or the connection was reset. " +
+      "Remote MCP hosts are not called from the browser.",
+    0,
+    raw,
+  );
 }
 
 const API_ERROR_MESSAGE_MAX = 400;
@@ -132,6 +198,12 @@ export function summarizeApiErrorBody(
       if (typeof record.error === "string") {
         return truncateMessage(record.error);
       }
+      if (record.error && typeof record.error === "object") {
+        const nested = record.error as { message?: unknown };
+        if (typeof nested.message === "string" && nested.message.trim()) {
+          return truncateMessage(nested.message);
+        }
+      }
     }
   } catch {
     // Non-JSON bodies fall through to a truncated raw string.
@@ -153,30 +225,35 @@ export async function apiFetch<T>(
   const platformTenantId = path.startsWith("/admin/platform")
     ? undefined
     : access.platformTenantId;
-  const response = await fetch(agentOsUrl(path), {
-    method,
-    signal,
-    headers: {
-      Authorization: `Bearer ${access.token}`,
-      Accept: "application/json",
-      ...(platformTenantId
-        ? { "X-Platform-Tenant-ID": platformTenantId }
-        : {}),
-      ...(process.env.NEXT_PUBLIC_DEV_AUTH === "true"
-        ? {
-            "X-Dev-Tenant-ID":
-              process.env.NEXT_PUBLIC_DEV_TENANT_ID ??
-              "11111111-1111-1111-1111-111111111111",
-            "X-Dev-User-ID":
-              process.env.NEXT_PUBLIC_DEV_USER_ID ?? "dev-admin",
-            "X-Dev-Role":
-              process.env.NEXT_PUBLIC_DEV_ROLE ?? "tenant_admin",
-          }
-        : {}),
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(agentOsUrl(path), {
+      method,
+      signal,
+      headers: {
+        Authorization: `Bearer ${access.token}`,
+        Accept: "application/json",
+        ...(platformTenantId
+          ? { "X-Platform-Tenant-ID": platformTenantId }
+          : {}),
+        ...(process.env.NEXT_PUBLIC_DEV_AUTH === "true"
+          ? {
+              "X-Dev-Tenant-ID":
+                process.env.NEXT_PUBLIC_DEV_TENANT_ID ??
+                "11111111-1111-1111-1111-111111111111",
+              "X-Dev-User-ID":
+                process.env.NEXT_PUBLIC_DEV_USER_ID ?? "dev-admin",
+              "X-Dev-Role":
+                process.env.NEXT_PUBLIC_DEV_ROLE ?? "tenant_admin",
+            }
+          : {}),
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (reason) {
+    throw describeFetchFailure(reason, method, path);
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");

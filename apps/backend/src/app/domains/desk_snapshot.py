@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent_runtime.factory import AgentFactoryService
+from app.agent_runtime.factory import AgentFactoryService, McpToolSkipped
 from app.db.models import AgentToolBinding, TeamToolBinding
 from app.db.repositories import AgentRepository, TeamRepository, ToolDefinitionRepository
 from app.tenancy.context import TenantContext
@@ -82,6 +82,13 @@ _LIST_KEYS = (
 CORE_BOOK_TABS = ("orders", "positions", "holdings", "watchlist")
 
 
+def broker_display_name(name: str, slug: str = "") -> str:
+    """Correct known desk-copy typos without renaming the stored tool."""
+    if name == "groww_tookit" or slug == "groww-tookit":
+        return "groww_toolkit"
+    return name
+
+
 class DeskSnapshotService:
     def __init__(self, session: AsyncSession, context: TenantContext) -> None:
         self.session = session
@@ -106,7 +113,11 @@ class DeskSnapshotService:
                 {
                     "id": key,
                     "slug": definition.slug if definition else (binding.tool_key or "tool"),
-                    "name": definition.name if definition else (binding.tool_key or "Tool"),
+                    "name": (
+                        broker_display_name(definition.name, definition.slug)
+                        if definition
+                        else (binding.tool_key or "Tool")
+                    ),
                     "kind": definition.kind if definition else "builtin",
                     "active": bool(definition.active) if definition else True,
                     "published": bool(definition.published_version_id) if definition else True,
@@ -161,11 +172,19 @@ class DeskSnapshotService:
             if binding.tool_definition_id is None:
                 continue
             definition = await self.tools.get(binding.tool_definition_id)
-            via = f"{team.name} → {definition.name if definition else 'tool'}"
+            shown = (
+                broker_display_name(definition.name, definition.slug)
+                if definition
+                else "tool"
+            )
+            via = f"{team.name} → {shown}"
             if source:
-                via = f"{team.name} / {source} → {definition.name if definition else 'tool'}"
+                via = f"{team.name} / {source} → {shown}"
             try:
                 built = await factory._build_tool(binding)
+            except McpToolSkipped as exc:
+                errors.append(f"{via}: {exc.user_message()}")
+                continue
             except Exception as exc:  # noqa: BLE001 — surface tool errors on the desk
                 errors.append(f"{via}: {exc}")
                 continue
@@ -203,7 +222,7 @@ class DeskSnapshotService:
                     widgets.append(
                         {
                             "id": row_id,
-                            "label": f"{label} ({definition.name if definition else name})",
+                            "label": f"{label} ({shown if definition else name})",
                             "value": (
                                 "Error"
                                 if result_error

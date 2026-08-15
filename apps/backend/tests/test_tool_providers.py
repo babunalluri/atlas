@@ -1,5 +1,6 @@
-from types import SimpleNamespace
+import json
 
+import httpx
 import pytest
 
 from app.tools.custom import CUSTOM_TOOL_BY_KEY
@@ -315,27 +316,53 @@ async def test_side_effect_toolkit_marks_mutations_for_approval():
 
 
 @pytest.mark.asyncio
-async def test_mcp_discovery_closes_mock_client(monkeypatch):
-    events = []
-
-    class FakeToolkit:
-        include_tools = ["selected"]
-        functions = {
-            "preview_read": SimpleNamespace(
-                name="preview_read",
-                description="Read data",
-                parameters={"type": "object", "properties": {}},
+async def test_mcp_sse_lists_tools_over_httpx(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                text="event: endpoint\ndata: /messages\n\n",
+                headers={"content-type": "text/event-stream"},
             )
-        }
+        body = json.loads(request.content)
+        method = body.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": "2025-03-26", "capabilities": {}},
+                },
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/list":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "read",
+                                "description": "Read data",
+                                "inputSchema": {"type": "object", "properties": {}},
+                            }
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(400, json={"error": "unexpected"})
 
-        async def connect(self):
-            events.append("connect")
-
-        async def close(self):
-            events.append("close")
-
+    _mcp_client_with_transport(monkeypatch, handler)
     provider = MCPProvider()
-    monkeypatch.setattr(provider, "_toolkit", lambda *_args: FakeToolkit())
+
+    def boom(*_args, **_kwargs):
+        raise ImportError("`mcp` not installed. Please install using `pip install mcp`")
+
+    monkeypatch.setattr(provider, "_toolkit", boom)
     client = SafeRestClient({"mcp.example.com"})
 
     async def safe(_url):
@@ -344,12 +371,196 @@ async def test_mcp_discovery_closes_mock_client(monkeypatch):
     monkeypatch.setattr(client, "validate_url", safe)
     capabilities = await provider.enumerate_tools(
         {
-            "transport": "streamable-http",
-            "url": "https://mcp.example.com/mcp",
+            "transport": "sse",
+            "url": "https://mcp.example.com/sse",
             "include_tools": ["selected"],
         },
         client,
         {},
     )
     assert [item.name for item in capabilities] == ["read"]
-    assert events == ["connect", "close"]
+
+
+def _mcp_client_with_transport(monkeypatch, handler):
+    transport = httpx.MockTransport(handler)
+    original = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        kwargs["follow_redirects"] = False
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("app.tools.mcp_discover.httpx.AsyncClient", factory)
+
+
+@pytest.mark.asyncio
+async def test_mcp_streamable_http_maps_401_without_credential(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).rstrip("/") == "https://mcp.example.com/mcp" and not str(
+            request.url
+        ).endswith("/"):
+            return httpx.Response(
+                307, headers={"location": "https://mcp.example.com/mcp/"}
+            )
+        return httpx.Response(
+            401,
+            json={
+                "error": "invalid_token",
+                "error_description": "Authentication required",
+            },
+        )
+
+    _mcp_client_with_transport(monkeypatch, handler)
+    provider = MCPProvider()
+    client = SafeRestClient({"mcp.example.com"})
+
+    async def safe(_url):
+        return None
+
+    monkeypatch.setattr(client, "validate_url", safe)
+    with pytest.raises(ProviderValidationError, match="requires authentication") as err:
+        await provider.enumerate_tools(
+            {"transport": "streamable-http", "url": "https://mcp.example.com/mcp"},
+            client,
+            {},
+        )
+    assert "401" in str(err.value)
+    assert "No credential is bound" in str(err.value)
+    assert "Failed to fetch" not in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_mcp_streamable_http_lists_tools(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        method = body.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "serverInfo": {"name": "demo"},
+                    },
+                },
+                headers={"mcp-session-id": "sess-1"},
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "tools/list":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "get_quote",
+                                "description": "Quote",
+                                "inputSchema": {"type": "object", "properties": {}},
+                            }
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(400, json={"error": "unexpected"})
+
+    _mcp_client_with_transport(monkeypatch, handler)
+    provider = MCPProvider()
+    client = SafeRestClient({"mcp.example.com"})
+
+    async def safe(_url):
+        return None
+
+    monkeypatch.setattr(client, "validate_url", safe)
+    capabilities = await provider.enumerate_tools(
+        {"transport": "streamable-http", "url": "https://mcp.example.com/mcp"},
+        client,
+        {},
+    )
+    assert [item.name for item in capabilities] == ["get_quote"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_streamable_http_maps_timeout(monkeypatch):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("timed out")
+
+    _mcp_client_with_transport(monkeypatch, handler)
+    provider = MCPProvider()
+    client = SafeRestClient({"mcp.example.com"})
+
+    async def safe(_url):
+        return None
+
+    monkeypatch.setattr(client, "validate_url", safe)
+    with pytest.raises(ProviderValidationError, match="Timed out connecting"):
+        await provider.enumerate_tools(
+            {"transport": "streamable-http", "url": "https://mcp.example.com/mcp"},
+            client,
+            {},
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_streamable_http_enumerate_skips_agno(monkeypatch):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={
+                "error": "invalid_token",
+                "error_description": "Authentication required",
+            },
+        )
+
+    _mcp_client_with_transport(monkeypatch, handler)
+    provider = MCPProvider()
+
+    def boom(*_args, **_kwargs):
+        raise ImportError("`mcp` not installed. Please install using `pip install mcp`")
+
+    monkeypatch.setattr(provider, "_toolkit", boom)
+    client = SafeRestClient({"mcp.groww.in"})
+
+    async def safe(_url):
+        return None
+
+    monkeypatch.setattr(client, "validate_url", safe)
+    with pytest.raises(ProviderValidationError, match="requires authentication") as err:
+        await provider.enumerate_tools(
+            {"transport": "streamable-http", "url": "https://mcp.groww.in/mcp"},
+            client,
+            {},
+        )
+    assert "401" in str(err.value)
+    assert "No credential is bound" in str(err.value)
+    assert "mcp not installed" not in str(err.value).lower()
+    assert "Pin mcp" not in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_mcp_sse_against_mcp_path_asks_for_streamable_http(monkeypatch):
+    provider = MCPProvider()
+
+    def boom(*_args, **_kwargs):
+        raise ImportError("`mcp` not installed. Please install using `pip install mcp`")
+
+    monkeypatch.setattr(provider, "_toolkit", boom)
+    client = SafeRestClient({"mcp.groww.in"})
+
+    async def safe(_url):
+        return None
+
+    monkeypatch.setattr(client, "validate_url", safe)
+    with pytest.raises(ProviderValidationError, match="Streamable HTTP") as err:
+        await provider.enumerate_tools(
+            {"transport": "sse", "url": "https://mcp.groww.in/mcp"},
+            client,
+            {},
+        )
+    assert "mcp not installed" not in str(err.value).lower()
+    assert "SSE (legacy)" in str(err.value)

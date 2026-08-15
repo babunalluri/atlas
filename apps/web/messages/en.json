@@ -10,7 +10,40 @@
     "loading": "Loading…",
     "language": "Language",
     "backToWorkspace": "Back to workspace",
-    "exitTenant": "Exit"
+    "exitTenant": "Exit",
+    "profile": {
+      "open": "Open profile and settings",
+      "settings": "Your settings",
+      "vaultHint": "Keys for the broker tools assigned to you. Names must match what the tool reads (for example access_token).",
+      "secrets": "Secrets",
+      "variables": "Variables",
+      "name": "Name",
+      "value": "Value",
+      "savedHidden": "Saved · value hidden",
+      "update": "Update",
+      "newValue": "New value",
+      "noSecrets": "No secrets yet.",
+      "noVariables": "No variables yet."
+    },
+    "traces": {
+      "open": "Traces",
+      "title": "Your traces",
+      "hint": "Runs from your team and chat sessions. Only you can see these.",
+      "empty": "No traces yet. Send a message on the desk to see runs here.",
+      "back": "All traces",
+      "time": "Time",
+      "chat": "Team / chat",
+      "status": "Status",
+      "error": "Error",
+      "close": "Close traces",
+      "loadFailed": "Could not load traces",
+      "detailFailed": "Could not load this run",
+      "spans": "Spans",
+      "conversation": "Messages",
+      "noMessages": "No messages stored for this run.",
+      "user": "You",
+      "assistant": "Assistant"
+    }
   },
   "auth": {
     "signInTitle": "Sign in",

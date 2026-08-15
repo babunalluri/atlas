@@ -22,6 +22,7 @@ STOCK_BROKER_DESK_TEAMS: tuple[str, ...] = (
     "learning",
     "paper-trading",
     "live-trading",
+    "research",
 )
 
 DOMAIN_DEFAULT_TEAM_SLUGS: dict[WorkspaceDomain, tuple[str, ...]] = {
@@ -43,7 +44,7 @@ def default_branding(domain: WorkspaceDomain) -> dict[str, Any]:
         return {
             "primaryColor": "#0c4a6e",
             "accentColor": "#38bdf8",
-            "tagline": "Signals, paper trading, and live ops for your brokerage desk",
+            "tagline": "Research, paper trading, and live ops for your brokerage desk",
             "teamWelcomeMessage": "Welcome to your Stock Broker workspace. How can we help?",
             "workflowWelcomeMessage": "Start a guided trading workflow.",
         }

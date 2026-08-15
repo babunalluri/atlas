@@ -13,18 +13,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY alembic.ini ./
 COPY migrations ./migrations
 
 FROM base AS development
-RUN uv pip install -e ".[dev]"
+RUN uv pip install -e ".[dev]" "mcp>=1.28.1,<2" \
+  && python -c "import mcp"
 EXPOSE 7777
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7777", "--reload"]
 
 FROM base AS production
-RUN uv pip install . \
+RUN uv pip install . "mcp>=1.28.1,<2" \
+  && python -c "import mcp" \
   && addgroup --system app \
   && adduser --system --ingroup app app
 USER app

@@ -8,8 +8,11 @@ from app.credentials.provider import EncryptedEnvelope, LocalFernetCipher
 from app.db.models import Role
 from app.db.repositories import UserVaultRepository
 from app.tenancy.context import TenantContext
-from app.tools.providers import merge_user_vault_into_settings
-from app.vault import pick_user_token, session_state_for_user
+from app.tools.providers import (
+    merge_user_vault_into_settings,
+    resolve_tenant_python_runtime_settings,
+)
+from app.vault import aload_user_vault_map, pick_user_token, session_state_for_user
 
 
 @pytest.fixture
@@ -99,6 +102,15 @@ def test_merge_user_vault_overrides_settings():
     assert merged["timeout"] == 30
 
 
+def test_merge_user_vault_skips_empty_values():
+    merged = merge_user_vault_into_settings(
+        {"access_token": "tenant-token"},
+        {"access_token": "  ", "api_key": None},
+    )
+    assert merged["access_token"] == "tenant-token"
+    assert "api_key" not in merged
+
+
 def test_pick_user_token_preference_order():
     assert pick_user_token({"api_key": "a", "bearer_token": "b", "user_token": "u"}) == "u"
     assert pick_user_token({"api_key": "a", "bearer_token": "b"}) == "b"
@@ -116,3 +128,35 @@ def test_session_state_for_user_matches_resolve_token_path(tenant_a):
     assert data["user_token"] == "tok-1"
     assert data["userId"] == tenant_a.user_id
     assert data["freshdesk_domain"] == "acme"
+
+
+@pytest.mark.asyncio
+async def test_two_users_same_tool_load_own_vault_tokens(session, tenant_a, cipher):
+    """Same tenant credential + same tool: each chatting user sees their vault."""
+    session.info["tenant_id"] = tenant_a.tenant_id
+    user_b = TenantContext(
+        tenant_id=tenant_a.tenant_id,
+        user_id="user-b-same-tenant",
+        role=Role.end_user,
+        auth_org_id=tenant_a.auth_org_id,
+    )
+    for context, token in ((tenant_a, "token-a"), (user_b, "token-b")):
+        env = cipher.encrypt(token)
+        await UserVaultRepository(session, context).upsert(
+            user_id=context.user_id,
+            name="access_token",
+            kind="secret",
+            encrypted_value=env.ciphertext,
+            key_version=env.key_version,
+        )
+    await session.flush()
+
+    shared = '{"access_token":"shared-tenant-token","api_key":"tenant-key"}'
+    vault_a = await aload_user_vault_map(session, tenant_a)
+    vault_b = await aload_user_vault_map(session, user_b)
+    run_a, _ = resolve_tenant_python_runtime_settings({}, shared, vault_a)
+    run_b, _ = resolve_tenant_python_runtime_settings({}, shared, vault_b)
+    assert run_a["access_token"] == "token-a"
+    assert run_b["access_token"] == "token-b"
+    assert run_a["api_key"] == "tenant-key"
+    assert run_b["api_key"] == "tenant-key"

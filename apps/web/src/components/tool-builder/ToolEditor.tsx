@@ -23,6 +23,7 @@ import {
   validateToolDefinition,
 } from "@/lib/api/admin";
 import type { ToolCapability, ToolDefinition } from "@/lib/api/types";
+import { formatApiError } from "@/lib/agentos/client";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
 import { slugifyName } from "@/lib/validation/agent-form";
@@ -532,13 +533,20 @@ export function ToolEditor({
     setBanner(null);
     try {
       const token = await getAccessToken();
+      if (form.kind === "mcp") {
+        const saved = await updateToolDefinition(token, initial.id, {
+          ...form,
+          config: form.config,
+        });
+        setForm(applySavedForm(saved));
+      }
       const result = test
         ? await testToolDefinition(token, initial.id)
         : await enumerateToolCapabilities(token, initial.id);
       setCapabilities(result.capabilities);
       setBanner(result.message);
     } catch (error) {
-      setBanner(error instanceof Error ? error.message : "Provider check failed");
+      setBanner(formatApiError(error, "Provider check failed"));
     }
   }
 
@@ -886,8 +894,11 @@ export function ToolEditor({
                       ]}
                     />
                     <p className="mt-1 text-xs text-slate-muted">
-                      Optional JSON credential keys are available in tool code at
-                      runtime. Secret values are never returned to this page.
+                      Shared tenant fallback. For customers, put broker keys on
+                      each user (Users → Edit → Secrets & Variables, or the
+                      workspace profile). Names must match what the tool reads
+                      (for example access_token). Secret values are never
+                      returned to this page.
                     </p>
                   </div>
 
@@ -976,6 +987,12 @@ export function ToolEditor({
                         }
                         placeholder="https://mcp.example.com/mcp"
                       />
+                      <p className="mt-1 text-xs text-slate-muted">
+                        Enumerate and Test connection run on the Atlas backend.
+                        If the server requires auth, bind a credential below
+                        first — Atlas will not open a browser login or bind one
+                        automatically.
+                      </p>
                     </div>
                   </div>
                 </>

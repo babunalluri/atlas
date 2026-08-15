@@ -1,14 +1,16 @@
 # Stock Broker — Skill Reference
 
-Atlas skill pack for the Stock Broker **end-user desk**: three chats only.
+Atlas skill pack for the Stock Broker **end-user desk**: four chats.
 
-- **Workspace chats:** Learning · Paper trading · Live trading
+- **Workspace chats:** Learning · Paper trading · Live trading · Research
 - **Toolkit (platform):** `tools/stock_broker_toolkit.py` — signals, paper hub, algo status. Bind on Paper and/or Live as needed.
-- **Broker adapters:** vendor APIs stay vendor-specific. Assign whichever toolkit the tenant uses on **Live trading** (holdings/orders) and optionally **Learning** (read-only quotes):
+- **Research toolkit:** `tools/research_toolkit.py` + `tools/RESEARCH.md` — compute-only snapshots and defined F&O payoffs. Bind on **Research**. Not a full option-chain product.
+- **Broker adapters:** vendor APIs stay vendor-specific. Do **not** auto-bind Groww. Assign whichever toolkit the tenant uses on **Live trading** (holdings/orders) and optionally **Learning** / **Research** (read-only quotes):
   - Groww — `tools/groww_toolkit.py` + `tools/GROWW.md`
   - Zerodha Kite — `tools/kite_toolkit.py` + `tools/KITE.md`
   - Any later broker — publish the toolkit, assign it on those teams
 - **Learn policy:** Knowledge Base for lessons. Generic ticker questions (“predict TCS…”) stay in **Learning**: read-only quotes if a broker toolkit is assigned; **never** predict or guarantee prices. Do **not** rebuild Classplus.
+- **Research policy:** Analysis only. You MUST call tools for any price, position, Greek, IV, payoff, or what-if. Live orders stay on Live trading (HITL).
 - **Desk widgets:** Widget → Team → member Agent → **assigned** tool. Agents never call a broker that is not bound.
 
 ---
@@ -20,6 +22,7 @@ Atlas skill pack for the Stock Broker **end-user desk**: three chats only.
 | Learning | `agents/learning_guide.md` | KB + assigned read-only quotes (`get_ltp` / `get_quote` / `get_ohlc`) | no |
 | Paper trading | `agents/paper_trader.md` | signals + paper hub / `place_paper_order` | paper only (HITL) |
 | Live trading | `agents/live_trader.md` | assigned broker + algo status | live place/cancel (HITL) |
+| Research | `agents/researcher.md` | research toolkit + assigned read-only quotes | no |
 
 No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on this desk. Live eligibility and global kill stay in-product / HITL policy — the Live trader **explains**, it does not approve or trip kill.
 
@@ -32,6 +35,7 @@ No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on th
 | Learning | `learning` | Learning Guide | KB + generic market Qs (no predictions) |
 | Paper trading | `paper-trading` | Paper Trader | Signal → paper fill |
 | Live trading | `live-trading` | Live Trader | Assigned broker + live status |
+| Research | `research` | Researcher | Tool-required stock / F&O analysis (no orders) |
 
 ---
 
@@ -57,6 +61,14 @@ No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on th
 | `place_paper_order` | mutate | Paper |
 | `get_algo_status` / `list_strategy_packs` | read | Live |
 | `arm_algo` / `disarm_algo` | mutate | Live (HITL, policy) |
+
+### Research (Research team)
+
+| Capability | Read / mutate | Notes |
+|---|---|---|
+| `research_stock_snapshot` | read | Trend / MA / momentum / S-R from supplied prints |
+| `research_compare_symbols` | read | Two-symbol snapshot from supplied LTPs |
+| `research_option_payoff` | read | Defined structures only; no live chain |
 
 ### Broker adapters (Live) — generic aliases
 

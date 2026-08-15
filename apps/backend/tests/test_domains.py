@@ -22,8 +22,39 @@ from app.auth.identity_admin import ProvisionedIdentity
 from app.db.repositories import TeamRepository
 from app.domains.access import assign_domain_default_teams
 from app.domains.dashboard import order_desk_chat_targets
+from app.domains.templates import STOCK_BROKER
+from app.domains.types import DOMAIN_DEFAULT_TEAM_SLUGS, STOCK_BROKER_DESK_TEAMS
 from app.main import app
 from app.tenancy.context import TenantContext
+
+
+def test_stock_broker_pack_includes_research_and_auto_assign() -> None:
+    assert STOCK_BROKER_DESK_TEAMS == (
+        "learning",
+        "paper-trading",
+        "live-trading",
+        "research",
+    )
+    assert DOMAIN_DEFAULT_TEAM_SLUGS["stock_broker"] == STOCK_BROKER_DESK_TEAMS
+    assert {row.slug for row in STOCK_BROKER.agents} >= {
+        "learning-guide",
+        "paper-trader",
+        "live-trader",
+        "researcher",
+    }
+    assert {row.slug for row in STOCK_BROKER.teams} >= {
+        "learning",
+        "paper-trading",
+        "live-trading",
+        "research",
+    }
+    research = next(row for row in STOCK_BROKER.teams if row.slug == "research")
+    assert research.member_slugs == ["researcher"]
+    researcher = next(row for row in STOCK_BROKER.agents if row.slug == "researcher")
+    assert "MUST call tools" in researcher.instructions
+    assert "tool-required" in researcher.description or "You MUST call tools" in researcher.instructions
+    assert "place_order" in researcher.instructions
+    assert "Never invent" in researcher.instructions
 
 
 @pytest.fixture
@@ -90,17 +121,19 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
                 select(WorkflowConfig).where(WorkflowConfig.tenant_id == tenant.id)
             )
         ).all()
-        assert len(agents) == 3
+        assert len(agents) == 4
         assert {row.slug for row in agents} == {
             "learning-guide",
             "paper-trader",
             "live-trader",
+            "researcher",
         }
-        assert len(teams) == 3
+        assert len(teams) == 4
         assert {row.slug for row in teams} == {
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
         }
         assert len(workflows) == 2
         assignments = (
@@ -111,7 +144,7 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
                 )
             )
         ).all()
-        assert len(assignments) == 3
+        assert len(assignments) == 4
 
 
 @pytest.mark.asyncio
@@ -162,11 +195,12 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
             "paper_flow",
             "learning",
         }
-        assert body["catalog"]["teams"] == 3
+        assert body["catalog"]["teams"] == 4
         assert [row["slug"] for row in body["chat_targets"]] == [
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
         ]
         assert body["broker_tools"] == []
         assert any(row["id"] == "broker_tools" for row in body["widgets"])
@@ -249,12 +283,14 @@ async def test_end_user_gets_stock_broker_customer_desk(domains_db):
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
         ]
         assert body["quick_links"] == []
         assert {row["id"] for row in body["widgets"]} <= {
             "learning",
             "paper_flow",
             "live_approval",
+            "research",
             "broker_tools",
             "desk_broker",
         }
@@ -284,7 +320,7 @@ async def test_end_user_gets_stock_broker_customer_desk(domains_db):
                 )
             )
         ).all()
-        assert len(assigned) == 3
+        assert len(assigned) == 4
 
 
 def test_desk_snapshot_targets_live_and_paper_teams() -> None:
@@ -301,6 +337,7 @@ def test_order_desk_chat_targets_keeps_pack_order_then_named_extras() -> None:
     rows = [
         {"id": "4", "slug": "options-lab", "name": "Options lab", "published": True},
         {"id": "3", "slug": "live-trading", "name": "Live trading", "published": True},
+        {"id": "6", "slug": "research", "name": "Research", "published": True},
         {"id": "1", "slug": "learning", "name": "Learning", "published": True},
         {"id": "2", "slug": "paper-trading", "name": "Paper trading", "published": True},
         {"id": "5", "slug": "alpha-desk", "name": "Alpha desk", "published": True},
@@ -309,6 +346,7 @@ def test_order_desk_chat_targets_keeps_pack_order_then_named_extras() -> None:
         "learning",
         "paper-trading",
         "live-trading",
+        "research",
         "alpha-desk",
         "options-lab",
     ]
@@ -316,6 +354,7 @@ def test_order_desk_chat_targets_keeps_pack_order_then_named_extras() -> None:
         "Learning",
         "Paper trading",
         "Live trading",
+        "Research",
         "Alpha desk",
         "Options lab",
     ]
@@ -419,10 +458,12 @@ async def test_customer_desk_tabs_follow_assigned_teams(domains_db):
         assert [row["slug"] for row in body["chat_targets"]] == [
             "learning",
             "paper-trading",
+            "research",
         ]
         assert [row["name"] for row in body["chat_targets"]] == [
             "Learning",
             "Paper trading",
+            "Research",
         ]
 
     async with domains_db() as session:
@@ -509,12 +550,14 @@ async def test_customer_desk_includes_extra_assigned_team_by_name(domains_db):
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
             "learning-copy",
         ]
         assert [row["name"] for row in body["chat_targets"]] == [
             "Learning",
             "Paper trading",
             "Live trading",
+            "Research",
             "Options lab",
         ]
         dashboard = await client.get(
@@ -526,6 +569,7 @@ async def test_customer_desk_includes_extra_assigned_team_by_name(domains_db):
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
         ]
         assert "learning-copy" not in [
             row["slug"] for row in dashboard.json()["chat_targets"]
@@ -587,6 +631,7 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
         ]
         chat_slugs = {row["slug"] for row in body["chat_targets"]}
         assert extra_slug not in chat_slugs
@@ -599,6 +644,7 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
             "learning",
             "paper-trading",
             "live-trading",
+            "research",
         ]
 
     async with domains_db() as session:
@@ -631,11 +677,13 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
         assert [row["slug"] for row in dashboard.json()["chat_targets"]] == [
             "learning",
             "paper-trading",
+            "research",
             extra_slug,
         ]
         assert [row["name"] for row in dashboard.json()["chat_targets"]] == [
             "Learning",
             "Paper trading",
+            "Research",
             "Options lab",
         ]
         assert "live-trading" not in [
@@ -697,7 +745,7 @@ async def test_create_user_auto_assigns_desk_teams_and_update_can_unassign(
         membership_id = body["id"]
         user_id = body["user_id"]
         team_ids = body["team_ids"]
-        assert len(team_ids) == 3
+        assert len(team_ids) == 4
 
         kept = team_ids[0]
         updated = await client.patch(

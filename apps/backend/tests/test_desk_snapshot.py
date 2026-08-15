@@ -6,6 +6,7 @@ from app.domains.desk_snapshot import (
     CORE_BOOK_TABS,
     DEFAULT_WATCHLIST,
     READ_CAPABILITIES,
+    broker_display_name,
     assemble_books,
     call_kwargs,
     empty_books,
@@ -17,6 +18,12 @@ from app.domains.desk_snapshot import (
     quote_call_attempts,
     watchlist_symbols,
 )
+
+
+def test_broker_display_name_fixes_groww_tookit_typo() -> None:
+    assert broker_display_name("groww_tookit", "groww-tookit") == "groww_toolkit"
+    assert broker_display_name("groww_toolkit", "groww-toolkit") == "groww_toolkit"
+    assert broker_display_name("GrowMCP", "growmcp") == "GrowMCP"
 
 
 def test_empty_books_include_core_tabs_even_without_tools() -> None:

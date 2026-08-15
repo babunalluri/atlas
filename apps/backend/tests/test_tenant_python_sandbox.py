@@ -289,6 +289,56 @@ def test_merge_tenant_python_credential_json_into_settings():
     assert use_bearer_plain is True
 
 
+def test_merge_tenant_python_groww_json_into_settings():
+    from app.tools.providers import merge_tenant_python_settings
+
+    merged, use_bearer = merge_tenant_python_settings(
+        {"timeout": 30},
+        '{"api_key":"gk","api_secret":"gs","access_token":"gat","token":"alt",'
+        '"base_url":"https://api.groww.in","api_version":"1.0","unknown":"drop"}',
+    )
+    assert merged["api_key"] == "gk"
+    assert merged["api_secret"] == "gs"
+    assert merged["access_token"] == "gat"
+    assert merged["token"] == "alt"
+    assert merged["base_url"] == "https://api.groww.in"
+    assert merged["api_version"] == "1.0"
+    assert "unknown" not in merged
+    assert use_bearer is False
+
+
+def test_two_users_same_tool_credential_see_own_vault_tokens():
+    from app.tools.providers import resolve_tenant_python_runtime_settings
+
+    shared = (
+        '{"api_key":"tenant-key","api_secret":"tenant-secret",'
+        '"access_token":"shared-tenant-token"}'
+    )
+    settings = {"timeout": 30, "base_url": "https://api.example.com"}
+    user_a, _ = resolve_tenant_python_runtime_settings(
+        settings, shared, {"access_token": "token-a"}
+    )
+    user_b, _ = resolve_tenant_python_runtime_settings(
+        settings, shared, {"access_token": "token-b"}
+    )
+    assert user_a["access_token"] == "token-a"
+    assert user_b["access_token"] == "token-b"
+    assert user_a["api_key"] == "tenant-key"
+    assert user_b["api_key"] == "tenant-key"
+    assert user_a["timeout"] == 30
+
+
+def test_empty_user_vault_falls_back_to_tool_credential():
+    from app.tools.providers import resolve_tenant_python_runtime_settings
+
+    shared = '{"access_token":"shared-tenant-token","api_key":"tenant-key"}'
+    merged, _ = resolve_tenant_python_runtime_settings(
+        {"timeout": 30}, shared, {"access_token": "  ", "api_key": ""}
+    )
+    assert merged["access_token"] == "shared-tenant-token"
+    assert merged["api_key"] == "tenant-key"
+
+
 def test_dependencies_must_be_allowlisted():
     allow = {("jsonschema", "4.26.0")}
     assert validate_dependencies(
@@ -390,6 +440,63 @@ async def test_tenant_python_build_requires_published_and_marks_mutations(monkey
     assert getattr(mutating, "requires_confirmation", False) or hasattr(
         mutating, "__wrapped__"
     ) or callable(mutating)
+
+
+@pytest.mark.asyncio
+async def test_tenant_python_build_uses_each_users_vault_token(monkeypatch):
+    provider = TenantPythonProvider()
+    config = {
+        "source_code": SAFE_SOURCE,
+        "dependencies": [],
+        "capabilities": [
+            {
+                "name": "list_items",
+                "description": "List",
+                "mutating": False,
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        "settings": {"base_url": "https://api.example.com"},
+        "version_status": "published",
+    }
+    client = SafeRestClient({"api.example.com"})
+    monkeypatch.setattr(
+        "app.core.settings.get_settings",
+        lambda: SimpleNamespace(
+            sandbox_manager_url="http://sandbox-manager:8090",
+            sandbox_callback_base_url="http://backend:7777",
+            sandbox_tenant_concurrency=2,
+            sandbox_python_image="atlas-sandbox-python:local",
+            sandbox_wall_seconds=30,
+        ),
+    )
+
+    async def fake_validate(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(client, "validate_url", fake_validate)
+    captured: list[str] = []
+
+    async def fake_run(self, request):
+        captured.append(str(request.settings.get("access_token")))
+        return SimpleNamespace(ok=True, error=None, value={"ok": True})
+
+    monkeypatch.setattr(SandboxOrchestrator, "run", fake_run)
+    shared = '{"access_token":"shared-tenant-token"}'
+    for token in ("token-a", "token-b"):
+        tools = await provider.build_tools(
+            config,
+            ProviderBuildContext(
+                client=client,
+                prefix="broker",
+                headers={},
+                approval_required=False,
+                credential_value=shared,
+                user_vault={"access_token": token},
+            ),
+        )
+        await tools[0](limit=10)
+    assert captured == ["token-a", "token-b"]
 
 
 @pytest.mark.asyncio

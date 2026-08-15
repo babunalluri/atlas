@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from app.agent_runtime.factory import AgentFactoryService, TeamFactoryService, TeamRuntimeRequest
 from app.api.schemas import TeamCreateIn
 from app.db.models import AgentStatus
-from app.db.repositories import AgentRepository, TeamRepository
+from app.db.repositories import AgentRepository, TeamRepository, ToolDefinitionRepository
 
 
 async def _published_agent(session, tenant, slug):
@@ -251,6 +251,78 @@ async def test_leader_only_team_publish_and_factory(session, tenant_a, monkeypat
     )
     assert team.kwargs["members"] == []
     assert team.kwargs["tools"] == [{"name": "web_search", "config": {"max_results": 2}}]
+
+
+@pytest.mark.asyncio
+async def test_team_factory_skips_unusable_mcp_and_keeps_other_tools(
+    session, tenant_a, monkeypatch
+):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    mcp = await ToolDefinitionRepository(session, tenant_a).create(
+        {
+            "name": "GrowMCP",
+            "slug": "growmcp",
+            "description": "Groww MCP",
+            "kind": "mcp",
+            "http_method": None,
+            "base_url": None,
+            "path": None,
+            "request_schema": {},
+            "response_description": None,
+            "response_schema": None,
+            "headers": {},
+            "config": {
+                "transport": "streamable-http",
+                "url": "https://mcp.groww.in/mcp",
+                "include_tools": [],
+                "exclude_tools": [],
+            },
+            "credential_id": None,
+            "approval_required": False,
+            "active": True,
+            "connection_status": "unvalidated",
+        }
+    )
+    repo = TeamRepository(session, tenant_a)
+    config = await repo.create_config(slug="live-trading", name="Live trading")
+    version = await repo.create_draft(
+        config_id=config.id,
+        instructions="Use holdings tools",
+        mode="coordinate",
+        model_id="openai:gpt-4.1-mini",
+        temperature=0.2,
+        member_config_ids=[],
+        tools=[
+            {"tool_definition_id": mcp.id, "config": {}},
+            {"tool_key": "web_search", "config": {"max_results": 2}},
+        ],
+    )
+    await repo.publish(version.id)
+
+    class FakeTeam:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.id = kwargs["id"]
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("app.agent_runtime.factory.Team", FakeTeam)
+    monkeypatch.setattr("app.agent_runtime.factory.OpenAIChat", FakeModel)
+
+    factory = TeamFactoryService(
+        AgentFactoryService(session, tenant_a, allowed_hosts={"mcp.groww.in"})
+    )
+    team = await factory.create(
+        TeamRuntimeRequest(version_id=version.id, session_id="skip-mcp-session")
+    )
+    names = [getattr(tool, "__name__", "") for tool in team.kwargs["tools"]]
+    assert "web_search" in names
+    assert len(team.kwargs["tools"]) == 1
+    assert "Skipped MCP tool 'GrowMCP'" in team.kwargs["instructions"]
+    assert "groww_toolkit" in team.kwargs["instructions"]
+    assert team._saas_metadata["skipped_tools"]
 
 
 @pytest.mark.asyncio

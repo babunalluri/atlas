@@ -2824,7 +2824,7 @@ requires-dist = [
     { name = "linkup-sdk", specifier = ">=0.2" },
     { name = "lumaai", specifier = ">=0.1" },
     { name = "lxml-html-clean", specifier = ">=0.1" },
-    { name = "mcp", specifier = ">=1.28.1" },
+    { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "newspaper4k", specifier = ">=0.9" },
     { name = "notion-client", specifier = ">=2.2" },

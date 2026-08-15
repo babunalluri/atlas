@@ -38,7 +38,7 @@ async def test_ssrf_blocks_loopback() -> None:
 async def test_ssrf_requires_https_and_allowlist() -> None:
     client = SafeRestClient({"api.example.com"})
 
-    with pytest.raises(UnsafeOutboundRequest, match="allowlisted HTTPS"):
+    with pytest.raises(UnsafeOutboundRequest, match="api.example.com"):
         await client.validate_url("http://api.example.com/data")
-    with pytest.raises(UnsafeOutboundRequest, match="allowlisted HTTPS"):
+    with pytest.raises(UnsafeOutboundRequest, match="evil.example"):
         await client.validate_url("https://evil.example/data")

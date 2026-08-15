@@ -9,6 +9,7 @@ running without the full AgentOS control plane extras.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -35,7 +36,12 @@ from app.knowledge import build_tenant_knowledge_store
 from app.knowledge.store import MemoryConfig
 from app.observability.tracing import trace_metadata
 from app.tenancy.context import TenantContext, current_tenant
-from app.tools.providers import PROVIDERS, ProviderBuildContext, legacy_http_config
+from app.tools.providers import (
+    PROVIDERS,
+    ProviderBuildContext,
+    ProviderValidationError,
+    legacy_http_config,
+)
 from app.tools.registry import (
     SafeRestClient,
     build_mutating_rest_tool,
@@ -107,6 +113,29 @@ ALLOWED_MODELS = {
     "gemini:gemini-2.5-pro": "gemini-2.5-pro",
     "gemini:gemini-2.0-flash": "gemini-2.0-flash",
 }
+
+logger = logging.getLogger(__name__)
+
+
+class McpToolSkipped(Exception):
+    """MCP tool cannot be built at run start; skip instead of failing the run."""
+
+    def __init__(self, message: str, *, name: str, slug: str) -> None:
+        super().__init__(message)
+        self.name = name
+        self.slug = slug
+
+    def user_message(self) -> str:
+        return (
+            f"Skipped MCP tool '{self.name}' ({self.slug}): {self.args[0]}. "
+            "Detach it from this team or keep only a published Python groww_toolkit."
+        )
+
+
+def _with_skipped_mcp_note(instructions: str, skipped: list[str]) -> str:
+    if not skipped:
+        return instructions
+    return "[Atlas] " + " ".join(skipped) + "\n\n" + instructions
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,10 +270,7 @@ class AgentFactoryService:
             return await self._create_framework_adapter(version, request, adapter)
 
         bindings = await self.repo.bindings(version.id)
-        tools: list[Any] = []
-        for binding in bindings:
-            built = await self._build_tool(binding)
-            tools.extend(built if isinstance(built, list) else [built])
+        tools, skipped_mcp = await self._runtime_tools(bindings)
         model = await self._build_model(version)
 
         memory = MemoryConfig(mode=version.memory_mode)  # type: ignore[arg-type]
@@ -260,7 +286,7 @@ class AgentFactoryService:
             "id": str(version.agent_config_id),
             "name": f"tenant-{self.context.tenant_id}-agent-{version.agent_config_id}",
             "model": model,
-            "instructions": version.instructions,
+            "instructions": _with_skipped_mcp_note(version.instructions, skipped_mcp),
             "tools": tools,
             "db": get_agno_db(),
             "markdown": True,
@@ -467,6 +493,21 @@ class AgentFactoryService:
             )
         )
 
+    async def _runtime_tools(
+        self, bindings: list[AgentToolBinding] | list[TeamToolBinding]
+    ) -> tuple[list[Any], list[str]]:
+        tools: list[Any] = []
+        skipped: list[str] = []
+        for binding in bindings:
+            try:
+                built = await self._build_tool(binding)
+            except McpToolSkipped as exc:
+                logger.warning("Skipping MCP tool at run start: %s", exc.user_message())
+                skipped.append(exc.user_message())
+                continue
+            tools.extend(built if isinstance(built, list) else [built])
+        return tools, skipped
+
     async def _build_tool(self, binding: AgentToolBinding | TeamToolBinding) -> Any:
         if binding.tool_definition_id is not None:
             definition = await self.tool_definitions.get(binding.tool_definition_id)
@@ -528,21 +569,28 @@ class AgentFactoryService:
                 self.rest_client.allowed_hosts,
                 timeout_seconds=float(timeout),
             )
-            built = await provider.build_tools(
-                config,
-                ProviderBuildContext(
-                    client=client,
-                    prefix=definition.slug.replace("-", "_"),
-                    headers=headers,
-                    approval_required=definition.approval_required,
-                    credential_provider=credential_provider,
-                    credential_value=credential_value,
-                    tenant_id=str(self.context.tenant_id),
-                    user_vault=await self._user_vault_map()
-                    if provider_key == "tenant_python"
-                    else None,
-                ),
-            )
+            try:
+                built = await provider.build_tools(
+                    config,
+                    ProviderBuildContext(
+                        client=client,
+                        prefix=definition.slug.replace("-", "_"),
+                        headers=headers,
+                        approval_required=definition.approval_required,
+                        credential_provider=credential_provider,
+                        credential_value=credential_value,
+                        tenant_id=str(self.context.tenant_id),
+                        user_vault=await self._user_vault_map()
+                        if provider_key == "tenant_python"
+                        else None,
+                    ),
+                )
+            except ProviderValidationError as exc:
+                if provider_key == "mcp":
+                    raise McpToolSkipped(
+                        str(exc), name=definition.name, slug=definition.slug
+                    ) from exc
+                raise
             return built[0] if len(built) == 1 else built
         if binding.tool_key == "web_search":
             return web_search
@@ -629,10 +677,7 @@ class TeamFactoryService:
             )
         model = await self.agent_factory._build_model(version)  # type: ignore[arg-type]
         bindings = await self.repo.bindings(version.id)
-        tools: list[Any] = []
-        for binding in bindings:
-            built = await self.agent_factory._build_tool(binding)
-            tools.extend(built if isinstance(built, list) else [built])
+        tools, skipped_mcp = await self.agent_factory._runtime_tools(bindings)
         metadata = trace_metadata(
             tenant_id=str(self.agent_factory.context.tenant_id),
             agent_id=f"team:{version.team_config_id}",
@@ -643,12 +688,13 @@ class TeamFactoryService:
             "team_id": str(version.team_config_id),
             "team_version_id": str(version.id),
             "team_mode": version.mode,
+            "skipped_tools": skipped_mcp,
         }
         values = {
             "id": str(version.team_config_id),
             "name": f"tenant-{self.agent_factory.context.tenant_id}-team-{version.team_config_id}",
             "members": members,
-            "instructions": version.instructions,
+            "instructions": _with_skipped_mcp_note(version.instructions, skipped_mcp),
             "mode": version.mode,
             "model": model,
             "tools": tools,

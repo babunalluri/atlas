@@ -14,7 +14,7 @@ End user asks about concepts, plans, risk, **or** a generic ticker question such
 
 ## Steps — lessons
 
-1. **Classify** — lesson vs ticker vs paper vs live. Paper → Paper trading. Live/demat → Live trading. Ticker / “predict …” stays here.
+1. **Classify** — lesson vs ticker vs paper vs live vs research. Paper → Paper trading. Live/demat → Live trading. Trend/payoff/what-if with numbers → Research. Ticker / “predict …” stays here.
 2. **Retrieve KB** — attached Knowledge for how-to / policy.
 3. **Answer** — grounded in KB; cite topic titles when helpful.
 4. **Plan gate** — if KB says content is plan-locked, explain upgrade from KB.

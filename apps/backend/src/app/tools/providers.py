@@ -701,21 +701,60 @@ class CustomPythonProvider(BaseProvider):
 
 
 CC_PBX_BODY_TOKEN_KEYS = frozenset({"pbx_token_id", "ccpl_token_id", "ccpl_unique_token"})
+# Broker / REST JSON credentials (Groww, Kite, …). Full JSON is never dumped
+# into guest-visible settings — only these known keys are copied.
+TENANT_PYTHON_CREDENTIAL_SETTING_KEYS = frozenset(
+    {
+        *CC_PBX_BODY_TOKEN_KEYS,
+        "api_key",
+        "api_secret",
+        "access_token",
+        "token",
+        "credential_value",
+        "base_url",
+        "api_version",
+    }
+)
+
+
+def _nonempty_vault_value(value: Any) -> bool:
+    if value is None:
+        return False
+    return bool(str(value).strip())
 
 
 def merge_user_vault_into_settings(
     settings: Mapping[str, Any],
     user_vault: Mapping[str, str] | None,
 ) -> dict[str, Any]:
-    """Overlay per-user vault keys onto sandbox settings (user wins)."""
+    """Overlay per-user vault keys onto sandbox settings (user wins).
+
+    Empty or whitespace-only vault values are ignored so a blank key does not
+    wipe a tenant tool credential used as a single-admin fallback.
+    """
     merged = dict(settings)
     if not user_vault:
         return merged
     for key, value in user_vault.items():
-        if value is None:
+        if not _nonempty_vault_value(value):
             continue
         merged[str(key)] = value
     return merged
+
+
+def resolve_tenant_python_runtime_settings(
+    settings: Mapping[str, Any],
+    credential_value: str | None,
+    user_vault: Mapping[str, str] | None,
+) -> tuple[dict[str, Any], bool]:
+    """Tool settings → tenant credential JSON → user vault (user wins).
+
+    Same Team + same Python tool: each chatting user gets their own vault
+    keys. Tenant credential is a shared fallback when the user has no value
+    for that key.
+    """
+    merged, use_bearer = merge_tenant_python_settings(settings, credential_value)
+    return merge_user_vault_into_settings(merged, user_vault), use_bearer
 
 
 def merge_tenant_python_settings(
@@ -727,7 +766,7 @@ def merge_tenant_python_settings(
     Returns ``(merged_settings, use_bearer_auth)``.
 
     Full credential JSON is never dumped into guest-visible settings (it can be
-    echoed back via RunResult). Only known body-token keys are copied; opaque
+    echoed back via RunResult). Only known toolkit keys are copied; opaque
     string credentials stay out of settings and are injected as Bearer auth on
     the host-side HttpProxy instead.
     """
@@ -742,7 +781,7 @@ def merge_tenant_python_settings(
         return merged, use_bearer
     if not isinstance(parsed, dict):
         return merged, use_bearer
-    for key in CC_PBX_BODY_TOKEN_KEYS:
+    for key in TENANT_PYTHON_CREDENTIAL_SETTING_KEYS:
         if key in parsed and parsed[key] is not None:
             merged[key] = parsed[key]
             use_bearer = False
@@ -805,11 +844,8 @@ class TenantPythonProvider(BaseProvider):
             image=settings.sandbox_python_image,
             tenant_key=str(context.tenant_id or "default"),
         )
-        merged_settings, use_bearer = merge_tenant_python_settings(
-            parsed.settings, context.credential_value
-        )
-        merged_settings = merge_user_vault_into_settings(
-            merged_settings, context.user_vault
+        merged_settings, use_bearer = resolve_tenant_python_runtime_settings(
+            parsed.settings, context.credential_value, context.user_vault
         )
         proxy_headers = dict(context.headers)
         if (
@@ -933,12 +969,37 @@ def _apply_json_schema_signature(
     function.__annotations__ = annotations
 
 
+def _alias_mcp_error() -> None:
+    """Bridge Agno 2.9 import names onto mcp>=1.28 (renames, not a missing install)."""
+    try:
+        import mcp.client.streamable_http as streamable_http
+        import mcp.shared.exceptions as mcp_exceptions
+    except ImportError:
+        return
+    if not hasattr(mcp_exceptions, "McpError") and hasattr(mcp_exceptions, "MCPError"):
+        mcp_exceptions.McpError = mcp_exceptions.MCPError  # type: ignore[attr-defined]
+    if not hasattr(streamable_http, "streamablehttp_client") and hasattr(
+        streamable_http, "streamable_http_client"
+    ):
+        streamable_http.streamablehttp_client = streamable_http.streamable_http_client
+
+
+_alias_mcp_error()
+
+
 class MCPProvider(BaseProvider):
     key = "mcp"
     label = "MCP Server"
 
     def _toolkit(self, parsed: MCPConfig, headers: dict[str, str], prefix: str) -> Any:
-        from agno.tools.mcp import MCPTools, SSEClientParams, StreamableHTTPClientParams
+        _alias_mcp_error()
+        try:
+            from agno.tools.mcp import MCPTools, SSEClientParams, StreamableHTTPClientParams
+        except ImportError as exc:
+            raise ProviderValidationError(
+                "MCP client library is unavailable or incompatible on this Atlas backend "
+                f"({exc}). Pin mcp>=1.28.1,<2 and rebuild the backend image."
+            ) from exc
 
         params: Any
         if parsed.transport == "sse":
@@ -982,25 +1043,34 @@ class MCPProvider(BaseProvider):
     ) -> list[Capability]:
         parsed = MCPConfig.model_validate(config)
         await client.validate_url(parsed.url)
-        # Discovery intentionally ignores include filters so admins can review the server.
-        discovery = parsed.model_copy(
-            update={"include_tools": parsed.include_tools or ["__discovery__"]}
+        # Inspect never imports Agno/mcp. Streamable HTTP and SSE both use httpx
+        # so Enumerate/Test work as soon as this module reloads.
+        from app.tools.mcp_discover import (
+            discover_sse_tools,
+            discover_streamable_http_tools,
+            humanize_outbound_error,
         )
-        toolkit = self._toolkit(discovery, headers, "preview")
-        toolkit.include_tools = None
+
+        discover = (
+            discover_sse_tools
+            if parsed.transport == "sse"
+            else discover_streamable_http_tools
+        )
         try:
-            await toolkit.connect()
-            return [
-                Capability(
-                    name=function.name.removeprefix("preview_"),
-                    description=function.description or "",
-                    approval_required=is_destructive_name(function.name),
-                    input_schema=function.parameters or {},
+            return await discover(
+                parsed.url,
+                headers=headers,
+                timeout_seconds=float(parsed.timeout_seconds),
+                validate_url=client.validate_url,
+            )
+        except ProviderValidationError:
+            raise
+        except Exception as exc:
+            raise ProviderValidationError(
+                humanize_outbound_error(
+                    exc, url=parsed.url, has_credential=bool(headers)
                 )
-                for function in list(toolkit.functions.values())[:MAX_TOOLS]
-            ]
-        finally:
-            await toolkit.close()
+            ) from exc
 
     async def test_connection(
         self, config: Mapping[str, Any], client: SafeRestClient, headers: dict[str, str]

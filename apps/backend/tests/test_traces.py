@@ -2,8 +2,10 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.traces import get_trace, list_traces
+from app.db.models import Role
 from app.db.repositories import AgentRepository, SessionRepository
 from app.observability.repository import TraceRepository
+from app.tenancy.context import TenantContext
 
 
 async def _conversation(session, context):
@@ -123,3 +125,41 @@ async def test_run_completed_preserves_streamed_content(session, tenant_a):
     assert detail["output"].get("content") == "Hello world"
     root = next(span for span in detail["spans"] if span["kind"] == "run")
     assert root["output"].get("content") == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_trace_list_can_filter_by_user(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    config, version, conversation = await _conversation(session, tenant_a)
+    repo = TraceRepository(session, tenant_a)
+    mine = await repo.start(
+        conversation=conversation,
+        target_id=config.id,
+        version_id=version.id,
+        name="Mine",
+        message="Hello",
+    )
+    other_context = TenantContext(
+        tenant_id=tenant_a.tenant_id,
+        user_id="other-user",
+        role=Role.end_user,
+        auth_org_id=tenant_a.auth_org_id,
+    )
+    other_conversation = await SessionRepository(session, other_context).pin(
+        external_session_id="other-trace-session",
+        agent_config_id=config.id,
+        agent_version_id=version.id,
+        runtime_session_id=f"tenant:{tenant_a.tenant_id}:session:other-trace-session",
+        runtime_user_id=f"tenant:{tenant_a.tenant_id}:user:other-user",
+    )
+    other = await TraceRepository(session, other_context).start(
+        conversation=other_conversation,
+        target_id=config.id,
+        version_id=version.id,
+        name="Theirs",
+        message="Secret",
+    )
+
+    listed = await repo.list(user_id=tenant_a.user_id)
+    assert [row.id for row in listed] == [mine.id]
+    assert other.id not in {row.id for row in listed}

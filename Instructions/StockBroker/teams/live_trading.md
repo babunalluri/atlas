@@ -16,6 +16,7 @@ Use **whatever broker toolkit is assigned** on this team (Groww, Kite, Upstox, A
 | Place / cancel live | Assigned `place_order` / `cancel_order` (or alias) with HITL |
 | Token expired / 401 | Reconnect **that** broker; treat as auto-disarm |
 | Paper practice | Hand off to **Paper trading** |
+| Trend / payoff / what-if (no order) | Hand off to **Research** |
 | Concepts / courses | Hand off to **Learning** |
 | “Approve my live / kill switch” | Explain status; this team cannot approve or trip global kill |
 

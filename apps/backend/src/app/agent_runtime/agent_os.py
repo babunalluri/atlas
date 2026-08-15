@@ -69,6 +69,7 @@ from app.api import teams as teams_api
 from app.api import team_access as team_access_api
 from app.api import tools as tools_api
 from app.api import traces as traces_api
+from app.api import user_traces as user_traces_api
 from app.api import workflows as workflows_api
 from app.api import workflow_access as workflow_access_api
 from app.api import customers as customers_api
@@ -599,6 +600,7 @@ def create_app() -> FastAPI:
     base_app.include_router(approvals_api.router)
     base_app.include_router(credentials_api.router)
     base_app.include_router(user_vault_api.router)
+    base_app.include_router(user_traces_api.router)
     base_app.include_router(admin_vault_api.router)
     base_app.include_router(channels_api.router)
     base_app.include_router(evals_api.router)

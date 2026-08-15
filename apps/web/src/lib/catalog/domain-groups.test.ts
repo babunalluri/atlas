@@ -20,6 +20,14 @@ describe("classifyCatalogSlug", () => {
       domain: "stock_broker",
       desk: "live",
     });
+    expect(classifyCatalogSlug("research")).toEqual({
+      domain: "stock_broker",
+      desk: "research",
+    });
+    expect(classifyCatalogSlug("researcher-copy")).toEqual({
+      domain: "stock_broker",
+      desk: "research",
+    });
     expect(classifyCatalogSlug("front-desk-team")).toEqual({
       domain: "dental_clinic",
       desk: null,
@@ -49,6 +57,7 @@ describe("groupCatalogItems", () => {
       { id: "3", slug: "front-desk", domain: "dental_clinic" },
       { id: "4", slug: "research-bot", domain: "stock_broker" },
       { id: "5", slug: "notes", domain: "generic" },
+      { id: "6", slug: "researcher", domain: "stock_broker" },
     ]);
     expect(groups.map((group) => group.domain)).toEqual([
       "stock_broker",
@@ -59,12 +68,16 @@ describe("groupCatalogItems", () => {
     expect(broker.desks.map((desk) => desk.label)).toEqual([
       "Learning",
       "Paper trading",
+      "Research",
       "Other",
     ]);
     expect(broker.desks[0].items.map((item) => item.slug)).toEqual([
       "learning-guide",
     ]);
     expect(broker.desks[2].items.map((item) => item.slug)).toEqual([
+      "researcher",
+    ]);
+    expect(broker.desks[3].items.map((item) => item.slug)).toEqual([
       "research-bot",
     ]);
   });

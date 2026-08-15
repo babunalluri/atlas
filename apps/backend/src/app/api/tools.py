@@ -295,19 +295,27 @@ async def _inspect_definition(
             result = ConnectionResult(
                 ok=True, message="Capabilities enumerated", capabilities=capabilities
             )
-    except (ValueError, RuntimeError) as exc:
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from app.tools.mcp_discover import humanize_outbound_error
+
+        target = str((row.config or {}).get("url") or (row.config or {}).get("base_url") or "")
+        detail = humanize_outbound_error(
+            exc, url=target or None, has_credential=bool(headers)
+        )
         if test:
             row.connection_status = "failed"
             row.last_validated_at = datetime.now(UTC)
-            row.last_validation_error = str(exc)[:500]
+            row.last_validation_error = detail[:500]
             await ToolDefinitionRepository(session, context).audit(
                 action="tool.test",
                 resource_type="tool_definition",
                 resource_id=str(row.id),
-                details={"ok": False, "provider": row.kind},
+                details={"ok": False, "provider": row.kind, "error": detail[:200]},
             )
             await session.flush()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=detail) from exc
     if test:
         row.connection_status = "connected"
         row.last_validated_at = datetime.now(UTC)
