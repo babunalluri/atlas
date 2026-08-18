@@ -32,6 +32,7 @@ export function SearchableSelect({
   disabled = false,
   className,
   emptyMessage = "No matches",
+  allowCustom = false,
 }: {
   id?: string;
   value: string;
@@ -41,6 +42,8 @@ export function SearchableSelect({
   disabled?: boolean;
   className?: string;
   emptyMessage?: string;
+  /** When true, Enter commits typed text even if it is not in options. */
+  allowCustom?: boolean;
 }) {
   const reactId = useId();
   const listId = `${id ?? reactId}-listbox`;
@@ -58,7 +61,11 @@ export function SearchableSelect({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return options;
-    return options.filter((option) => option.label.toLowerCase().includes(q));
+    return options.filter(
+      (option) =>
+        option.label.toLowerCase().includes(q) ||
+        option.value.toLowerCase().includes(q),
+    );
   }, [options, query]);
 
   useEffect(() => {
@@ -78,12 +85,23 @@ export function SearchableSelect({
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [open]);
 
-  function commit(next: string) {
-    const option = options.find((item) => item.value === next);
-    if (!option || option.disabled) return;
-    onChange(next);
+  function commitCustom(raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    onChange(trimmed);
     setOpen(false);
     setQuery("");
+  }
+
+  function commit(next: string) {
+    const option = options.find((item) => item.value === next);
+    if (option && !option.disabled) {
+      onChange(next);
+      setOpen(false);
+      setQuery("");
+      return;
+    }
+    if (allowCustom) commitCustom(next);
   }
 
   function openPanel() {
@@ -124,11 +142,17 @@ export function SearchableSelect({
     if (event.key === "Enter") {
       event.preventDefault();
       const option = filtered[highlight];
-      if (option) commit(option.value);
+      if (option) {
+        commit(option.value);
+      } else if (allowCustom && query.trim()) {
+        commitCustom(query);
+      }
     }
   }
 
-  const displayValue = open ? query : (selected?.label ?? "");
+  const displayValue = open
+    ? query
+    : (selected?.label ?? (allowCustom ? value : ""));
 
   return (
     <div ref={rootRef} className={cn("relative", className)}>
@@ -178,7 +202,11 @@ export function SearchableSelect({
           )}
         >
           {filtered.length === 0 ? (
-            <li className="px-3 py-2 text-sm text-slate-muted">{emptyMessage}</li>
+            <li className="px-3 py-2 text-sm text-slate-muted">
+              {allowCustom && query.trim()
+                ? `Press Enter to use “${query.trim()}”`
+                : emptyMessage}
+            </li>
           ) : (
             filtered.map((option, index) => {
               const active = index === highlight;

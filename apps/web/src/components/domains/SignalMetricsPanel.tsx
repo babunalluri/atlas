@@ -420,6 +420,10 @@ export function SignalMetricsPanel() {
         .map((row) => row.label),
     [metrics],
   );
+  const atmHint = useMemo(() => {
+    const atm = metrics.find((row) => row.id === "atm")?.value;
+    return atm != null ? Math.round(atm) : null;
+  }, [metrics]);
   const metricColumns = useMemo(
     () => layoutMetricColumns(metrics),
     [metrics],
@@ -691,6 +695,7 @@ export function SignalMetricsPanel() {
           onPresetChange={onPresetChange}
           patchConfig={patchConfig}
           loading={configLoading}
+          atmHint={atmHint}
         />
       </div>
 
