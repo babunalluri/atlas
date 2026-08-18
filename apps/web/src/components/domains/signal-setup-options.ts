@@ -4,7 +4,7 @@ import type {
   SignalUnderlyingPreset,
 } from "@/lib/api/admin";
 
-import { CUSTOM_PRESET } from "@/components/domains/useSignalConfigAutosave";
+import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
 
 const EXTRA_STRIKE_STEPS = [25, 50, 75, 100, 200];
 

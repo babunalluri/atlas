@@ -12,7 +12,7 @@ import {
 import { Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import type { SignalEngineAdminConfig } from "@/lib/api/admin";
-import { CUSTOM_PRESET } from "@/components/domains/useSignalConfigAutosave";
+import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
 
 export function SignalSetupBar({
   config,

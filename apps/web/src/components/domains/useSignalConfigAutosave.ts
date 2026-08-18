@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
 import {
   getSignalConfig,
   patchSignalConfig,
@@ -12,8 +13,6 @@ import {
 const SAVE_DEBOUNCE_MS = 650;
 
 export type SignalConfigSaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
-
-const CUSTOM_PRESET = "__custom__";
 
 function configSnapshot(config: SignalEngineAdminConfig): string {
   return JSON.stringify(config);
@@ -178,5 +177,3 @@ export function useSignalConfigAutosave(
     onPresetChange,
   };
 }
-
-export { CUSTOM_PRESET };

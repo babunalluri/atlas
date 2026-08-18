@@ -412,7 +412,7 @@ export function SignalMetricsPanel() {
   const engineRunning =
     engineEnabled && Boolean(state?.engine_active);
 
-  const metrics = state?.metrics ?? [];
+  const metrics = useMemo(() => state?.metrics ?? [], [state?.metrics]);
   const failingRules = useMemo(
     () =>
       metrics
