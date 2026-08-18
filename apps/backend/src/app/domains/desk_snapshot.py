@@ -865,21 +865,66 @@ def call_kwargs(fn: Any, *, user_id: str | None) -> dict[str, Any] | None:
     return kwargs
 
 
+def _groww_symbol(symbol: str) -> str:
+    text = symbol.strip()
+    if ":" in text:
+        text = text.split(":", 1)[1]
+    return text.replace(" ", "")
+
+
+def quote_exchange(symbol: str) -> str:
+    prefix = symbol.strip().split(":", 1)[0].upper()
+    if prefix in {"NFO", "NSE"}:
+        return "NSE"
+    if prefix in {"BFO", "BSE"}:
+        return "BSE"
+    if prefix == "MCX":
+        return "MCX"
+    return "NSE"
+
+
+def quote_segment(symbol: str) -> str:
+    prefix = symbol.strip().split(":", 1)[0].upper()
+    if prefix in {"NFO", "BFO"}:
+        return "FNO"
+    if prefix == "MCX":
+        return "COMMODITY"
+    return "CASH"
+
+
 def quote_call_attempts(fn: Any, symbols: list[str]) -> list[dict[str, Any]]:
     names = set(_param_names(fn))
     attempts: list[dict[str, Any]] = []
     kite_instruments = ",".join(_kite_instrument(symbol) for symbol in symbols)
-    groww_symbols = ",".join(_groww_symbol(symbol) for symbol in symbols)
     unknown = not names
     if "instruments" in names or unknown:
         attempts.append({"instruments": kite_instruments})
-    if "trading_symbols" in names or unknown:
-        payload: dict[str, Any] = {"trading_symbols": groww_symbols}
-        if "exchange" in names or unknown:
-            payload["exchange"] = "NSE"
-        if "segment" in names or unknown:
-            payload["segment"] = "CASH"
-        attempts.append(payload)
+    if "exchange_symbols" in names:
+        groups: dict[str, list[str]] = {}
+        for symbol in symbols:
+            exchange = quote_exchange(symbol)
+            segment = quote_segment(symbol)
+            groups.setdefault(segment, []).append(f"{exchange}_{_groww_symbol(symbol)}")
+        for segment, exchange_symbols in groups.items():
+            attempts.append(
+                {
+                    "segment": segment,
+                    "exchange_symbols": ",".join(exchange_symbols),
+                }
+            )
+    elif "trading_symbols" in names or unknown:
+        groups: dict[tuple[str, str], list[str]] = {}
+        for symbol in symbols:
+            exchange = quote_exchange(symbol)
+            segment = quote_segment(symbol)
+            groups.setdefault((exchange, segment), []).append(_groww_symbol(symbol))
+        for (exchange, segment), trading_symbols in groups.items():
+            payload: dict[str, Any] = {
+                "trading_symbols": ",".join(trading_symbols),
+                "exchange": exchange,
+                "segment": segment,
+            }
+            attempts.append(payload)
     if is_zero_arg(fn) and names:
         attempts.append({})
     # Deduplicate while preserving order.
@@ -999,13 +1044,6 @@ def _pick(row: dict[str, Any], *keys: str) -> Any:
 
 def _symbol_key(symbol: str) -> str:
     return symbol.upper().replace(" ", "")
-
-
-def _groww_symbol(symbol: str) -> str:
-    text = symbol.strip()
-    if ":" in text:
-        text = text.split(":", 1)[1]
-    return text.replace(" ", "")
 
 
 def _kite_instrument(symbol: str) -> str:

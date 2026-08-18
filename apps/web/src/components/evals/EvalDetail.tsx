@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { PlayIcon } from "@/components/ui/icons";
 import {
   runEval,
   type EvalDefinition,
@@ -52,7 +53,12 @@ export function EvalDetail({ definition }: { definition: EvalDefinition }) {
             <span className="font-mono">{definition.version_id}</span>
           </p>
         </div>
-        <Button variant="accent" onClick={runNow} disabled={busy}>
+        <Button
+          variant="accent"
+          icon={<PlayIcon />}
+          onClick={runNow}
+          disabled={busy}
+        >
           {busy ? "Running suite…" : "Run now"}
         </Button>
       </header>

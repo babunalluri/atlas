@@ -388,16 +388,190 @@ async def get_order_margins(
     return _unwrap(body, "get_order_margins")
 
 
-async def get_quote(ctx, instruments: str) -> Any:
-    """GET /quote — instruments comma-separated e.g. NSE:INFY,NFO:NIFTY25APRFUT."""
-    return await _get(ctx, "/quote", "get_quote", query={"i": instruments.split(",")})
+# --- Live data (read) ---
+
+_QUOTE_BATCH_SIZE = 200
 
 
-async def get_ltp(ctx, instruments: str) -> Any:
-    """GET /quote/ltp — instruments comma-separated."""
-    return await _get(ctx, "/quote/ltp", "get_ltp", query={"i": instruments.split(",")})
+def _split_csv(*parts: str) -> list[str]:
+    items: list[str] = []
+    for part in parts:
+        for piece in str(part or "").split(","):
+            text = piece.strip()
+            if text:
+                items.append(text)
+    return items
 
 
-async def get_ohlc(ctx, instruments: str) -> Any:
-    """GET /quote/ohlc — instruments comma-separated."""
-    return await _get(ctx, "/quote/ohlc", "get_ohlc", query={"i": instruments.split(",")})
+def _normalize_kite_instrument(symbol: str) -> str:
+    """Normalize Atlas-style symbols to Kite `exchange:tradingsymbol`."""
+    text = symbol.strip()
+    if ":" not in text:
+        return f"NSE:{text}"
+    exchange, tradingsymbol = text.split(":", 1)
+    return f"{exchange.upper()}:{tradingsymbol.strip()}"
+
+
+def _groww_style_to_instruments(
+    *,
+    exchange: str = "NSE",
+    segment: str = "CASH",
+    trading_symbols: str = "",
+) -> list[str]:
+    """Convert Groww-style batch args into Kite instrument ids."""
+    instruments: list[str] = []
+    exch = exchange.upper()
+    seg = segment.upper()
+    for sym in _split_csv(trading_symbols):
+        if ":" in sym:
+            instruments.append(_normalize_kite_instrument(sym))
+            continue
+        if seg == "FNO":
+            kite_ex = "BFO" if exch == "BSE" else "NFO"
+            instruments.append(f"{kite_ex}:{sym}")
+        elif seg == "COMMODITY" or exch == "MCX":
+            instruments.append(f"MCX:{sym}")
+        else:
+            instruments.append(f"{exch}:{sym}")
+    return instruments
+
+
+def _resolve_instruments(
+    *,
+    instruments: str = "",
+    trading_symbols: str = "",
+    exchange: str = "",
+    segment: str = "",
+) -> list[str]:
+    if instruments:
+        return [_normalize_kite_instrument(item) for item in _split_csv(instruments)]
+    if trading_symbols:
+        return _groww_style_to_instruments(
+            exchange=exchange or "NSE",
+            segment=segment or "CASH",
+            trading_symbols=trading_symbols,
+        )
+    raise RuntimeError(
+        "instruments is required (comma-separated), e.g. NSE:NIFTY 50,NFO:NIFTY26AUGFUT"
+    )
+
+
+def _merge_quote_payloads(results: list[Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        if result.get("ok") is False:
+            continue
+        data = result.get("data", result)
+        if isinstance(data, dict):
+            merged.update(data)
+    return merged
+
+
+async def _quote_batches(
+    ctx,
+    path: str,
+    label: str,
+    instruments: list[str],
+) -> Any:
+    if not instruments:
+        raise RuntimeError("At least one instrument is required")
+    if len(instruments) <= _QUOTE_BATCH_SIZE:
+        return await _get(ctx, path, label, query={"i": instruments})
+    chunks: list[Any] = []
+    for start in range(0, len(instruments), _QUOTE_BATCH_SIZE):
+        batch = instruments[start : start + _QUOTE_BATCH_SIZE]
+        chunks.append(await _get(ctx, path, label, query={"i": batch}))
+    data = _merge_quote_payloads(chunks)
+    return {"ok": True, "data": data}
+
+
+async def get_quote(
+    ctx,
+    instruments: str = "",
+    trading_symbols: str = "",
+    exchange: str = "",
+    segment: str = "",
+) -> Any:
+    """Full market quote. Use Kite ids (`NSE:NIFTY 50,NFO:NIFTY26AUG24500CE`) or Groww-style batch args."""
+    resolved = _resolve_instruments(
+        instruments=instruments,
+        trading_symbols=trading_symbols,
+        exchange=exchange,
+        segment=segment,
+    )
+    return await _quote_batches(ctx, "/quote", "get_quote", resolved)
+
+
+async def get_ltp(
+    ctx,
+    instruments: str = "",
+    trading_symbols: str = "",
+    exchange: str = "",
+    segment: str = "",
+) -> Any:
+    """Last traded price. Instruments as `exchange:tradingsymbol` (comma-separated)."""
+    resolved = _resolve_instruments(
+        instruments=instruments,
+        trading_symbols=trading_symbols,
+        exchange=exchange,
+        segment=segment,
+    )
+    return await _quote_batches(ctx, "/quote/ltp", "get_ltp", resolved)
+
+
+async def get_ohlc(
+    ctx,
+    instruments: str = "",
+    trading_symbols: str = "",
+    exchange: str = "",
+    segment: str = "",
+) -> Any:
+    """OHLC snapshot. Instruments as `exchange:tradingsymbol` (comma-separated)."""
+    resolved = _resolve_instruments(
+        instruments=instruments,
+        trading_symbols=trading_symbols,
+        exchange=exchange,
+        segment=segment,
+    )
+    return await _quote_batches(ctx, "/quote/ohlc", "get_ohlc", resolved)
+
+
+async def get_historical_candles(
+    ctx,
+    instrument_token: int,
+    interval: str = "15minute",
+    from_date: str = "",
+    to_date: str = "",
+    continuous: int = 0,
+    oi: int = 0,
+) -> Any:
+    """Historical OHLC candles for ADX / trend filters.
+
+    interval: minute, 3minute, 5minute, 10minute, 15minute, 30minute, 60minute, day
+    from_date / to_date: `YYYY-MM-DD HH:MM:SS` (IST session times for Indian markets).
+    instrument_token: from a full `get_quote` on the underlying.
+    """
+    if not instrument_token:
+        raise RuntimeError("instrument_token is required")
+    allowed = {
+        "minute",
+        "3minute",
+        "5minute",
+        "10minute",
+        "15minute",
+        "30minute",
+        "60minute",
+        "day",
+    }
+    bucket = str(interval or "15minute").strip().lower()
+    if bucket not in allowed:
+        raise RuntimeError(f"unsupported interval: {interval}")
+    query: dict[str, Any] = {"continuous": int(continuous), "oi": int(oi)}
+    if from_date:
+        query["from"] = from_date
+    if to_date:
+        query["to"] = to_date
+    path = f"/instruments/historical/{int(instrument_token)}/{bucket}"
+    return await _get(ctx, path, "get_historical_candles", query=query)

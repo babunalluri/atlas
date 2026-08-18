@@ -16,7 +16,8 @@ import {
   formatApiError,
   streamConfiguredTeam,
 } from "@/lib/agentos/client";
-import { DeskChatPills } from "@/components/domains/DeskChat";
+import { DeskChatPills, DeskChatStarters } from "@/components/domains/DeskChat";
+import { useDeskChatDraftOptional } from "@/components/domains/DeskChatDraftContext";
 import type { DomainBrokerTool, DomainChatTarget } from "@/lib/api/admin";
 import type { ChatMessage } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -43,6 +44,9 @@ function deskWelcome(
   }
   if (target.slug === "research") {
     return "You're in Research. I analyze stocks and defined F&O structures with tools — I won’t invent quotes, chains, or P&L. Research is for analysis; live orders stay on Live trading.";
+  }
+  if (target.slug === "signals-ops") {
+    return "Monitor entry metrics in the panel → publish when entry_ready. Customers never see this board.";
   }
   return `You're in ${target.name}. Ask anything this team is set up to handle.`;
 }
@@ -74,6 +78,9 @@ function deskStarters(
       "Payoff for a bull call spread — I’ll need strikes and LTPs",
     ];
   }
+  if (target?.slug === "signals-ops") {
+    return ["Show current signal state", "Is entry ready?"];
+  }
   return [];
 }
 
@@ -87,10 +94,13 @@ export function WorkspaceDeskChat({
   allowPreview?: boolean;
 }) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
+  const deskDraft = useDeskChatDraftOptional();
   const [teamId, setTeamId] = useState(targets[0]?.id ?? "");
   const team = targets.find((row) => row.id === teamId) ?? targets[0] ?? null;
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [composerDraft, setComposerDraft] = useState<string | null>(null);
+  const clearComposerDraft = useCallback(() => setComposerDraft(null), []);
   const [streaming, setStreaming] = useState(false);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +153,19 @@ export function WorkspaceDeskChat({
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
+
+  useEffect(() => {
+    if (!deskDraft?.pendingTeamId || !deskDraft.pendingDraft) return;
+    if (!targets.some((row) => row.id === deskDraft.pendingTeamId)) return;
+    setTeamId(deskDraft.pendingTeamId);
+    setComposerDraft(deskDraft.pendingDraft);
+    deskDraft.consumePending();
+  }, [
+    deskDraft,
+    deskDraft?.pendingDraft,
+    deskDraft?.pendingTeamId,
+    targets,
+  ]);
 
   async function cancelActiveRun() {
     cancelRequestedRef.current = true;
@@ -293,42 +316,58 @@ export function WorkspaceDeskChat({
     );
   }
 
+  const starters = deskStarters(team, brokerNames);
+  const showStarters =
+    starters.length > 0 &&
+    messages.length <= 1 &&
+    !messages.some((m) => m.role === "user");
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <header className="shrink-0 border-b border-line px-4 py-3">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-teal">
-          Desk chat
-        </p>
-        <DeskChatPills
-          targets={targets}
-          selectedId={team?.id}
-          onSelect={setTeamId}
-        />
-        {team && !team.published ? (
-          <p className="mt-2 text-[11px] text-amber">Preview — publish this team for live runs.</p>
-        ) : null}
+    <div id="desk-chat" className="flex h-full min-h-0 flex-col">
+      <header className="shrink-0 border-b border-line px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <DeskChatPills
+            targets={targets}
+            selectedId={team?.id}
+            onSelect={setTeamId}
+            compact
+          />
+          {team && !team.published ? (
+            <span className="shrink-0 text-[10px] font-medium text-amber">
+              Preview
+            </span>
+          ) : null}
+        </div>
       </header>
       <ApprovalBanner visible={paused} />
       {error ? (
-        <p className="shrink-0 border-b border-rose/30 bg-rose/10 px-4 py-2 text-xs text-rose">
+        <p className="shrink-0 border-b border-rose/30 bg-rose/10 px-3 py-1.5 text-xs text-rose">
           {error}
         </p>
       ) : null}
       <ChatMessageList
         messages={messages}
         markdown
+        compact
         targetName={team?.name}
-        starters={deskStarters(team, brokerNames)}
-        onStarter={(text) => void send(text)}
       />
+      {showStarters ? (
+        <DeskChatStarters
+          prompts={starters}
+          onSelect={(text) => void send(text)}
+        />
+      ) : null}
       <MessageComposer
         onSend={(text) => void send(text)}
         onCancel={() => void cancelActiveRun()}
         streaming={streaming}
         disabled={!team || streaming}
+        compact
         placeholder={
           team ? `Message ${team.name}…` : "No desk team available"
         }
+        externalDraft={composerDraft}
+        onExternalDraftApplied={clearComposerDraft}
       />
     </div>
   );

@@ -44,6 +44,7 @@ Requires sandbox image/backend that supports **form-urlencoded** HttpProxy (`for
 | `list_orders` / `get_order_history` / `list_trades` / `get_order_trades` | no | Order book |
 | `get_order_margins` | no | Pre-trade margin (JSON) |
 | `get_quote` / `get_ltp` / `get_ohlc` | no | Market data |
+| `get_historical_candles` | no | ADX / trend (15m candles) |
 
 \*Sensitive auth helper.
 
@@ -54,3 +55,38 @@ Products: CNC, NRML, MIS, … Order types: MARKET, LIMIT, SL, SL-M.
 Varieties: `regular`, `amo`, `co`, `iceberg`, …
 
 Instrument ids for quotes: `NSE:INFY`, `NFO:NIFTY25APRFUT` (comma-separated).
+
+## Signals ops (admin desk)
+
+Kite is the **recommended** broker for the signal engine (full quote + OI + MCX crude + India VIX).
+
+1. Allowlist `api.kite.trade`.
+2. Publish `kite_toolkit.py` in Tool Builder.
+3. Bind on **`signals-ops`** team (read-only: `get_quote`, `get_ltp`, `get_ohlc`).
+4. Credential/settings: `api_key`, `api_secret`, daily `access_token` (via `create_session`).
+
+**Example signal setup symbols (adjust expiry/strike to current series):**
+
+| Field | Kite instrument |
+|---|---|
+| Underlying | `NSE:NIFTY 50` |
+| FUT (OI) | `NFO:NIFTY26AUGFUT` |
+| CE | `NFO:NIFTY26AUG24500CE` |
+| PE | `NFO:NIFTY26AUG24500PE` |
+| India VIX | `NSE:INDIA VIX` |
+| Crude | `MCX:CRUDEOILM` |
+
+`get_quote` returns `last_price`, `oi` (FUT), and OHLC — the backend signal engine prefers `get_quote` over `get_ltp` for OI.
+
+**Validate in Tool Builder:**
+
+```text
+get_quote(instruments="NSE:NIFTY 50,NFO:NIFTY26AUG24500CE")
+get_ltp(instruments="NFO:NIFTY26AUG24500CE,NFO:NIFTY26AUG24500PE")
+```
+
+Groww-style aliases also work if another adapter shares the same call shape:
+
+```text
+get_quote(exchange="NSE", segment="FNO", trading_symbols="NIFTY26AUG24500CE,NIFTY26AUG24500PE")
+```

@@ -1,0 +1,728 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { SignalSetupBar } from "@/components/domains/SignalSetupBar";
+import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Field";
+import { PauseIcon, PlayIcon, RefreshIcon, BellIcon } from "@/components/ui/icons";
+import {
+  getSignalState,
+  publishSignalEntry,
+  type SignalEngineAdminConfig,
+  type SignalEngineState,
+  type SignalEntry,
+  type SignalEntryStatus,
+  type SignalMetricRow,
+} from "@/lib/api/admin";
+import { streamSignalState } from "@/lib/api/signals-stream";
+import { useAgentOsToken } from "@/lib/auth/token";
+import { cn } from "@/lib/utils";
+
+/** Three columns: options chain · spot/vol · macro filters. */
+const METRIC_COLUMN_ORDER = [
+  [
+    "atm",
+    "ce",
+    "pe",
+    "ce_oi",
+    "pe_oi",
+    "oi",
+    "oi_pct_chg",
+  ],
+  [
+    "spot_chg",
+    "spot_vs_open",
+    "fut_basis",
+    "iv",
+    "ivp",
+    "iv_chg",
+    "pcr",
+    "max_pain",
+  ],
+  [
+    "adx",
+    "rsi",
+    "vix_chg",
+    "india_vix",
+    "dow_jones",
+    "crude_oil",
+    "fii_net",
+  ],
+] as const;
+
+function layoutMetricColumns(metrics: SignalMetricRow[]): SignalMetricRow[][] {
+  const byId = new Map(metrics.map((row) => [row.id, row]));
+  const pick = (ids: readonly string[]) =>
+    ids
+      .map((id) => byId.get(id))
+      .filter((row): row is SignalMetricRow => row != null);
+
+  const columns = METRIC_COLUMN_ORDER.map((ids) => pick(ids));
+  const placed = new Set(columns.flatMap((col) => col.map((row) => row.id)));
+
+  for (const row of metrics) {
+    if (placed.has(row.id)) continue;
+    let shortest = 0;
+    for (let i = 1; i < columns.length; i += 1) {
+      if (columns[i].length < columns[shortest].length) shortest = i;
+    }
+    columns[shortest].push(row);
+    placed.add(row.id);
+  }
+
+  return columns;
+}
+
+const CONFIG_OVERRIDE_METRICS: Record<
+  string,
+  keyof SignalEngineAdminConfig
+> = {
+  pcr: "pcr",
+  max_pain: "max_pain",
+  ivp: "ivp",
+  india_vix: "india_vix",
+  dow_jones: "dow_change_pct",
+  oi_pct_chg: "oi_pct_chg",
+  iv_chg: "iv_chg",
+  fii_net: "fii_net",
+};
+
+function formatValue(value: number | null | undefined) {
+  if (value === null || value === undefined) return "—";
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(2);
+}
+
+function formatEvaluatedAt(epoch: number | undefined): string | null {
+  if (epoch == null || !Number.isFinite(epoch)) return null;
+  const ms = epoch > 1e12 ? epoch : epoch * 1000;
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString();
+}
+
+function statusTone(passed: boolean | null | undefined) {
+  if (passed === true) return "success" as const;
+  if (passed === false) return "danger" as const;
+  return "neutral" as const;
+}
+
+type BuySignalTone = SignalEntryStatus | "loading";
+
+function buySignalTone(
+  state: SignalEngineState | null,
+  entry: SignalEntry | null | undefined,
+): BuySignalTone {
+  if (!state) return "loading";
+  return entry?.status ?? (state.entry_ready ? "ready" : "waiting");
+}
+
+function buySignalLine(entry: SignalEntry | null | undefined): string {
+  if (entry?.label) return entry.label;
+  return "BUY= —, CE=—, PE=—, EXIT —";
+}
+
+function buySignalBadge(tone: BuySignalTone): string {
+  switch (tone) {
+    case "ready":
+      return "GO";
+    case "blocked":
+      return "NO GO";
+    case "waiting":
+      return "PENDING";
+    default:
+      return "…";
+  }
+}
+
+function buySignalClassName(tone: BuySignalTone): string {
+  switch (tone) {
+    case "ready":
+      return "border-teal/50 bg-teal/10";
+    case "blocked":
+      return "border-rose/50 bg-rose/10";
+    case "waiting":
+      return "border-amber-300 bg-amber-50";
+    default:
+      return "border-line bg-fog/40";
+  }
+}
+
+function buySignalTextClassName(tone: BuySignalTone): string {
+  switch (tone) {
+    case "ready":
+      return "text-teal";
+    case "blocked":
+      return "text-rose-800";
+    case "waiting":
+      return "text-amber-950";
+    default:
+      return "text-slate-muted";
+  }
+}
+
+function BuySignalBanner({
+  state,
+  entry,
+  engineEnabled,
+  entryReady,
+  publishing,
+  publishMsg,
+  onPublish,
+}: {
+  state: SignalEngineState | null;
+  entry: SignalEntry | null | undefined;
+  engineEnabled: boolean;
+  entryReady: boolean;
+  publishing: boolean;
+  publishMsg: string | null;
+  onPublish: () => void;
+}) {
+  const tone = buySignalTone(state, entry);
+  const buyLine = buySignalLine(entry);
+  const note =
+    entry?.status_note ??
+    (state
+      ? `${state.passed}/${state.evaluable} rules passing`
+      : "Loading buy signal…");
+  const statusLine = publishMsg ?? note;
+  const canNotify = entryReady && engineEnabled && !publishing;
+
+  return (
+    <div
+      className={cn(
+        "mt-3 rounded-lg border px-3 py-1.5",
+        buySignalClassName(tone),
+        buySignalTextClassName(tone),
+      )}
+      role="status"
+      aria-live="polite"
+      title={statusLine}
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide opacity-80">
+          Buy signal
+        </span>
+        <Badge
+          tone={
+            tone === "ready"
+              ? "success"
+              : tone === "blocked"
+                ? "danger"
+                : "warning"
+          }
+          live={tone === "ready"}
+        >
+          {buySignalBadge(tone)}
+        </Badge>
+        <p
+          className={cn(
+            "shrink-0 font-display text-sm font-semibold leading-none tnum tabular-nums",
+            tone === "ready" && "text-teal",
+          )}
+        >
+          {buyLine}
+        </p>
+        <span className="min-w-0 flex-1 truncate text-[11px] leading-none opacity-80">
+          {statusLine}
+        </span>
+        <Button
+          variant={tone === "ready" ? "accent" : "secondary"}
+          size="icon"
+          className="shrink-0"
+          icon={<BellIcon />}
+          disabled={!canNotify || publishing}
+          aria-label={
+            publishing
+              ? "Sending notification"
+              : "Notify all users"
+          }
+          title={
+            publishing
+              ? "Sending notification…"
+              : !engineEnabled
+                ? "Start the engine to notify users"
+                : !entryReady
+                  ? "All evaluable rules must pass before notifying"
+                  : "Notify all users"
+          }
+          onClick={onPublish}
+        />
+      </div>
+    </div>
+  );
+}
+
+function EditableOverrideValue({
+  row,
+  configKey,
+  config,
+  patchConfig,
+}: {
+  row: SignalMetricRow;
+  configKey: keyof SignalEngineAdminConfig;
+  config: SignalEngineAdminConfig;
+  patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const override = config[configKey] as number | null | undefined;
+
+  if (editing) {
+    return (
+      <Input
+        autoFocus
+        type="number"
+        step={row.id === "pcr" ? "0.01" : "1"}
+        className="h-8 py-1 text-sm tnum"
+        value={override ?? ""}
+        onBlur={() => setEditing(false)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === "Escape") setEditing(false);
+        }}
+        onChange={(e) =>
+          patchConfig({
+            [configKey]: e.target.value === "" ? null : Number(e.target.value),
+          })
+        }
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className={cn(
+        "w-full truncate text-right text-sm tnum tabular-nums hover:underline",
+        override != null && "font-semibold text-info",
+      )}
+      title={row.hint || "Click to override"}
+      onClick={() => setEditing(true)}
+    >
+      {formatValue(row.value)}
+    </button>
+  );
+}
+
+function MetricTable({
+  rows,
+  config,
+  patchConfig,
+}: {
+  rows: SignalMetricRow[];
+  config: SignalEngineAdminConfig | null;
+  patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
+}) {
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[15.5rem] border-collapse text-sm">
+        <thead className="sticky top-0 z-[1] bg-fog/95 backdrop-blur-sm">
+          <tr className="border-b border-line text-xs uppercase tracking-wide text-slate-muted">
+            <th className="px-2 py-2 text-left font-medium">Metric</th>
+            <th className="px-2 py-2 text-right font-medium">Value</th>
+            <th className="px-2 py-2 text-left font-medium">Target</th>
+            <th className="w-[4.25rem] min-w-[4.25rem] px-1 py-2 text-center font-medium">
+              Status
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const overrideKey = CONFIG_OVERRIDE_METRICS[row.id];
+            return (
+              <tr
+                key={row.id}
+                className={cn(
+                  "border-b border-line/50",
+                  row.passed === true && "bg-teal/[0.04]",
+                  row.passed === false && "bg-rose/[0.04]",
+                )}
+                title={row.hint}
+              >
+                <td className="max-w-[5.5rem] truncate px-2 py-1.5 font-medium">
+                  {row.label}
+                </td>
+                <td className="whitespace-nowrap px-2 py-1.5 text-right tnum">
+                  {overrideKey && config ? (
+                    <EditableOverrideValue
+                      row={row}
+                      configKey={overrideKey}
+                      config={config}
+                      patchConfig={patchConfig}
+                    />
+                  ) : (
+                    <span className="tabular-nums">{formatValue(row.value)}</span>
+                  )}
+                </td>
+                <td className="max-w-[6.5rem] truncate px-2 py-1.5 text-slate-muted">
+                  {row.target}
+                </td>
+                <td className="w-[4.25rem] min-w-[4.25rem] px-1 py-1.5 text-center">
+                  <Badge
+                    tone={statusTone(row.passed)}
+                    dot
+                    className="inline-flex w-[3.5rem] justify-center whitespace-nowrap px-1 py-0.5 text-[9px]"
+                  >
+                    {row.passed === true
+                      ? "Pass"
+                      : row.passed === false
+                        ? "Fail"
+                        : "N/A"}
+                  </Badge>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function SignalMetricsPanel() {
+  const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
+  const [state, setState] = useState<SignalEngineState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [publishMsg, setPublishMsg] = useState<string | null>(null);
+  const [streaming, setStreaming] = useState(false);
+  const [warningsOpen, setWarningsOpen] = useState(true);
+  const [engineBusy, setEngineBusy] = useState(false);
+  const mounted = useRef(true);
+
+  const {
+    config,
+    presets,
+    presetKey,
+    presetLocked,
+    loading: configLoading,
+    saveStatus,
+    error: configError,
+    patchConfig,
+    patchConfigImmediate,
+    onPresetChange,
+  } = useSignalConfigAutosave(getAccessToken, isLoaded && isSignedIn);
+
+  const engineEnabled =
+    config?.engine_enabled ?? state?.engine_enabled ?? false;
+  const engineRunning =
+    engineEnabled && Boolean(state?.engine_active);
+
+  const metrics = state?.metrics ?? [];
+  const failingRules = useMemo(
+    () =>
+      metrics
+        .filter((row) => row.passed === false)
+        .map((row) => row.label),
+    [metrics],
+  );
+  const metricColumns = useMemo(
+    () => layoutMetricColumns(metrics),
+    [metrics],
+  );
+
+  const refreshOnce = useCallback(async () => {
+    try {
+      const token = await getAccessToken();
+      if (!token || !mounted.current) return;
+      const data = await getSignalState(token);
+      if (mounted.current) {
+        setState(data);
+        setError(null);
+      }
+    } catch (err) {
+      if (mounted.current) {
+        setError(err instanceof Error ? err.message : "Failed to load signal state");
+      }
+    }
+  }, [getAccessToken]);
+
+  useEffect(() => {
+    mounted.current = true;
+    if (!isLoaded || !isSignedIn) return;
+
+    const controller = new AbortController();
+    setStreaming(true);
+
+    void (async () => {
+      try {
+        const token = await getAccessToken();
+        if (!token || !mounted.current) return;
+        await streamSignalState({
+          accessToken: token,
+          signal: controller.signal,
+          onState: (data) => {
+            if (mounted.current) {
+              setState(data);
+              setError(null);
+            }
+          },
+        });
+      } catch (err) {
+        if (!mounted.current || controller.signal.aborted) return;
+        setError(err instanceof Error ? err.message : "Signal stream failed");
+        setStreaming(false);
+        void refreshOnce();
+      } finally {
+        if (mounted.current) setStreaming(false);
+      }
+    })();
+
+    return () => {
+      mounted.current = false;
+      controller.abort();
+    };
+  }, [getAccessToken, isLoaded, isSignedIn, refreshOnce]);
+
+  async function onToggleEngine(nextEnabled: boolean) {
+    if (engineBusy) return;
+    setEngineBusy(true);
+    setError(null);
+    try {
+      await patchConfigImmediate({ engine_enabled: nextEnabled });
+    } catch (err) {
+      if (mounted.current) {
+        setError(
+          err instanceof Error ? err.message : "Failed to update engine state",
+        );
+      }
+    } finally {
+      if (mounted.current) setEngineBusy(false);
+    }
+  }
+
+  async function onPublish() {
+    setPublishing(true);
+    setPublishMsg(null);
+    try {
+      const token = await getAccessToken();
+      if (!token) return;
+      const result = await publishSignalEntry(token);
+      if (result.ok) {
+        setPublishMsg(
+          result.deduped
+            ? "Already notified (deduped)."
+            : `Notified ${result.notification?.recipient_count ?? 0} users.`,
+        );
+      } else {
+        setPublishMsg(result.error ?? "Publish failed");
+      }
+    } catch (err) {
+      setPublishMsg(err instanceof Error ? err.message : "Publish failed");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  const entry = state?.entry;
+  const entryReady = Boolean(state?.entry_ready);
+  const warnings = state?.live_warnings ?? [];
+  const mockMode = Boolean(config?.mock ?? state?.mock);
+  const fetchedLabel = formatEvaluatedAt(state?.evaluated_at);
+
+  return (
+    <section className="mt-4 flex min-h-[min(72vh,54rem)] flex-col rounded-xl border border-line bg-raised/20 p-4">
+      <header className="border-b border-line pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-display text-lg font-semibold tracking-tight">
+                Signal engine
+              </h2>
+              <Badge
+                tone={
+                  !engineEnabled
+                    ? "neutral"
+                    : engineRunning
+                      ? "success"
+                      : "warning"
+                }
+                live={engineRunning}
+              >
+                {!engineEnabled
+                  ? "Stopped"
+                  : engineRunning
+                    ? "Running"
+                    : "Reconnecting"}
+              </Badge>
+              {engineEnabled ? (
+                <Badge tone={streaming ? "success" : "warning"} dot={false}>
+                  Stream {streaming ? "connected" : "…"}
+                </Badge>
+              ) : null}
+              {mockMode ? (
+                <Badge tone="info">Mock</Badge>
+              ) : null}
+              {saveStatus === "pending" || saveStatus === "saving" ? (
+                <Badge tone="warning">Saving…</Badge>
+              ) : saveStatus === "saved" ? (
+                <Badge tone="success">Saved</Badge>
+              ) : null}
+            </div>
+            <p className="mt-1 text-sm text-slate-muted">
+              {state?.underlying?.label ?? "No underlying"} ·{" "}
+              {state ? `${state.passed}/${state.evaluable} passing` : "—"} ·{" "}
+              {engineEnabled
+                ? mockMode
+                  ? "mock feed · demo metrics"
+                  : (state?.feed_source ?? "…")
+                : "engine stopped — metrics frozen"}
+              {!state?.has_broker && !mockMode ? " · broker not bound" : ""}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <label
+              htmlFor="signal-mock"
+              title="Rehearsal mode — demo metrics without live broker quotes"
+              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-ink"
+            >
+              <input
+                id="signal-mock"
+                type="checkbox"
+                checked={Boolean(config?.mock)}
+                onChange={(e) => patchConfig({ mock: e.target.checked })}
+                className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
+              />
+              Mock feed
+            </label>
+            {engineEnabled ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<PauseIcon />}
+                disabled={engineBusy}
+                onClick={() => void onToggleEngine(false)}
+              >
+                {engineBusy ? "Stopping…" : "Stop engine"}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                icon={<PlayIcon />}
+                disabled={engineBusy}
+                onClick={() => void onToggleEngine(true)}
+              >
+                {engineBusy ? "Starting…" : "Start engine"}
+              </Button>
+            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<RefreshIcon />}
+              onClick={() => void refreshOnce()}
+              aria-label="Refresh signal metrics"
+            >
+              Refresh
+            </Button>
+          </div>
+        </div>
+        {failingRules.length > 0 || fetchedLabel ? (
+          <div
+            className={cn(
+              "mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-amber-950",
+              failingRules.length > 0 ? "justify-between" : "justify-end",
+            )}
+          >
+            {failingRules.length > 0 ? (
+              <p className="min-w-0">
+                <span className="font-medium">Failing rules:</span>{" "}
+                {failingRules.join(" · ")}
+              </p>
+            ) : null}
+            {fetchedLabel ? (
+              <span
+                className="shrink-0 whitespace-nowrap tnum tabular-nums"
+                title={`Last signal fetch: ${fetchedLabel}`}
+              >
+                <span className="font-medium">Fetched</span> {fetchedLabel}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </header>
+
+      {error ? <p className="mt-2 text-sm text-rose-600">{error}</p> : null}
+      {configError ? (
+        <p className="mt-2 text-sm text-rose-600">{configError}</p>
+      ) : null}
+
+      {warnings.length > 0 ? (
+        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          <button
+            type="button"
+            className="font-medium hover:underline"
+            onClick={() => setWarningsOpen((open) => !open)}
+          >
+            {warnings.length} setup warning{warnings.length === 1 ? "" : "s"}
+            {warningsOpen ? " (hide)" : " (show all)"}
+          </button>
+          {warningsOpen ? (
+            <ul className="mt-2 list-inside list-disc space-y-1">
+              {warnings.map((msg) => (
+                <li key={msg}>{msg}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1 text-xs">{warnings[0]}</p>
+          )}
+        </div>
+      ) : null}
+
+      <BuySignalBanner
+        state={state}
+        entry={entry}
+        engineEnabled={engineEnabled}
+        entryReady={entryReady}
+        publishing={publishing}
+        publishMsg={publishMsg}
+        onPublish={() => void onPublish()}
+      />
+
+      <div className="mt-3 shrink-0">
+        <SignalSetupBar
+          config={config}
+          presets={presets}
+          presetKey={presetKey}
+          presetLocked={presetLocked}
+          onPresetChange={onPresetChange}
+          patchConfig={patchConfig}
+          loading={configLoading}
+        />
+      </div>
+
+      <div className="mt-2 min-h-0 flex-1 overflow-auto">
+        {metrics.length === 0 ? (
+          <p className="py-8 text-center text-sm text-slate-muted">
+            Waiting for signal stream…
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {metricColumns.map((column, index) => (
+              <div
+                key={`metric-col-${index}`}
+                className="min-w-0 overflow-hidden rounded-lg border border-line bg-white/60"
+              >
+                <MetricTable
+                  rows={column}
+                  config={config}
+                  patchConfig={patchConfig}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {state ? (
+        <p className="mt-2 shrink-0 text-xs text-slate-muted">
+          {metrics.length} metrics in 3 columns · stream {state.poll_ms}ms ·
+          broker {state.broker_poll_ms ?? 500}ms
+        </p>
+      ) : null}
+    </section>
+  );
+}

@@ -11,7 +11,19 @@ Atlas skill pack for the Stock Broker **end-user desk**: four chats.
   - Any later broker — publish the toolkit, assign it on those teams
 - **Learn policy:** Knowledge Base for lessons. Generic ticker questions (“predict TCS…”) stay in **Learning**: read-only quotes if a broker toolkit is assigned; **never** predict or guarantee prices. Do **not** rebuild Classplus.
 - **Research policy:** Analysis only. You MUST call tools for any price, position, Greek, IV, payoff, or what-if. Live orders stay on Live trading (HITL).
-- **Desk widgets:** Widget → Team → member Agent → **assigned** tool. Agents never call a broker that is not bound.
+- **Signal engine (admin):** `tools/signal_engine_toolkit.py` + `tools/SIGNAL_ENGINE.md` — metric board, entry rules, notify all users. Bind on **Signals ops** team; admin desk streams `GET /admin/signals/stream` ~8×/sec.
+
+---
+
+## Tool binding policy
+
+**Bind tools on teams** in Team Builder — not on individual agents. Agents discover whatever the team assigns. This reduces turnaround: publish the team once, all members inherit bindings.
+
+| Doc | Owns |
+|---|---|
+| `teams/*.md` | Which toolkits to bind, required vs optional |
+| `agents/*.md` | Persona, routing, procedures (no bind lists) |
+| `tools/*.md` | Toolkit capabilities and settings |
 
 ---
 
@@ -24,7 +36,7 @@ Atlas skill pack for the Stock Broker **end-user desk**: four chats.
 | Live trading | `agents/live_trader.md` | assigned broker + algo status | live place/cancel (HITL) |
 | Research | `agents/researcher.md` | research toolkit + assigned read-only quotes | no |
 
-No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on this desk. Live eligibility and global kill stay in-product / HITL policy — the Live trader **explains**, it does not approve or trip kill.
+No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on the **end-user desk**. **Signals ops** (`signals-ops`) is admin-only — see `teams/signals_ops.md`. Live eligibility and global kill stay in-product / HITL policy — the Live trader **explains**, it does not approve or trip kill.
 
 ---
 
@@ -36,6 +48,7 @@ No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on th
 | Paper trading | `paper-trading` | Paper Trader | Signal → paper fill |
 | Live trading | `live-trading` | Live Trader | Assigned broker + live status |
 | Research | `research` | Researcher | Tool-required stock / F&O analysis (no orders) |
+| Signals ops | `signals-ops` | Signal Operator | Admin metrics + entry publish (not on user desk) |
 
 ---
 
@@ -88,7 +101,7 @@ Broker APIs differ. Prefer these when they exist on the **assigned** toolkit; ot
 
 ## Assigned broker policy
 
-1. Discover tools bound on **this** team or agent.
+1. Discover tools bound on **this team** (Team Builder).
 2. Never assume Groww, Kite, or any vendor.
 3. If no broker tool is bound on Live trading, say so. Do not invent holdings or P&L.
 4. Token expiry / 401 → auto-disarm; reconnect **that** broker.

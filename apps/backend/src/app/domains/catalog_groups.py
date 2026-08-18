@@ -27,6 +27,8 @@ STOCK_BROKER_DESKS: dict[str, str] = {
     "live-approval": "live",
     "research": "research",
     "researcher": "research",
+    "signals-ops": "signals",
+    "signal-operator": "signals",
 }
 
 # Slugs retired from the live pack that still exist in tenants provisioned

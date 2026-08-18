@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
+import { ChevronLeftIcon, ChevronRightIcon } from "@/components/ui/icons";
 import { cn } from "@/lib/utils";
 
 export type CatalogStatusFilter = "all" | "published" | "draft";
@@ -86,6 +87,7 @@ export function CatalogControls({
           <Button
             size="sm"
             variant="secondary"
+            icon={<ChevronLeftIcon />}
             disabled={loading || query.page <= 1}
             onClick={() => onChange({ ...query, page: query.page - 1 })}
           >
@@ -97,6 +99,7 @@ export function CatalogControls({
           <Button
             size="sm"
             variant="secondary"
+            icon={<ChevronRightIcon />}
             disabled={loading || query.page >= totalPages}
             onClick={() => onChange({ ...query, page: query.page + 1 })}
           >

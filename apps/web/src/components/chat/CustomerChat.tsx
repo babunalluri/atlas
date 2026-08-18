@@ -16,11 +16,7 @@ import { ChatAccountBar } from "@/components/chat/ChatAccountBar";
 import { MessageComposer } from "@/components/chat/MessageComposer";
 import { ChatMessageList } from "@/components/chat/MessageList";
 import { SessionPicker } from "@/components/chat/SessionPicker";
-import { NotificationBell } from "@/components/notifications/NotificationBell";
-import {
-  ThemeToggle,
-  useSurfaceTheme,
-} from "@/components/layout/ThemeToggle";
+import { useSurfaceTheme } from "@/components/layout/ThemeToggle";
 import {
   extractTextContent,
   isPausedRunEvent,
@@ -694,8 +690,6 @@ export function CustomerChat({
                   ) : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <NotificationBell />
-                  <ThemeToggle theme={theme} onChange={changeTheme} />
                   {!embedded ? (
                     <Link
                       href={`/t/${surface.tenant.slug}/chat`}
@@ -709,6 +703,8 @@ export function CustomerChat({
                       tenantSlug={surface.tenant.slug}
                       signInRedirect={`/t/${surface.tenant.slug}/chat`}
                       serverSession={serverSession}
+                      theme={theme}
+                      onThemeChange={changeTheme}
                     />
                   ) : null}
                 </div>

@@ -119,6 +119,22 @@ async def test_end_user_vault_is_own_metadata_only(rbac_db):
         assert "secret-a" not in listed_a.text
         assert all("value" not in row for row in rows_a)
 
+        updated = await client.put(
+            "/api/me/vault/access_token",
+            headers=user_a,
+            json={"value": "secret-a-rotated", "kind": "secret"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "access_token"
+
+        variable = await client.put(
+            "/api/me/vault/base_url",
+            headers=user_a,
+            json={"value": "https://api.example.com", "kind": "variable"},
+        )
+        assert variable.status_code == 200
+        assert variable.json()["kind"] == "variable"
+
         listed_b = await client.get("/api/me/vault", headers=user_b)
         assert listed_b.status_code == 200
         assert listed_b.json() == []
@@ -133,7 +149,10 @@ async def test_end_user_vault_is_own_metadata_only(rbac_db):
         assert "secret-b" not in other.text
 
         still_a = await client.get("/api/me/vault", headers=user_a)
-        assert [row["name"] for row in still_a.json()] == ["access_token"]
+        assert sorted(row["name"] for row in still_a.json()) == [
+            "access_token",
+            "base_url",
+        ]
         assert "secret-b" not in still_a.text
 
 

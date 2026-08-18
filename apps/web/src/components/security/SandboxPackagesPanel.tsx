@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
+import { EyeIcon, EyeOffIcon, PlusIcon } from "@/components/ui/icons";
 import {
   createPlatformSandboxPackage,
   listPlatformSandboxPackages,
@@ -128,6 +129,7 @@ export function SandboxPackagesPanel() {
           <Button
             variant="accent"
             size="sm"
+            icon={<PlusIcon />}
             disabled={busy || !name || !version || sha256.length !== 64}
             onClick={addPackage}
           >
@@ -157,6 +159,7 @@ export function SandboxPackagesPanel() {
                 <Button
                   variant="secondary"
                   size="sm"
+                  icon={row.active ? <EyeOffIcon /> : <EyeIcon />}
                   disabled={busy}
                   onClick={() => setActive(row, !row.active)}
                 >

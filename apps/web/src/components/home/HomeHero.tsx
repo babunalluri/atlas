@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { useSignInModal } from "@/components/auth/SignInModalProvider";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { Button } from "@/components/ui/Button";
+import { CheckIcon, SignInIcon } from "@/components/ui/icons";
 import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
@@ -86,7 +87,11 @@ export function HomeHero() {
             </p>
             <div className="mt-8">
               <Link href="/admin/onboarding">
-                <Button variant="accent" className="min-w-[10rem]">
+                <Button
+                  variant="accent"
+                  className="min-w-[10rem]"
+                  icon={<CheckIcon />}
+                >
                   {tHome("finishSetup")}
                 </Button>
               </Link>
@@ -160,6 +165,7 @@ function SignedOutLanding({
                 type="button"
                 variant="accent"
                 className="min-w-[9.5rem]"
+                icon={<SignInIcon />}
                 onClick={() => openSignIn()}
               >
                 {tCommon("signIn")}

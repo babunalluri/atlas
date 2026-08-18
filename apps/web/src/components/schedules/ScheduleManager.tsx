@@ -9,6 +9,17 @@ import { Button } from "@/components/ui/Button";
 import { Input, Label, Textarea } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
+  CheckIcon,
+  CloseIcon,
+  EyeIcon,
+  EyeOffIcon,
+  PencilIcon,
+  PlayIcon,
+  PlusIcon,
+  SaveIcon,
+  TrashIcon,
+} from "@/components/ui/icons";
+import {
   type AgentSchedule,
   createSchedule,
   deleteSchedule,
@@ -173,7 +184,7 @@ export function ScheduleManager({
                 {editing ? "Edit schedule" : "New schedule"}
               </p>
               {editing ? (
-                <Button size="sm" variant="ghost" onClick={reset}>
+                <Button size="sm" variant="ghost" icon={<CloseIcon />} onClick={reset}>
                   {tCommon("cancel")}
                 </Button>
               ) : null}
@@ -250,6 +261,7 @@ export function ScheduleManager({
               <p className="text-xs text-rose">{error}</p>
               <Button
                 variant="accent"
+                icon={<SaveIcon />}
                 disabled={busy === "save" || targets.length === 0}
                 onClick={save}
               >
@@ -305,12 +317,13 @@ export function ScheduleManager({
               {schedule.next_run_at ? formatNextRun(schedule.next_run_at) : "—"}
             </p>
             <div className="flex justify-end gap-1.5">
-              <Button size="sm" variant="ghost" onClick={() => edit(schedule)}>
+              <Button size="sm" variant="ghost" icon={<PencilIcon />} onClick={() => edit(schedule)}>
                 Edit
               </Button>
               <Button
                 size="sm"
                 variant="secondary"
+                icon={schedule.enabled ? <EyeOffIcon /> : <EyeIcon />}
                 disabled={busy === schedule.id}
                 onClick={() =>
                   act(schedule.id, async () =>
@@ -327,6 +340,7 @@ export function ScheduleManager({
               <Button
                 size="sm"
                 variant="accent"
+                icon={<PlayIcon />}
                 disabled={busy === schedule.id}
                 onClick={() =>
                   act(schedule.id, async () =>
@@ -339,6 +353,7 @@ export function ScheduleManager({
               <Button
                 size="sm"
                 variant="ghost"
+                icon={<TrashIcon />}
                 disabled={busy === schedule.id}
                 onClick={() =>
                   act(schedule.id, async () =>

@@ -8,8 +8,13 @@ import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
 import {
   CloneIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CloseIcon,
   HistoryIcon,
   PencilIcon,
+  PlusIcon,
+  SearchIcon,
   TrashIcon,
 } from "@/components/ui/icons";
 import {
@@ -134,7 +139,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
       ? "/admin/integrations"
       : `/admin/tools/new?family=${family}&kind=${FAMILY_CREATE_KIND[family]}`;
 
-  const createLabel = family === "toolkits" ? "Browse catalog" : "+ Create";
+  const createLabel = family === "toolkits" ? "Browse catalog" : "Create";
 
   async function onClone(tool: ToolDefinition) {
     setCloningIds((current) => new Set(current).add(tool.id));
@@ -323,6 +328,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
               href="/admin/integrations"
               className={buttonClassName({ variant: "secondary" })}
             >
+              <SearchIcon />
               Toolkit catalog
             </Link>
           ) : null}
@@ -330,6 +336,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
             href={createHref}
             className={buttonClassName({ variant: "accent" })}
           >
+            {family === "toolkits" ? <SearchIcon /> : <PlusIcon />}
             {createLabel}
           </Link>
         </div>
@@ -413,6 +420,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
               <Button
                 size="sm"
                 variant="secondary"
+                icon={<ChevronLeftIcon />}
                 disabled={safePage <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
               >
@@ -424,6 +432,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
               <Button
                 size="sm"
                 variant="secondary"
+                icon={<ChevronRightIcon />}
                 disabled={safePage >= totalPages}
                 onClick={() =>
                   setPage((current) => Math.min(totalPages, current + 1))
@@ -556,7 +565,7 @@ export function ToolList({ tools: initialTools }: { tools: ToolDefinition[] }) {
                   /{versionsTool.slug}
                 </p>
               </div>
-              <Button size="sm" variant="ghost" onClick={closeVersions}>
+              <Button size="sm" variant="ghost" icon={<CloseIcon />} onClick={closeVersions}>
                 Close
               </Button>
             </div>

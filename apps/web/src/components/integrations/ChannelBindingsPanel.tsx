@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { PlusIcon, TrashIcon } from "@/components/ui/icons";
 import { Input, Label, Select } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
@@ -168,7 +169,12 @@ export function ChannelBindingsPanel({
         </div>
       </div>
       <div className="mt-3">
-        <Button variant="accent" disabled={busy} onClick={() => void onCreate()}>
+        <Button
+          variant="accent"
+          icon={<PlusIcon />}
+          disabled={busy}
+          onClick={() => void onCreate()}
+        >
           {busy ? "Saving…" : "Add binding"}
         </Button>
       </div>
@@ -197,6 +203,7 @@ export function ChannelBindingsPanel({
               <Button
                 size="sm"
                 variant="danger"
+                icon={<TrashIcon />}
                 onClick={() => void onDelete(item.id)}
               >
                 Delete

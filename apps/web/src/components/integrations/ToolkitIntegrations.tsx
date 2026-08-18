@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { ToolkitLogo } from "@/components/integrations/ToolkitLogo";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { PlusIcon, SaveIcon } from "@/components/ui/icons";
 import { Input, Label, Select } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
@@ -473,6 +474,7 @@ export function ToolkitIntegrations({
                         </div>
                         <Button
                           variant="secondary"
+                          icon={<SaveIcon />}
                           disabled={
                             busy !== null || !secretLabel.trim() || !secretValue
                           }
@@ -580,6 +582,7 @@ export function ToolkitIntegrations({
                   </p>
                   <Button
                     variant="accent"
+                    icon={<PlusIcon />}
                     disabled={
                       busy !== null ||
                       !selected.available ||

@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 
 import { Link } from "@/i18n/navigation";
 
+import { Button } from "@/components/ui/Button";
+import { RefreshIcon } from "@/components/ui/icons";
 import { cn } from "@/lib/utils";
 import type {
   DomainBrokerTool,
@@ -25,7 +27,7 @@ const PLACEHOLDER_BOOKS: DomainDeskBook[] = [
     rows: [],
     error: null,
     empty_hint:
-      "Tap Refresh to load orders, positions, and watchlist from Live trading.",
+      "Use Refresh books to load orders, positions, and watchlist from Live trading.",
   },
   {
     id: "positions",
@@ -38,7 +40,7 @@ const PLACEHOLDER_BOOKS: DomainDeskBook[] = [
     rows: [],
     error: null,
     empty_hint:
-      "Tap Refresh to load orders, positions, and watchlist from Live trading.",
+      "Use Refresh books to load orders, positions, and watchlist from Live trading.",
   },
   {
     id: "holdings",
@@ -51,7 +53,7 @@ const PLACEHOLDER_BOOKS: DomainDeskBook[] = [
     rows: [],
     error: null,
     empty_hint:
-      "Tap Refresh to load orders, positions, and watchlist from Live trading.",
+      "Use Refresh books to load orders, positions, and watchlist from Live trading.",
   },
   {
     id: "watchlist",
@@ -68,7 +70,7 @@ const PLACEHOLDER_BOOKS: DomainDeskBook[] = [
     ],
     error: null,
     empty_hint:
-      "Tap Refresh to load orders, positions, and watchlist from Live trading.",
+      "Use Refresh books to load orders, positions, and watchlist from Live trading.",
   },
 ];
 
@@ -87,14 +89,29 @@ function isNumericLike(value: string | number | boolean | null | undefined) {
   return /^-?[\d,.]+%?$/.test(value.trim());
 }
 
+function formatFetchedAt(value: string | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString();
+}
+
 export function DeskBooksPanel({
   snapshot,
   customer,
   brokerTools = [],
+  refreshing,
+  onRefresh,
+  fetchedAt,
+  rangeDays,
 }: {
   snapshot: DomainDashboard["desk_snapshot"];
   customer: boolean;
   brokerTools?: DomainBrokerTool[];
+  refreshing?: boolean;
+  onRefresh?: () => void;
+  fetchedAt?: string;
+  rangeDays?: number;
 }) {
   const loaded = snapshot != null;
   const books = snapshot?.books?.length ? snapshot.books : PLACEHOLDER_BOOKS;
@@ -118,17 +135,41 @@ export function DeskBooksPanel({
 
   return (
     <section className="mt-5">
-      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-muted">
-        Desk books
-      </p>
-
-      {funds ? <FundsStrip book={funds} loaded={loaded} /> : null}
-
-      {snapshotError ? (
-        <p className="mb-2 text-xs text-rose">{snapshotError}</p>
-      ) : null}
-
       <div className="table-shell rounded-xl">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-muted">
+            Desk books
+          </p>
+          {onRefresh ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <p className="text-[11px] text-slate-muted">
+                {formatFetchedAt(fetchedAt)}
+                {rangeDays != null ? ` · ${rangeDays}d` : ""}
+              </p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onRefresh}
+                disabled={refreshing}
+                aria-label="Refresh desk books"
+                icon={
+                  <RefreshIcon
+                    className={cn(refreshing && "animate-spin")}
+                  />
+                }
+              >
+                {refreshing ? "…" : "Refresh"}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+
+        {funds ? <FundsStrip book={funds} loaded={loaded} className="mx-3 mt-3" /> : null}
+
+        {snapshotError ? (
+          <p className="mx-3 mt-2 text-xs text-rose">{snapshotError}</p>
+        ) : null}
+
         <div className="flex flex-wrap gap-1 border-b border-line px-2 py-1.5">
           {tabs.map((book) => {
             const selected = book.tab === current.tab;
@@ -159,7 +200,7 @@ export function DeskBooksPanel({
 
         {!loaded ? (
           <p className="px-4 py-8 text-center text-sm text-slate-muted">
-            Tap Refresh to load orders, positions, and watchlist from Live
+            Use Refresh books to load orders, positions, and watchlist from Live
             trading.
           </p>
         ) : (
@@ -169,32 +210,43 @@ export function DeskBooksPanel({
 
       {brokerTools.length ? (
         <div className="mt-2 flex flex-wrap gap-2">
-          {brokerTools.map((tool) =>
-            customer ? (
+          {brokerTools.map((tool) => {
+            const viaLabel = [
+              tool.via_team_name,
+              tool.via_agent ? `agent: ${tool.via_agent}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            const label = viaLabel
+              ? `${tool.name} · ${viaLabel}`
+              : tool.name;
+            return customer ? (
               <span
                 key={tool.id}
                 className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft"
               >
-                {tool.name}
-                {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
+                {label}
               </span>
             ) : (
               <Link
                 key={tool.id}
-                href="/admin/teams"
+                href={
+                  tool.via_agent
+                    ? "/admin/agents"
+                    : "/admin/teams"
+                }
                 className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft transition hover:border-teal/40 hover:text-teal"
               >
-                {tool.name}
-                {tool.via_team_name ? ` · ${tool.via_team_name}` : ""}
+                {label}
                 {!tool.published ? " · draft" : ""}
               </Link>
-            ),
-          )}
+            );
+          })}
         </div>
       ) : (
         <p className="mt-2 text-xs text-slate-muted">
           No broker toolkit on Live trading yet. Assign Groww/Kite on that team,
-          then Refresh.
+          then refresh books.
         </p>
       )}
     </section>
@@ -204,14 +256,16 @@ export function DeskBooksPanel({
 function FundsStrip({
   book,
   loaded,
+  className,
 }: {
   book: DomainDeskBook;
   loaded: boolean;
+  className?: string;
 }) {
   if (!loaded || !book.rows.length) return null;
   const rows = book.rows.slice(0, 4);
   return (
-    <div className="mb-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+    <div className={cn("mb-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4", className)}>
       {rows.map((row, index) => (
         <div key={`${cellValue(row.label)}-${index}`} className="surface-panel rounded-xl px-3 py-2.5">
           <p className="th-label">{cellValue(row.label)}</p>

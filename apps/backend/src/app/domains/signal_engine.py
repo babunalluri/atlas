@@ -1,0 +1,1636 @@
+"""Admin signal engine: tiered metric fetch, entry evaluation, publish hooks.
+
+Metrics are admin-only (Signals ops team). End-user desk never loads this module.
+UI pushes at ~8×/sec (SSE); broker quotes refresh ~2×/sec; slow sources cache longer.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agent_runtime.factory import AgentFactoryService, McpToolSkipped
+from app.db.repositories import TeamRepository, ToolDefinitionRepository, ToolDefinitionVersionRepository
+from app.db.repositories import UserNotificationRepository
+from app.domains.desk_snapshot import (
+    QUOTE_CAPABILITIES,
+    _groww_symbol,
+    _looks_like_quote_map,
+    _quote_map_rows,
+    invoke_tool,
+    quote_call_attempts,
+)
+from app.domains import signal_engine_cache as cache
+from app.domains.signal_engine_constants import (
+    BROKER_QUOTE_TTL_MS,
+    STREAM_INTERVAL_MS,
+    TIER_TTL_MS,
+    Tier,
+)
+from app.tenancy.context import TenantContext
+
+QUOTE_TOOL_PRIORITY = {"get_quote": 0, "get_ltp": 1, "get_ohlc": 2}
+SIGNAL_BROKER_CAPABILITIES = (*QUOTE_CAPABILITIES, "get_historical_candles")
+IST = timezone(timedelta(hours=5, minutes=30))
+ADX_CANDLE_INTERVAL = "15minute"
+ADX_LOOKBACK_DAYS = 5
+
+SIGNAL_TEAM_SLUG = "signals-ops"
+
+Rule = Literal[
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "eq",
+    "abs_lte",
+    "below_prev_close",
+    "ce_pe_balance",
+    "iv_pct_day_high",
+    "between",
+    "spot_below_max_pain",
+    "info",
+]
+
+DEFAULT_METRICS: list[dict[str, Any]] = [
+    # Spot + ATM options (displayed together in admin UI)
+    {
+        "id": "atm",
+        "label": "ATM",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "source": "nifty_ltp",
+        "hint": "Nearest strike from live NIFTY",
+    },
+    {
+        "id": "ce",
+        "label": "CE",
+        "rule": "ce_pe_balance",
+        "target": 0,
+        "tier": "fast",
+        "source": "atm_ce",
+        "hint": "ATM call premium",
+    },
+    {
+        "id": "pe",
+        "label": "PE",
+        "rule": "ce_pe_balance",
+        "target": 0,
+        "tier": "fast",
+        "source": "atm_pe",
+        "hint": "ATM put premium — must match CE",
+    },
+    {
+        "id": "oi",
+        "label": "OI",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "source": "nifty_fut_quote",
+        "hint": "NIFTY FUT open interest (display)",
+    },
+    {
+        "id": "ce_oi",
+        "label": "CE OI",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "source": "atm_ce",
+        "hint": "ATM call open interest",
+    },
+    {
+        "id": "pe_oi",
+        "label": "PE OI",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "source": "atm_pe",
+        "hint": "ATM put open interest",
+    },
+    {
+        "id": "spot_chg",
+        "label": "Spot %",
+        "rule": "between",
+        "target": -0.5,
+        "target_high": 1.5,
+        "tier": "fast",
+        "source": "nifty_ltp",
+        "hint": "Spot vs previous close — avoid gap-down / overextended",
+    },
+    {
+        "id": "spot_vs_open",
+        "label": "Vs Open",
+        "rule": "gt",
+        "target": 0,
+        "tier": "fast",
+        "source": "nifty_ltp",
+        "hint": "Spot above session open (intraday momentum)",
+    },
+    {
+        "id": "fut_basis",
+        "label": "Fut basis",
+        "rule": "lte",
+        "target": 0.8,
+        "tier": "fast",
+        "source": "nifty_fut_quote",
+        "hint": "FUT premium over spot % — avoid rich contango",
+    },
+    {
+        "id": "oi_pct_chg",
+        "label": "OI % Chg",
+        "rule": "gt",
+        "target": 0,
+        "tier": "fast",
+        "source": "nifty_fut_quote",
+        "hint": "FUT OI building vs session open",
+    },
+    {
+        "id": "iv",
+        "label": "IV",
+        "rule": "iv_pct_day_high",
+        "target": 50,
+        "tier": "fast",
+        "source": "atm_options",
+        "hint": "ATM implied vol as % of session high",
+    },
+    {
+        "id": "ivp",
+        "label": "IVP",
+        "rule": "lt",
+        "target": 70,
+        "tier": "medium",
+        "source": "iv_history",
+        "hint": "IV percentile — avoid extreme premium (>70)",
+    },
+    {
+        "id": "iv_chg",
+        "label": "IV Chg",
+        "rule": "lte",
+        "target": 0,
+        "tier": "fast",
+        "source": "atm_options",
+        "hint": "Sensibull: IV contracting (≤ 0)",
+    },
+    {
+        "id": "pcr",
+        "label": "PCR",
+        "rule": "between",
+        "target": 1.0,
+        "target_high": 1.3,
+        "tier": "fast",
+        "source": "option_chain",
+        "hint": "Sensibull: bullish band 1.0–1.3; avoid >1.3 overbought",
+    },
+    {
+        "id": "max_pain",
+        "label": "Max Pain",
+        "rule": "spot_below_max_pain",
+        "target": 0,
+        "tier": "medium",
+        "source": "option_chain",
+        "hint": "BUY CE: spot below max pain (upward drift bias)",
+    },
+    {
+        "id": "adx",
+        "label": "ADX",
+        "rule": "lt",
+        "target": 25,
+        "tier": "medium",
+        "source": "nifty_ohlc",
+        "hint": "Trend strength — lower is calmer",
+    },
+    {
+        "id": "rsi",
+        "label": "RSI",
+        "rule": "between",
+        "target": 35,
+        "target_high": 65,
+        "tier": "medium",
+        "source": "nifty_ohlc",
+        "hint": "14-period RSI on 15m — avoid overbought extremes",
+    },
+    {
+        "id": "vix_chg",
+        "label": "VIX Chg",
+        "rule": "lte",
+        "target": 0,
+        "tier": "medium",
+        "source": "nse_vix",
+        "hint": "India VIX vs session open — prefer falling VIX",
+    },
+    {
+        "id": "dow_jones",
+        "label": "DowJones",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "source": "global_index",
+        "hint": "Session change within ±0.5%",
+    },
+    {
+        "id": "india_vix",
+        "label": "India VIX",
+        "rule": "lt",
+        "target": 18,
+        "tier": "medium",
+        "source": "nse_vix",
+        "hint": "Sensibull filter: skip signals when VIX ≥ 18",
+    },
+    {
+        "id": "crude_oil",
+        "label": "CrudeOil",
+        "rule": "below_prev_close",
+        "target": 0,
+        "tier": "medium",
+        "source": "mcx_crude",
+        "hint": "MCX crude below yesterday close",
+    },
+    {
+        "id": "fii_net",
+        "label": "FII net",
+        "rule": "gt",
+        "target": 0,
+        "tier": "slow",
+        "source": "fii_dii",
+        "hint": "Manual daily FII net (₹ Cr) — Sensibull / NSE; skip if unset",
+    },
+]
+
+
+async def _invalidate_tenant_signal_cache(tenant_id: str) -> None:
+    await cache.invalidate_tenant(tenant_id)
+
+
+def _apply_engine_stopped_overlay(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure cached/stream payloads reflect a stopped engine."""
+    return {
+        **payload,
+        "engine_enabled": False,
+        "engine_active": False,
+        "live": False,
+        "feed_source": "stopped",
+    }
+
+
+async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
+    """Coalesce concurrent stream/poll readers to one engine tick per tenant."""
+    tenant_id = _tenant_key(service.context)
+    config = await service._load_config()
+
+    snapshot = await cache.get_snapshot(tenant_id)
+    if snapshot is not None:
+        if not config.engine_enabled:
+            return _apply_engine_stopped_overlay(snapshot)
+        return snapshot
+
+    if await cache.try_compute_lock(tenant_id):
+        try:
+            snapshot = await cache.get_snapshot(tenant_id)
+            if snapshot is not None:
+                if not config.engine_enabled:
+                    return _apply_engine_stopped_overlay(snapshot)
+                return snapshot
+            payload = await service.state()
+            if not config.engine_enabled:
+                payload = _apply_engine_stopped_overlay(payload)
+            await cache.set_snapshot(tenant_id, payload)
+            return payload
+        finally:
+            await cache.release_compute_lock(tenant_id)
+
+    for _ in range(8):
+        await asyncio.sleep(STREAM_INTERVAL_MS / 1000 / 4)
+        snapshot = await cache.get_snapshot(tenant_id)
+        if snapshot is not None:
+            if not config.engine_enabled:
+                return _apply_engine_stopped_overlay(snapshot)
+            return snapshot
+
+    payload = await service.state()
+    if not config.engine_enabled:
+        payload = _apply_engine_stopped_overlay(payload)
+    await cache.set_snapshot(tenant_id, payload)
+    return payload
+
+# Admin-selectable underlyings (not hard-coded to NIFTY).
+UNDERLYING_PRESETS: list[dict[str, Any]] = [
+    {"label": "NIFTY 50", "symbol": "NSE:NIFTY 50", "strike_step": 50},
+    {"label": "NIFTY", "symbol": "NSE:NIFTY", "strike_step": 50},
+    {"label": "BANKNIFTY", "symbol": "NSE:BANKNIFTY", "strike_step": 100},
+    {"label": "FINNIFTY", "symbol": "NSE:FINNIFTY", "strike_step": 50},
+    {"label": "SENSEX", "symbol": "BSE:SENSEX", "strike_step": 100},
+    {"label": "MIDCPNIFTY", "symbol": "NSE:MIDCPNIFTY", "strike_step": 25},
+]
+
+ADMIN_CONFIG_KEYS: tuple[str, ...] = (
+    "underlying_symbol",
+    "underlying_label",
+    "nifty_symbol",
+    "nifty_fut_symbol",
+    "fut_symbol",
+    "ce_symbol",
+    "pe_symbol",
+    "crude_symbol",
+    "india_vix_symbol",
+    "strike_step",
+    "pcr",
+    "max_pain",
+    "ivp",
+    "dow_change_pct",
+    "oi_pct_chg",
+    "iv_chg",
+    "india_vix",
+    "fii_net",
+    "entry_ce_premium",
+    "entry_pe_premium",
+    "exit_pct",
+    "mock",
+    "engine_enabled",
+    "auto_atm_symbols",
+)
+
+
+@dataclass
+class SignalEngineConfig:
+    mock: bool = False
+    engine_enabled: bool = False
+    auto_atm_symbols: bool = True
+    underlying_symbol: str = ""
+    underlying_label: str = ""
+    nifty_fut_symbol: str = ""
+    ce_symbol: str = ""
+    pe_symbol: str = ""
+    crude_symbol: str = "MCX:CRUDEOILM"
+    dow_change_pct: float | None = None
+    strike_step: int = 50
+    entry_ce_premium: float = 100
+    entry_pe_premium: float = 100
+    exit_pct: float = 5
+    india_vix_symbol: str = "NSE:INDIA VIX"
+    max_pain: float | None = None
+    pcr: float | None = None
+    ivp: float | None = None
+    oi_pct_chg: float | None = None
+    iv_chg: float | None = None
+    india_vix: float | None = None
+    fii_net: float | None = None
+    metrics: list[dict[str, Any]] = field(default_factory=lambda: list(DEFAULT_METRICS))
+
+    @classmethod
+    def from_settings(cls, settings: dict[str, Any] | None) -> SignalEngineConfig:
+        raw = settings or {}
+        metrics = list(DEFAULT_METRICS)
+        override = raw.get("metrics_json")
+        if override:
+            try:
+                parsed = json.loads(override) if isinstance(override, str) else override
+                if isinstance(parsed, list) and parsed:
+                    metrics = parsed
+            except (TypeError, json.JSONDecodeError):
+                pass
+        dow = raw.get("dow_change_pct")
+        def _opt_float(key: str) -> float | None:
+            val = raw.get(key)
+            if val is None or val == "":
+                return None
+            return float(val)
+
+        return cls(
+            mock=bool(raw.get("mock", False)),
+            engine_enabled=bool(raw.get("engine_enabled", False)),
+            auto_atm_symbols=bool(raw.get("auto_atm_symbols", True)),
+            underlying_symbol=str(
+                raw.get("underlying_symbol") or raw.get("nifty_symbol") or ""
+            ).strip(),
+            underlying_label=str(raw.get("underlying_label") or "").strip(),
+            nifty_fut_symbol=str(
+                raw.get("nifty_fut_symbol") or raw.get("fut_symbol") or ""
+            ).strip(),
+            ce_symbol=str(raw.get("ce_symbol") or ""),
+            pe_symbol=str(raw.get("pe_symbol") or ""),
+            crude_symbol=str(raw.get("crude_symbol") or "MCX:CRUDEOILM"),
+            dow_change_pct=float(dow) if dow is not None and dow != "" else None,
+            strike_step=int(raw.get("strike_step") or 50),
+            entry_ce_premium=float(raw.get("entry_ce_premium") or 100),
+            entry_pe_premium=float(raw.get("entry_pe_premium") or 100),
+            exit_pct=float(raw.get("exit_pct") or 5),
+            india_vix_symbol=str(raw.get("india_vix_symbol") or "NSE:INDIA VIX"),
+            max_pain=_opt_float("max_pain"),
+            pcr=_opt_float("pcr"),
+            ivp=_opt_float("ivp"),
+            oi_pct_chg=_opt_float("oi_pct_chg"),
+            iv_chg=_opt_float("iv_chg"),
+            india_vix=_opt_float("india_vix"),
+            fii_net=_opt_float("fii_net"),
+            metrics=metrics,
+        )
+
+    @property
+    def spot_symbol(self) -> str:
+        return self.underlying_symbol
+
+    def to_admin_dict(self) -> dict[str, Any]:
+        return {
+            "underlying_symbol": self.underlying_symbol,
+            "underlying_label": self.underlying_label,
+            "fut_symbol": self.nifty_fut_symbol,
+            "ce_symbol": self.ce_symbol,
+            "pe_symbol": self.pe_symbol,
+            "crude_symbol": self.crude_symbol,
+            "india_vix_symbol": self.india_vix_symbol,
+            "strike_step": self.strike_step,
+            "pcr": self.pcr,
+            "max_pain": self.max_pain,
+            "ivp": self.ivp,
+            "dow_change_pct": self.dow_change_pct,
+            "oi_pct_chg": self.oi_pct_chg,
+            "iv_chg": self.iv_chg,
+            "india_vix": self.india_vix,
+            "fii_net": self.fii_net,
+            "entry_ce_premium": self.entry_ce_premium,
+            "entry_pe_premium": self.entry_pe_premium,
+            "exit_pct": self.exit_pct,
+            "mock": self.mock,
+            "engine_enabled": self.engine_enabled,
+            "auto_atm_symbols": self.auto_atm_symbols,
+        }
+
+
+def _tenant_key(context: TenantContext) -> str:
+    return str(context.tenant_id)
+
+
+def _now_ms() -> float:
+    return time.monotonic() * 1000
+
+
+async def _cache_get(tenant_id: str, metric_id: str) -> Any | None:
+    return await cache.get_metric(tenant_id, metric_id)
+
+
+async def _cache_set(tenant_id: str, metric_id: str, tier: Tier, value: Any) -> None:
+    await cache.set_metric(tenant_id, metric_id, tier, value)
+
+
+def _round_strike(ltp: float, step: int) -> int:
+    step = max(step, 1)
+    return int(round(ltp / step) * step)
+
+
+def _compute_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float | None:
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + 1:
+        return None
+    trs: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(1, n):
+        high, low, close_prev = highs[i], lows[i], closes[i - 1]
+        high_prev, low_prev = highs[i - 1], lows[i - 1]
+        tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
+        up = high - high_prev
+        down = low_prev - low
+        trs.append(tr)
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+    if len(trs) < period:
+        return None
+    atr = sum(trs[:period]) / period
+    plus = sum(plus_dm[:period]) / period
+    minus = sum(minus_dm[:period]) / period
+    for i in range(period, len(trs)):
+        atr = (atr * (period - 1) + trs[i]) / period
+        plus = (plus * (period - 1) + plus_dm[i]) / period
+        minus = (minus * (period - 1) + minus_dm[i]) / period
+    if atr <= 0:
+        return 0.0
+    plus_di = 100 * plus / atr
+    minus_di = 100 * minus / atr
+    denom = plus_di + minus_di
+    if denom <= 0:
+        return 0.0
+    dx = 100 * abs(plus_di - minus_di) / denom
+    return round(dx, 2)
+
+
+def _ist_now() -> datetime:
+    return datetime.now(IST)
+
+
+def _ist_session_date() -> str:
+    return _ist_now().strftime("%Y-%m-%d")
+
+
+def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None:
+    """Build `NFO:NIFTY26AUG24500CE` from `NFO:NIFTY26AUGFUT` + ATM strike."""
+    side = side.upper()
+    if side not in {"CE", "PE"} or strike <= 0:
+        return None
+    raw = fut_symbol.strip()
+    if not raw:
+        return None
+    if ":" in raw:
+        exchange, sym = raw.split(":", 1)
+    else:
+        exchange, sym = "NFO", raw
+    sym = sym.strip().upper()
+    if not sym.endswith("FUT"):
+        return None
+    prefix = sym[:-3]
+    if not prefix:
+        return None
+    return f"{exchange.strip().upper()}:{prefix}{int(strike)}{side}"
+
+
+def _resolve_option_symbols(config: SignalEngineConfig, atm: int | None) -> tuple[str, str]:
+    ce = config.ce_symbol.strip() if config.ce_symbol else ""
+    pe = config.pe_symbol.strip() if config.pe_symbol else ""
+    if (
+        config.auto_atm_symbols
+        and atm is not None
+        and config.nifty_fut_symbol
+    ):
+        derived_ce = _derive_option_symbol(config.nifty_fut_symbol, atm, "CE")
+        derived_pe = _derive_option_symbol(config.nifty_fut_symbol, atm, "PE")
+        if derived_ce and derived_pe:
+            return derived_ce, derived_pe
+    return ce, pe
+
+
+def _estimate_pcr(ce_row: dict[str, Any] | None, pe_row: dict[str, Any] | None) -> float | None:
+    if not ce_row or not pe_row:
+        return None
+    ce_oi = _pick_float(ce_row, "oi", "open_interest")
+    pe_oi = _pick_float(pe_row, "oi", "open_interest")
+    if ce_oi is None or pe_oi is None or ce_oi <= 0:
+        return None
+    return round(pe_oi / ce_oi, 4)
+
+
+def _merge_option_iv(ce_row: dict[str, Any] | None, pe_row: dict[str, Any] | None) -> float | None:
+    values: list[float] = []
+    for row in (ce_row, pe_row):
+        if not row:
+            continue
+        iv_val = _pick_float(row, "implied_volatility", "iv")
+        if iv_val is not None:
+            values.append(iv_val)
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _parse_historical_candles(result: Any) -> tuple[list[float], list[float], list[float]]:
+    if not isinstance(result, dict) or result.get("ok") is False:
+        return [], [], []
+    data = result.get("data", result)
+    candles: list[Any] = []
+    if isinstance(data, dict):
+        raw = data.get("candles")
+        if isinstance(raw, list):
+            candles = raw
+    highs: list[float] = []
+    lows: list[float] = []
+    closes: list[float] = []
+    for row in candles:
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            continue
+        try:
+            highs.append(float(row[2]))
+            lows.append(float(row[3]))
+            closes.append(float(row[4]))
+        except (TypeError, ValueError):
+            continue
+    return highs, lows, closes
+
+
+def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
+    if len(closes) < period + 1:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(closes)):
+        delta = closes[i] - closes[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss <= 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+
+def _quote_change_pcts(row: dict[str, Any] | None) -> tuple[float | None, float | None]:
+    if not row:
+        return None, None
+    ltp = _pick_float(row, "last_price", "ltp", "last")
+    ohlc = row.get("ohlc") if isinstance(row.get("ohlc"), dict) else {}
+    prev = _pick_float(ohlc, "close")
+    open_ = _pick_float(ohlc, "open")
+    vs_prev: float | None = None
+    vs_open: float | None = None
+    if ltp is not None and prev not in (None, 0):
+        vs_prev = round((ltp - prev) / prev * 100, 3)
+    if ltp is not None and open_ not in (None, 0):
+        vs_open = round((ltp - open_) / open_ * 100, 3)
+    return vs_prev, vs_open
+
+
+def _fut_basis_pct(spot: float | None, fut: float | None) -> float | None:
+    if spot is None or fut is None or spot == 0:
+        return None
+    return round((fut - spot) / spot * 100, 3)
+
+
+def _oi_baseline_cache_key() -> str:
+    return f"oi_baseline:{_ist_session_date()}"
+
+
+def _mock_feed(config: SignalEngineConfig) -> dict[str, Any]:
+    """Demo values aligned with the ops spreadsheet rehearsal."""
+    atm = 24300
+    ce = 125.0
+    pe = 55.0
+    iv_current = -11.0
+    iv_high = 22.0 if iv_current > 0 else abs(iv_current) * 2
+    return {
+        "nifty_ltp": 24312.5,
+        "atm": atm,
+        "ce": ce,
+        "pe": pe,
+        "oi": 50.0,
+        "adx": 45.0,
+        "iv": iv_current,
+        "iv_day_high": iv_high,
+        "iv_chg": -0.3,
+        "crude_ltp": 87.0,
+        "crude_prev_close": 88.5,
+        "dow_change_pct": -0.50,
+        "pcr": 1.25,
+        "ivp": 45.0,
+        "india_vix": 14.2,
+        "max_pain": 24400.0,
+        "oi_pct_chg": 0.4,
+        "spot_chg": 0.25,
+        "spot_vs_open": 0.15,
+        "fut_basis": 0.12,
+        "ce_oi": 1_250_000.0,
+        "pe_oi": 1_560_000.0,
+        "vix_chg": -0.4,
+        "rsi": 52.0,
+        "source": "mock",
+    }
+
+
+def _normalize_quote_payload(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    if result.get("ok") is False:
+        return {}
+    data = result.get("data", result)
+    if not isinstance(data, dict):
+        return {}
+    # Single-instrument full quote (Groww get_quote) — check before quote-map heuristic.
+    if any(key in data for key in ("last_price", "open_interest", "implied_volatility")):
+        ts = data.get("trading_symbol") or data.get("symbol")
+        if ts:
+            return {str(ts): data}
+        return {"_flat": data}
+    if _looks_like_quote_map(data):
+        normalized: dict[str, Any] = {}
+        for row in _quote_map_rows(data):
+            sym = row.get("symbol")
+            if sym:
+                normalized[str(sym)] = row
+        return normalized
+    return data
+
+
+def _quote_keys_match(quote_key: str, *, norm: str, groww: str) -> bool:
+    qk = quote_key.upper().replace(" ", "")
+    if qk == norm or qk == groww:
+        return True
+    if "_" in qk and qk.split("_", 1)[-1] == groww:
+        return True
+    return False
+
+
+def _quote_row_from_value(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (int, float)):
+        return {"ltp": value, "last_price": value}
+    return None
+
+
+def _find_quote_row(quotes: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    if not quotes or not symbol:
+        return None
+    key = symbol.strip()
+    norm = key.upper().replace(" ", "")
+    groww = _groww_symbol(key).upper()
+    direct = _quote_row_from_value(quotes.get(key))
+    if direct is not None:
+        return direct
+    keyed = {qk: row for qk, row in quotes.items() if qk != "_flat"}
+    for quote_key, row in keyed.items():
+        if not _quote_keys_match(str(quote_key), norm=norm, groww=groww):
+            continue
+        parsed = _quote_row_from_value(row)
+        if parsed is not None:
+            return parsed
+    if not keyed and "_flat" in quotes:
+        return _quote_row_from_value(quotes["_flat"])
+    return None
+
+
+def _live_setup_warnings(
+    config: SignalEngineConfig,
+    feed: dict[str, Any],
+    *,
+    has_broker: bool,
+    team_ready: bool,
+) -> list[str]:
+    if config.mock:
+        return []
+    warnings: list[str] = []
+    if not team_ready:
+        warnings.append("Publish the Signals ops team and bind tools.")
+    if not has_broker:
+        warnings.append("Bind Kite (recommended) or Groww read-only quotes on Signals ops.")
+    if not config.underlying_symbol:
+        warnings.append("Select an underlying symbol (Admin → Signal config).")
+    elif feed.get("nifty_ltp") is None:
+        warnings.append(
+            f"No live print for {config.underlying_symbol}. Check broker token and symbol."
+        )
+    if not config.ce_symbol or not config.pe_symbol:
+        warnings.append("Set ce_symbol and pe_symbol in signal engine tool settings.")
+    elif feed.get("ce") is None or feed.get("pe") is None:
+        warnings.append("CE/PE quotes missing — check option symbols and market hours.")
+    if not config.nifty_fut_symbol:
+        warnings.append("Set nifty_fut_symbol for live OI (e.g. NFO:NIFTY26AUGFUT).")
+    elif feed.get("oi") is None:
+        warnings.append(
+            "OI not returned — set a valid FUT symbol (e.g. NFO:NIFTY26AUGFUT) "
+            "and ensure get_quote returns open_interest on the FNO segment."
+        )
+    if config.pcr is None and feed.get("pcr") is None:
+        warnings.append(
+            "PCR missing — set manually or ensure CE/PE get_quote returns open_interest."
+        )
+    if config.max_pain is None:
+        warnings.append("Set max_pain in tool settings until chain API is wired.")
+    if config.ivp is None:
+        warnings.append("Set ivp in tool settings until IV history feed is wired.")
+    if config.dow_change_pct is None:
+        warnings.append("Set dow_change_pct once per session (slow tier).")
+    if feed.get("india_vix") is None:
+        warnings.append(f"No India VIX print for {config.india_vix_symbol}.")
+    if feed.get("adx") is None:
+        warnings.append(
+            "ADX unavailable — underlying get_quote must return instrument_token "
+            "and Kite get_historical_candles must be bound."
+        )
+    return warnings
+
+
+def _pick_float(payload: Any, *keys: str) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        val = payload.get(key)
+        if val is None or val == "":
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    ohlc = payload.get("ohlc")
+    if isinstance(ohlc, dict):
+        for key in ("close", "open", "high", "low"):
+            val = ohlc.get(key)
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
+def _evaluate_rule(
+    rule: Rule,
+    value: float | None,
+    target: float,
+    *,
+    feed: dict[str, Any],
+    ce: float | None,
+    pe: float | None,
+    spec: dict[str, Any] | None = None,
+) -> bool | None:
+    spec = spec or {}
+    if rule == "info":
+        return None  # display-only; never gates BUY or shows Pass/Fail
+    if rule == "spot_below_max_pain":
+        spot = feed.get("nifty_ltp") or feed.get("atm")
+        max_pain = feed.get("max_pain")
+        if spot is None or max_pain is None:
+            return None
+        return float(spot) < float(max_pain)
+    if value is None and rule not in {
+        "ce_pe_balance",
+        "below_prev_close",
+        "iv_pct_day_high",
+        "between",
+        "spot_below_max_pain",
+    }:
+        return None
+    if rule == "lt":
+        return value is not None and value < target
+    if rule == "gt":
+        return value is not None and value > target
+    if rule == "lte":
+        return value is not None and value <= target
+    if rule == "gte":
+        return value is not None and value >= target
+    if rule == "eq":
+        return value is not None and math.isclose(value, target, rel_tol=1e-4, abs_tol=0.01)
+    if rule == "abs_lte":
+        return value is not None and abs(value) <= target
+    if rule == "between":
+        if value is None:
+            return None
+        high = float(spec.get("target_high", target))
+        low = float(target)
+        return low <= float(value) <= high
+    if rule == "below_prev_close":
+        ltp = feed.get("crude_ltp")
+        prev = feed.get("crude_prev_close")
+        if ltp is None or prev is None:
+            return None
+        return float(ltp) < float(prev)
+    if rule == "ce_pe_balance":
+        if ce is None or pe is None:
+            return None
+        return math.isclose(ce, pe, rel_tol=0, abs_tol=0.5)
+    if rule == "iv_pct_day_high":
+        iv = feed.get("iv")
+        high = feed.get("iv_day_high")
+        if iv is None or high is None or float(high) == 0:
+            return None
+        pct = (float(iv) / float(high)) * 100
+        return pct <= target
+    return None
+
+
+def _format_target(rule: Rule, target: float, spec: dict[str, Any] | None = None) -> str:
+    spec = spec or {}
+    if rule == "lt":
+        return f"< {target:g}"
+    if rule == "gt":
+        return f"> {target:g}"
+    if rule == "lte":
+        return f"≤ {target:g}"
+    if rule == "gte":
+        return f"≥ {target:g}"
+    if rule == "eq":
+        return f"= {target:g}"
+    if rule == "abs_lte":
+        return f"within ±{target:g}%"
+    if rule == "between":
+        high = spec.get("target_high", target)
+        return f"{target:g} – {float(high):g}"
+    if rule == "below_prev_close":
+        return "below y'day close"
+    if rule == "ce_pe_balance":
+        return "CE = PE"
+    if rule == "iv_pct_day_high":
+        return f"{target:g}% of day high"
+    if rule == "spot_below_max_pain":
+        return "spot < max pain"
+    if rule == "info":
+        return "live strike"
+    return str(target)
+
+
+def _metric_value(metric_id: str, feed: dict[str, Any]) -> float | None:
+    mapping = {
+        "adx": "adx",
+        "oi": "oi",
+        "iv": "iv",
+        "iv_chg": "iv_chg",
+        "crude_oil": "crude_ltp",
+        "dow_jones": "dow_change_pct",
+        "atm": "atm",
+        "ce": "ce",
+        "pe": "pe",
+        "pcr": "pcr",
+        "ivp": "ivp",
+        "india_vix": "india_vix",
+        "max_pain": "max_pain",
+        "oi_pct_chg": "oi_pct_chg",
+        "spot_chg": "spot_chg",
+        "spot_vs_open": "spot_vs_open",
+        "fut_basis": "fut_basis",
+        "ce_oi": "ce_oi",
+        "pe_oi": "pe_oi",
+        "rsi": "rsi",
+        "vix_chg": "vix_chg",
+        "fii_net": "fii_net",
+    }
+    key = mapping.get(metric_id)
+    if not key:
+        return None
+    val = feed.get(key)
+    return float(val) if val is not None else None
+
+
+class SignalEngineService:
+    def __init__(self, session: AsyncSession, context: TenantContext) -> None:
+        self.session = session
+        self.context = context
+        self.teams = TeamRepository(session, context)
+        self.tools = ToolDefinitionRepository(session, context)
+        self.tool_versions = ToolDefinitionVersionRepository(session, context)
+
+    @staticmethod
+    def _tool_settings(definition: Any) -> dict[str, Any]:
+        return dict((getattr(definition, "config", None) or {}).get("settings") or {})
+
+    async def _collect_settings(self) -> dict[str, Any]:
+        settings: dict[str, Any] = {}
+        async for _team, _version, binding, _source in self._iter_signal_bindings():
+            if binding.tool_definition_id is None:
+                continue
+            definition = await self.tools.get(binding.tool_definition_id)
+            if not definition:
+                continue
+            slug = (definition.slug or "").lower()
+            if definition.kind == "tenant_python" and "signal" in slug:
+                settings.update(self._tool_settings(definition))
+            elif definition.kind == "tenant_python" and "signal" not in slug:
+                # Broker toolkit — skip merging quote tool settings into signal config.
+                continue
+            else:
+                settings.update(self._tool_settings(definition))
+        return settings
+
+    async def _signal_engine_tool(self) -> Any | None:
+        async for _team, _version, binding, _source in self._iter_signal_bindings():
+            if binding.tool_definition_id is None:
+                continue
+            definition = await self.tools.get(binding.tool_definition_id)
+            if not definition or definition.kind != "tenant_python":
+                continue
+            if "signal" in (definition.slug or "").lower():
+                return definition
+        return None
+
+    async def _load_config(self) -> SignalEngineConfig:
+        return SignalEngineConfig.from_settings(await self._collect_settings())
+
+    async def _has_quote_binding(self) -> bool:
+        """True when a non-signal tenant_python toolkit is bound (likely broker quotes)."""
+        async for _team, _version, binding, _source in self._iter_signal_bindings():
+            if binding.tool_definition_id is None:
+                continue
+            definition = await self.tools.get(binding.tool_definition_id)
+            if definition is None or definition.kind != "tenant_python":
+                continue
+            if "signal" not in (definition.slug or "").lower():
+                return True
+        return False
+
+    async def _load_setup(
+        self,
+    ) -> tuple[SignalEngineConfig, bool, bool]:
+        tenant_id = _tenant_key(self.context)
+        hit = await _cache_get(tenant_id, "setup")
+        if hit is not None:
+            return (
+                SignalEngineConfig.from_settings(hit["settings"]),
+                bool(hit["has_broker"]),
+                bool(hit["team_ready"]),
+            )
+        settings = await self._collect_settings()
+        has_broker = await self._has_quote_binding()
+        team_ready = await self._team_ready()
+        await _cache_set(
+            tenant_id,
+            "setup",
+            "medium",
+            {
+                "settings": settings,
+                "has_broker": has_broker,
+                "team_ready": team_ready,
+            },
+        )
+        return SignalEngineConfig.from_settings(settings), has_broker, team_ready
+
+    async def get_admin_config(self) -> dict[str, Any]:
+        config = await self._load_config()
+        tool = await self._signal_engine_tool()
+        return {
+            "config": config.to_admin_dict(),
+            "presets": UNDERLYING_PRESETS,
+            "tool_bound": tool is not None,
+            "tool_slug": tool.slug if tool else None,
+        }
+
+    async def update_admin_config(self, patch: dict[str, Any]) -> dict[str, Any]:
+        tool = await self._signal_engine_tool()
+        if tool is None:
+            return {"ok": False, "error": "Signal engine tool not bound on Signals ops team."}
+        current = self._tool_settings(tool)
+        merged = {**current}
+        for key in ADMIN_CONFIG_KEYS:
+            if key not in patch:
+                continue
+            val = patch[key]
+            if val is None or val == "":
+                merged.pop(key, None)
+            else:
+                merged[key] = val
+        # Keep legacy alias in sync for older readers.
+        if merged.get("underlying_symbol"):
+            merged["nifty_symbol"] = merged["underlying_symbol"]
+        if merged.get("fut_symbol"):
+            merged["nifty_fut_symbol"] = merged["fut_symbol"]
+        await self._write_tool_settings(tool, merged)
+        tenant_id = _tenant_key(self.context)
+        if patch.get("engine_enabled") is False:
+            await cache.clear_watcher(tenant_id)
+        await _invalidate_tenant_signal_cache(tenant_id)
+        if patch.get("engine_enabled") is False:
+            stopped = _apply_engine_stopped_overlay(await self.state())
+            await cache.set_snapshot(tenant_id, stopped)
+        return {"ok": True, **await self.get_admin_config()}
+
+    async def _write_tool_settings(self, definition: Any, settings: dict[str, Any]) -> None:
+        config = dict(definition.config or {})
+        config["settings"] = settings
+        definition.config = config
+        if definition.published_version_id:
+            row = await self.tool_versions.get(definition.published_version_id)
+            if row is not None:
+                row.settings = settings
+        draft = await self.tool_versions.latest_draft(definition.id)
+        if draft is not None and draft.status == "draft":
+            draft.settings = settings
+        await self.session.flush()
+
+    async def _team_ready(self) -> bool:
+        config = await self.teams.get_config_by_slug(SIGNAL_TEAM_SLUG)
+        return bool(config and config.published_version_id)
+
+    async def _iter_signal_bindings(self):
+        config = await self.teams.get_config_by_slug(SIGNAL_TEAM_SLUG)
+        if config is None or config.published_version_id is None:
+            return
+        version = await self.teams.get_version(config.published_version_id)
+        if version is None:
+            return
+        bindings = await self.teams.bindings(version.id)
+        for binding in bindings:
+            yield config, version, binding, None
+
+    async def _broker_tools(self) -> list[Any]:
+        factory = AgentFactoryService(self.session, self.context)
+        fns: list[Any] = []
+        async for _team, _version, binding, _source in self._iter_signal_bindings():
+            if binding.tool_definition_id is None:
+                continue
+            try:
+                built = await factory._build_tool(binding)
+            except McpToolSkipped:
+                continue
+            except Exception:
+                continue
+            callables = built if isinstance(built, list) else [built]
+            for fn in callables:
+                name = getattr(fn, "__name__", "")
+                if name in SIGNAL_BROKER_CAPABILITIES:
+                    fns.append(fn)
+        return fns
+
+    async def _invoke_broker_tool(self, name: str, kwargs: dict[str, Any]) -> Any | None:
+        for fn in await self._broker_tools():
+            if getattr(fn, "__name__", "") != name:
+                continue
+            try:
+                return await invoke_tool(fn, kwargs)
+            except Exception:
+                return None
+        return None
+
+    async def _quote_tools(self) -> list[Any]:
+        return [
+            fn
+            for fn in await self._broker_tools()
+            if getattr(fn, "__name__", "") in QUOTE_CAPABILITIES
+        ]
+
+    async def _fetch_quote(
+        self,
+        symbols: list[str],
+        *,
+        prefer: str | None = None,
+    ) -> dict[str, Any]:
+        cached_key = f"quote:{prefer or 'auto'}:{','.join(symbols)}"
+        tenant_id = _tenant_key(self.context)
+        hit = await _cache_get(tenant_id, cached_key)
+        if hit is not None:
+            return hit
+
+        fns = await self._quote_tools()
+        if not fns:
+            return {}
+
+        if prefer:
+            preferred = [fn for fn in fns if getattr(fn, "__name__", "") == prefer]
+            fns = preferred + [fn for fn in fns if fn not in preferred]
+        else:
+            fns.sort(
+                key=lambda fn: QUOTE_TOOL_PRIORITY.get(getattr(fn, "__name__", ""), 99)
+            )
+
+        merged: dict[str, Any] = {}
+        for fn in fns:
+            for kwargs in quote_call_attempts(fn, symbols):
+                try:
+                    result = await invoke_tool(fn, kwargs)
+                except Exception:
+                    continue
+                merged.update(_normalize_quote_payload(result))
+            if merged:
+                break
+        await _cache_set(tenant_id, cached_key, "broker", merged)
+        return merged
+
+    async def _build_feed(self, config: SignalEngineConfig) -> dict[str, Any]:
+        tenant_id = _tenant_key(self.context)
+
+        cached_feed = await _cache_get(tenant_id, "feed")
+        if cached_feed is not None:
+            return cached_feed
+
+        if config.mock:
+            feed = _mock_feed(config)
+            await _cache_set(tenant_id, "feed", "fast", feed)
+            return feed
+
+        feed: dict[str, Any] = {"source": "live"}
+
+        # Slow — Dow Jones (manual override or cached once per hour)
+        dow_cached = await _cache_get(tenant_id, "dow_jones")
+        if dow_cached is not None:
+            feed["dow_change_pct"] = dow_cached
+        elif config.dow_change_pct is not None:
+            feed["dow_change_pct"] = config.dow_change_pct
+            await _cache_set(tenant_id, "dow_jones", "slow", config.dow_change_pct)
+        if config.fii_net is not None:
+            feed["fii_net"] = config.fii_net
+
+        # Fast — batch broker quotes for this tick (one API call when cache cold)
+        atm_strike: int | None = None
+        spot_row: dict[str, Any] | None = None
+        fast_symbols: list[str] = []
+        if config.underlying_symbol:
+            fast_symbols.append(config.underlying_symbol)
+        if config.nifty_fut_symbol:
+            fast_symbols.append(config.nifty_fut_symbol)
+        # CE/PE symbols resolved after ATM is known; seed configured symbols for first pass.
+        if config.ce_symbol:
+            fast_symbols.append(config.ce_symbol)
+        if config.pe_symbol:
+            fast_symbols.append(config.pe_symbol)
+        fast_symbols = list(dict.fromkeys(fast_symbols))
+        fast_quotes: dict[str, Any] = (
+            await self._fetch_quote(fast_symbols) if fast_symbols else {}
+        )
+
+        # Underlying LTP → ATM
+        if not config.underlying_symbol:
+            feed["underlying_missing"] = True
+        else:
+            spot_row = _find_quote_row(fast_quotes, config.underlying_symbol)
+            spot_ltp = _pick_float(spot_row or {}, "last_price", "ltp", "last")
+            if spot_ltp is not None:
+                feed["nifty_ltp"] = spot_ltp
+                feed["underlying_symbol"] = config.underlying_symbol
+                feed["underlying_label"] = config.underlying_label or config.underlying_symbol
+                atm_strike = _round_strike(spot_ltp, config.strike_step)
+                feed["atm"] = atm_strike
+                vs_prev, vs_open = _quote_change_pcts(spot_row)
+                if vs_prev is not None:
+                    feed["spot_chg"] = vs_prev
+                if vs_open is not None:
+                    feed["spot_vs_open"] = vs_open
+
+        ce_symbol, pe_symbol = _resolve_option_symbols(config, atm_strike)
+        if ce_symbol:
+            feed["ce_symbol"] = ce_symbol
+        if pe_symbol:
+            feed["pe_symbol"] = pe_symbol
+
+        # Re-fetch when auto ATM symbols differ from the first batch.
+        extra_symbols = [
+            sym
+            for sym in (ce_symbol, pe_symbol)
+            if sym and _find_quote_row(fast_quotes, sym) is None
+        ]
+        if extra_symbols:
+            fast_quotes.update(await self._fetch_quote(extra_symbols))
+
+        ce_row: dict[str, Any] | None = None
+        pe_row: dict[str, Any] | None = None
+        if ce_symbol:
+            ce_row = _find_quote_row(fast_quotes, ce_symbol)
+            if ce_row:
+                feed["ce"] = _pick_float(ce_row, "last_price", "ltp", "last")
+                ce_oi = _pick_float(ce_row, "oi", "open_interest")
+                if ce_oi is not None:
+                    feed["ce_oi"] = ce_oi
+        if pe_symbol:
+            pe_row = _find_quote_row(fast_quotes, pe_symbol)
+            if pe_row:
+                feed["pe"] = _pick_float(pe_row, "last_price", "ltp", "last")
+                pe_oi = _pick_float(pe_row, "oi", "open_interest")
+                if pe_oi is not None:
+                    feed["pe_oi"] = pe_oi
+
+        iv_val = _merge_option_iv(ce_row, pe_row)
+        if iv_val is not None:
+            feed["iv"] = iv_val
+        elif ce_row:
+            iv_from_ce = _pick_float(ce_row, "implied_volatility", "iv")
+            if iv_from_ce is not None:
+                feed["iv"] = iv_from_ce
+
+        # OI — nearest fut if configured (requires full quote, not LTP-only)
+        fut_row: dict[str, Any] | None = None
+        if config.nifty_fut_symbol:
+            fut_row = _find_quote_row(fast_quotes, config.nifty_fut_symbol)
+            oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
+            if oi_val is None:
+                fut_quotes = await self._fetch_quote(
+                    [config.nifty_fut_symbol],
+                    prefer="get_quote",
+                )
+                fut_row = _find_quote_row(fut_quotes, config.nifty_fut_symbol)
+                oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
+            if oi_val is not None:
+                feed["oi"] = oi_val
+                baseline_key = _oi_baseline_cache_key()
+                prev_oi = await cache.get_session_value(tenant_id, baseline_key)
+                if prev_oi is not None and prev_oi != 0 and config.oi_pct_chg is None:
+                    feed["oi_pct_chg"] = ((oi_val - float(prev_oi)) / float(prev_oi)) * 100
+                if prev_oi is None:
+                    await cache.set_session_value(tenant_id, baseline_key, oi_val)
+            fut_ltp = _pick_float(fut_row or {}, "last_price", "ltp", "last")
+            basis = _fut_basis_pct(feed.get("nifty_ltp"), fut_ltp)
+            if basis is not None:
+                feed["fut_basis"] = basis
+
+        # Crude — medium tier cache
+        crude_cached = await _cache_get(tenant_id, "crude_oil")
+        if crude_cached is not None:
+            feed.update(crude_cached)
+        elif config.crude_symbol:
+            crude_q = await self._fetch_quote([config.crude_symbol])
+            crude_row = _find_quote_row(crude_q, config.crude_symbol)
+            if crude_row:
+                ltp = _pick_float(crude_row, "last_price", "ltp", "last")
+                prev = _pick_float(crude_row, "close", "previous_close")
+                ohlc = crude_row.get("ohlc") if isinstance(crude_row.get("ohlc"), dict) else {}
+                if prev is None and isinstance(ohlc, dict):
+                    prev = _pick_float(ohlc, "close")
+                payload = {"crude_ltp": ltp, "crude_prev_close": prev}
+                feed.update(payload)
+                await _cache_set(tenant_id, "crude_oil", "medium", payload)
+
+        # IV day-high + session open for iv_chg
+        iv = feed.get("iv")
+        if iv is not None:
+            iv_f = float(iv)
+            stored_high = await cache.get_session_value(tenant_id, "iv_day_high")
+            current_high = max(float(stored_high), iv_f) if stored_high is not None else iv_f
+            await cache.set_session_value(tenant_id, "iv_day_high", current_high)
+            feed["iv_day_high"] = current_high
+            session_open = await cache.get_session_value(tenant_id, "iv_session_open")
+            if session_open is None:
+                await cache.set_session_value(tenant_id, "iv_session_open", iv_f)
+                session_open = iv_f
+            if config.iv_chg is None:
+                feed["iv_chg"] = iv_f - float(session_open)
+
+        # Sensibull-aligned fields — settings override until option chain API wired
+        if config.pcr is None:
+            estimated_pcr = _estimate_pcr(ce_row, pe_row)
+            if estimated_pcr is not None:
+                feed["pcr"] = estimated_pcr
+                feed["pcr_source"] = "atm_oi"
+
+        sensibull_fields = {
+            "max_pain": config.max_pain,
+            "pcr": config.pcr,
+            "ivp": config.ivp,
+            "oi_pct_chg": config.oi_pct_chg,
+            "iv_chg": config.iv_chg,
+            "india_vix": config.india_vix,
+        }
+        for key, val in sensibull_fields.items():
+            if val is not None:
+                feed[key] = val
+                if key == "pcr":
+                    feed["pcr_source"] = "manual"
+
+        # ADX + RSI from Kite historical candles (medium tier)
+        trend_cached = await _cache_get(tenant_id, "trend")
+        if isinstance(trend_cached, dict):
+            if trend_cached.get("adx") is not None:
+                feed["adx"] = trend_cached["adx"]
+            if trend_cached.get("rsi") is not None:
+                feed["rsi"] = trend_cached["rsi"]
+        elif spot_row is not None:
+            token_raw = spot_row.get("instrument_token")
+            try:
+                token = int(token_raw) if token_raw is not None else 0
+            except (TypeError, ValueError):
+                token = 0
+            if token > 0:
+                now = _ist_now()
+                from_dt = (now - timedelta(days=ADX_LOOKBACK_DAYS)).replace(
+                    hour=9, minute=15, second=0, microsecond=0
+                )
+                hist = await self._invoke_broker_tool(
+                    "get_historical_candles",
+                    {
+                        "instrument_token": token,
+                        "interval": ADX_CANDLE_INTERVAL,
+                        "from_date": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "to_date": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    },
+                )
+                highs, lows, closes = _parse_historical_candles(hist)
+                trend_payload: dict[str, Any] = {}
+                adx_val = _compute_adx(highs, lows, closes)
+                if adx_val is not None:
+                    trend_payload["adx"] = adx_val
+                    feed["adx"] = adx_val
+                rsi_val = _compute_rsi(closes)
+                if rsi_val is not None:
+                    trend_payload["rsi"] = rsi_val
+                    feed["rsi"] = rsi_val
+                if trend_payload:
+                    await _cache_set(tenant_id, "trend", "medium", trend_payload)
+
+        # India VIX quote (medium tier) when not set manually
+        if feed.get("india_vix") is None and config.india_vix_symbol:
+            vix_cached = await _cache_get(tenant_id, "india_vix")
+            if vix_cached is not None:
+                feed["india_vix"] = vix_cached
+            else:
+                vix_q = await self._fetch_quote([config.india_vix_symbol])
+                vix_row = _find_quote_row(vix_q, config.india_vix_symbol)
+                if vix_row:
+                    vix_ltp = _pick_float(vix_row, "last_price", "ltp", "last")
+                    if vix_ltp is not None:
+                        feed["india_vix"] = vix_ltp
+                        await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
+        if feed.get("india_vix") is not None and feed.get("vix_chg") is None:
+            vix_ltp = float(feed["india_vix"])
+            session_vix = await cache.get_session_value(tenant_id, "vix_session_open")
+            if session_vix is None:
+                await cache.set_session_value(tenant_id, "vix_session_open", vix_ltp)
+                session_vix = vix_ltp
+            feed["vix_chg"] = round(vix_ltp - float(session_vix), 3)
+
+        await _cache_set(tenant_id, "feed", "fast", feed)
+        return feed
+
+    async def state(self) -> dict[str, Any]:
+        config, has_broker, team_ready = await self._load_setup()
+        tenant_id = _tenant_key(self.context)
+        if not config.engine_enabled:
+            frozen = await cache.get_snapshot(tenant_id)
+            if frozen is not None:
+                return {
+                    **frozen,
+                    "engine_enabled": False,
+                    "engine_active": False,
+                    "has_broker": has_broker,
+                    "team_slug": SIGNAL_TEAM_SLUG,
+                    "stream": True,
+                }
+            feed: dict[str, Any] = {"source": "stopped"}
+            payload = evaluate_signal_state(config, feed)
+            payload["mock"] = config.mock
+            payload["live"] = False
+            payload["engine_enabled"] = False
+            payload["engine_active"] = False
+            payload["has_broker"] = has_broker
+            payload["team_slug"] = SIGNAL_TEAM_SLUG
+            payload["live_warnings"] = _live_setup_warnings(
+                config, feed, has_broker=has_broker, team_ready=team_ready
+            )
+            payload["underlying"] = {
+                "symbol": config.underlying_symbol,
+                "label": config.underlying_label or config.underlying_symbol or "—",
+            }
+            payload["broker_poll_ms"] = BROKER_QUOTE_TTL_MS
+            payload["stream"] = True
+            return payload
+
+        feed = await self._build_feed(config)
+        payload = evaluate_signal_state(config, feed)
+        payload["mock"] = config.mock
+        payload["live"] = not config.mock
+        payload["engine_enabled"] = True
+        payload["engine_active"] = True
+        payload["has_broker"] = has_broker
+        payload["team_slug"] = SIGNAL_TEAM_SLUG
+        payload["live_warnings"] = _live_setup_warnings(
+            config, feed, has_broker=has_broker, team_ready=team_ready
+        )
+        payload["underlying"] = {
+            "symbol": config.underlying_symbol,
+            "label": config.underlying_label or config.underlying_symbol or "—",
+        }
+        payload["broker_poll_ms"] = BROKER_QUOTE_TTL_MS
+        payload["stream"] = True
+        return payload
+
+    async def publish_entry(self, *, title: str | None = None) -> dict[str, Any]:
+        snapshot = await self.state()
+        entry = snapshot.get("entry")
+        if not entry:
+            return {"ok": False, "error": "Entry conditions not met", "snapshot": snapshot}
+
+        label = str(entry.get("label") or "New signal")
+        notify_title = title or "New trading signal"
+        notify_body = label
+
+        tenant_id = _tenant_key(self.context)
+        signature = json.dumps(entry, sort_keys=True)
+        last_signature = await cache.get_session_value(tenant_id, "last_entry_signature")
+        if last_signature == signature:
+            return {
+                "ok": True,
+                "deduped": True,
+                "entry": entry,
+                "snapshot": snapshot,
+            }
+        await cache.set_session_value(tenant_id, "last_entry_signature", signature)
+
+        from app.db.repositories import MembershipRepository
+
+        memberships = MembershipRepository(self.session, self.context)
+        notifications = UserNotificationRepository(self.session, self.context)
+        rows = await memberships.list_users()
+        recipients = [
+            row.user_id
+            for row in rows
+            if row.is_active and row.user_id and not row.user_id.startswith("invite:")
+        ]
+        batch_id, created = await notifications.create_batch(
+            title=notify_title,
+            body=notify_body,
+            created_by=self.context.user_id,
+            audience="all",
+            recipient_user_ids=recipients,
+        )
+        return {
+            "ok": True,
+            "entry": entry,
+            "notification": {
+                "batch_id": str(batch_id),
+                "recipient_count": len(created),
+                "title": notify_title,
+                "body": notify_body,
+            },
+            "snapshot": snapshot,
+        }
+
+
+def _build_entry_preview(
+    config: SignalEngineConfig,
+    feed: dict[str, Any],
+    *,
+    entry_ready: bool,
+    passed: int,
+    evaluable: int,
+) -> dict[str, Any]:
+    atm_raw = feed.get("atm")
+    atm = int(atm_raw) if atm_raw is not None else None
+    ce_live = feed.get("ce")
+    pe_live = feed.get("pe")
+    ce_p = float(ce_live) if ce_live is not None else config.entry_ce_premium
+    pe_p = float(pe_live) if pe_live is not None else config.entry_pe_premium
+    exit_p = config.exit_pct
+    buy_line = (
+        f"BUY= {atm}, CE={ce_p:g}, PE={pe_p:g}, EXIT +{exit_p:g}%"
+        if atm is not None
+        else f"BUY= —, CE={ce_p:g}, PE={pe_p:g}, EXIT +{exit_p:g}%"
+    )
+    if entry_ready and atm is not None:
+        status = "ready"
+        status_note = "All entry rules pass — publish to notify the desk."
+    elif evaluable == 0:
+        status = "waiting"
+        status_note = "Waiting for live broker data and evaluable rules."
+    elif passed < evaluable:
+        status = "blocked"
+        failing = evaluable - passed
+        noun = "rule" if failing == 1 else "rules"
+        status_note = f"No buy — {failing} {noun} failing ({passed}/{evaluable} pass)."
+    else:
+        status = "waiting"
+        status_note = f"No buy yet — {passed}/{evaluable} rules passing."
+
+    return {
+        "side": "BUY",
+        "atm": atm,
+        "ce": ce_p,
+        "pe": pe_p,
+        "exit_pct": exit_p,
+        "status": status,
+        "label": buy_line,
+        "status_note": status_note,
+    }
+
+
+def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> dict[str, Any]:
+    ce = feed.get("ce")
+    pe = feed.get("pe")
+    rows: list[dict[str, Any]] = []
+    evaluable = 0
+    passed = 0
+    for spec in config.metrics:
+        metric_id = str(spec["id"])
+        rule = spec.get("rule", "info")
+        target = float(spec.get("target") or 0)
+        value = _metric_value(metric_id, feed)
+        if rule == "spot_below_max_pain":
+            spot = feed.get("nifty_ltp") or feed.get("atm")
+            value = float(spot) if spot is not None else None
+        ok = _evaluate_rule(
+            rule,  # type: ignore[arg-type]
+            float(value) if value is not None else None,
+            target,
+            feed=feed,
+            ce=float(ce) if ce is not None else None,
+            pe=float(pe) if pe is not None else None,
+            spec=spec,
+        )
+        if ok is not None:
+            evaluable += 1
+            if ok:
+                passed += 1
+        display_value = value
+        if rule == "spot_below_max_pain":
+            display_value = feed.get("max_pain")
+        rows.append(
+            {
+                "id": metric_id,
+                "label": spec.get("label", metric_id),
+                "value": display_value,
+                "target": _format_target(rule, target, spec),  # type: ignore[arg-type]
+                "rule": rule,
+                "tier": spec.get("tier", "fast"),
+                "passed": ok,
+                "hint": spec.get("hint", ""),
+                "source": spec.get("source", ""),
+            }
+        )
+
+    entry_ready = evaluable > 0 and passed == evaluable
+    entry = _build_entry_preview(
+        config,
+        feed,
+        entry_ready=entry_ready,
+        passed=passed,
+        evaluable=evaluable,
+    )
+    return {
+        "metrics": rows,
+        "entry_ready": entry_ready,
+        "entry": entry,
+        "passed": passed,
+        "evaluable": evaluable,
+        "feed_source": feed.get("source", "unknown"),
+        "evaluated_at": time.time(),
+        "poll_ms": STREAM_INTERVAL_MS,
+    }

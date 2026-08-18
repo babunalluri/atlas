@@ -10,7 +10,6 @@ import {
   sessionLooksSignedIn,
   visibleAuthSession,
 } from "@/lib/auth/auth-session";
-import { LanguageSwitcher } from "@/components/i18n/LanguageSwitcher";
 import { BrandMark } from "@/components/layout/BrandMark";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import {
@@ -26,6 +25,8 @@ import {
 } from "@/components/layout/ThemeToggle";
 import { Link, usePathname, useRouter } from "@/i18n/navigation";
 import { filterAdminNavItems } from "@/lib/admin-nav";
+import { buttonClassName } from "@/components/ui/Button";
+import { BUTTON_ICON_CLASS, WorkspaceIcon } from "@/components/ui/icons";
 import { cn } from "@/lib/utils";
 
 type NavItem = {
@@ -558,8 +559,9 @@ export function AdminShell({
             {workspaceHref && !onOnboardingRoute ? (
               <Link
                 href={workspaceHref}
-                className="rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-slate-muted hover:border-teal/40 hover:text-ink"
+                className={buttonClassName({ variant: "secondary", size: "sm" })}
               >
+                <WorkspaceIcon className={BUTTON_ICON_CLASS} />
                 Workspace
               </Link>
             ) : null}
@@ -574,7 +576,6 @@ export function AdminShell({
               </button>
             ) : null}
             <ThemeToggle theme={theme} onChange={changeTheme} />
-            <LanguageSwitcher />
             <NotificationBell />
             <AuthControls serverSession={serverSession} />
           </div>
@@ -610,13 +611,7 @@ export function AdminShell({
             isPlatformAdmin={isPlatformAdmin}
           />
         </aside>
-        <main
-          className={
-            pathname.startsWith("/admin/metrics")
-              ? "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden p-0"
-              : "overlay-y-auto min-h-0 min-w-0 flex-1 px-5 py-8"
-          }
-        >
+        <main className="overlay-y-auto min-h-0 min-w-0 flex-1 px-5 py-8">
           {children}
         </main>
       </div>

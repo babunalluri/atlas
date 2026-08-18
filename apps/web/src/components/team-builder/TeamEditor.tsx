@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select, Textarea } from "@/components/ui/Field";
 import { ModelSelect } from "@/components/ui/ModelSelect";
-import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
+import { ArrowDownIcon, ArrowUpIcon, MinusIcon, PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
 import { ToolAttachmentSection } from "@/components/tools/ToolAttachmentSection";
 import {
   deleteTeam,
@@ -27,9 +27,13 @@ import {
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { formatRelative } from "@/lib/utils";
+import { isProvisionalSlug } from "@/lib/validation/agent-form";
+
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function applyTeamToForm(team: TeamConfig): TeamDraftInput {
   return {
+    slug: team.slug,
     name: team.name,
     description: team.description,
     instructions: team.instructions,
@@ -113,9 +117,20 @@ export function TeamEditor({
     });
   }
 
+  const showSignalsSlugHint =
+    form.slug !== "signals-ops" &&
+    (isProvisionalSlug(form.slug) ||
+      /signal/i.test(form.name) ||
+      form.tools.some((tool) => tool.enabled && /signal/i.test(tool.label)));
+
   async function save() {
     if (!form.name.trim() || !form.instructions.trim()) {
       setBanner("Name and instructions are required");
+      return null;
+    }
+    const slug = form.slug.trim().toLowerCase();
+    if (!SLUG_RE.test(slug)) {
+      setBanner("Slug must be lowercase letters, numbers, and hyphens");
       return null;
     }
     setBusy("save");
@@ -124,7 +139,7 @@ export function TeamEditor({
       const saved = await saveTeamDraft(
         await getAccessToken(),
         initial.id,
-        form,
+        { ...form, slug },
       );
       applyTeam(saved);
       setBanner("Draft saved");
@@ -187,7 +202,7 @@ export function TeamEditor({
             </Badge>
             <span>draft v{draftVersion}</span>
             {publishedVersion ? <span>live v{publishedVersion}</span> : null}
-            <span>/{initial.slug}</span>
+            <span>/{form.slug}</span>
             <span>{formatRelative(initial.updatedAt)}</span>
           </div>
         </div>
@@ -195,28 +210,28 @@ export function TeamEditor({
           <Button
             variant="danger"
             size="sm"
+            icon={<TrashIcon />}
             onClick={() => void remove()}
             disabled={busy !== null}
           >
-            <TrashIcon />
             {busy === "delete" ? "Deleting…" : "Delete"}
           </Button>
           <Button
             variant="secondary"
             size="sm"
+            icon={<SaveIcon />}
             onClick={save}
             disabled={busy !== null}
           >
-            <SaveIcon />
             {busy === "save" ? tCommon("saving") : tCommon("save")}
           </Button>
           <Button
             variant="accent"
             size="sm"
+            icon={<PublishIcon />}
             onClick={publish}
             disabled={busy !== null}
           >
-            <PublishIcon />
             {busy === "publish" ? "Publishing…" : "Publish"}
           </Button>
         </EditorActions>
@@ -228,14 +243,50 @@ export function TeamEditor({
         </p>
       ) : null}
 
+      {showSignalsSlugHint ? (
+        <p className="rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-sm text-slate">
+          {isProvisionalSlug(form.slug) ? (
+            <>
+              This team has a temporary slug (<code>{form.slug}</code>). For the
+              Stock Broker signal engine and admin desk tab, set slug to{" "}
+              <code>signals-ops</code> and save.
+            </>
+          ) : (
+            <>
+              Stock Broker signal engine expects slug{" "}
+              <code>signals-ops</code> for the admin Signal tab and toolkit
+              binding.
+            </>
+          )}{" "}
+          <button
+            type="button"
+            className="font-medium text-teal underline-offset-2 hover:underline"
+            onClick={() => update("slug", "signals-ops")}
+          >
+            Use signals-ops
+          </button>
+        </p>
+      ) : null}
+
       <section className="rounded-xl border border-line bg-raised/40 p-4">
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="md:col-span-2">
+          <div>
             <Label htmlFor="team-name">Name</Label>
             <Input
               id="team-name"
               value={form.name}
               onChange={(event) => update("name", event.target.value)}
+            />
+          </div>
+          <div>
+            <Label htmlFor="team-slug">Slug</Label>
+            <Input
+              id="team-slug"
+              value={form.slug}
+              onChange={(event) => update("slug", event.target.value)}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
             />
           </div>
           <div>
@@ -258,13 +309,15 @@ export function TeamEditor({
               placeholder="Optional"
             />
           </div>
-          <ModelSelect
-            id="team-model"
-            label="Leader model"
-            value={form.model}
-            onChange={(model) => update("model", model)}
-            credentials={credentials}
-          />
+          <div className="md:col-span-2">
+            <ModelSelect
+              id="team-model"
+              label="Leader model"
+              value={form.model}
+              onChange={(model) => update("model", model)}
+              credentials={credentials}
+            />
+          </div>
           <div>
             <Label htmlFor="team-temperature" hint={form.temperature.toFixed(2)}>
               Temperature
@@ -343,6 +396,7 @@ export function TeamEditor({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<ArrowUpIcon />}
                     onClick={() => moveMember(index, -1)}
                     disabled={index === 0}
                   >
@@ -351,6 +405,7 @@ export function TeamEditor({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<ArrowDownIcon />}
                     onClick={() => moveMember(index, 1)}
                     disabled={index === form.memberConfigIds.length - 1}
                   >
@@ -359,6 +414,7 @@ export function TeamEditor({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<MinusIcon />}
                     onClick={() => toggleMember(id)}
                   >
                     Remove

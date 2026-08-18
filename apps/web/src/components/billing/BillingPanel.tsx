@@ -6,6 +6,7 @@ import { Link } from "@/i18n/navigation";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { PlusIcon, SaveIcon } from "@/components/ui/icons";
 import { Input, Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { GrantCreditsForm } from "@/components/billing/GrantCreditsForm";
@@ -324,7 +325,12 @@ export function BillingPanel({
               <dd className="tabular-nums">{formatCredits(wallet.balanceCredits)}</dd>
             </div>
           </dl>
-          <Button className="mt-4" disabled={busy} onClick={() => void onBuyOrgPack()}>
+          <Button
+            className="mt-4"
+            icon={<PlusIcon />}
+            disabled={busy}
+            onClick={() => void onBuyOrgPack()}
+          >
             Buy credit pack
           </Button>
         </article>
@@ -376,7 +382,7 @@ export function BillingPanel({
                   />
                 </div>
               </div>
-              <Button disabled={busy} onClick={() => void savePlan()}>
+              <Button icon={<SaveIcon />} disabled={busy} onClick={() => void savePlan()}>
                 Save plan
               </Button>
             </div>

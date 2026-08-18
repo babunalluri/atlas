@@ -179,13 +179,42 @@ def test_quote_kwargs_for_groww_and_kite_signatures() -> None:
     async def get_quote(exchange: str, segment: str, trading_symbols: str):
         return exchange, segment, trading_symbols
 
+    async def get_ltp(segment: str, exchange_symbols: str):
+        return segment, exchange_symbols
+
     async def kite_quote(instruments: str):
         return instruments
 
-    groww = quote_call_attempts(get_quote, ["NSE:RELIANCE", "NSE:NIFTY"])
-    assert groww[0]["exchange"] == "NSE"
-    assert groww[0]["segment"] == "CASH"
-    assert "RELIANCE" in groww[0]["trading_symbols"]
+    groww = quote_call_attempts(
+        get_quote, ["NSE:RELIANCE", "NSE:NIFTY", "NFO:NIFTY26AUGFUT"]
+    )
+    assert groww[0] == {
+        "trading_symbols": "RELIANCE,NIFTY",
+        "exchange": "NSE",
+        "segment": "CASH",
+    }
+    assert groww[1] == {
+        "trading_symbols": "NIFTY26AUGFUT",
+        "exchange": "NSE",
+        "segment": "FNO",
+    }
+
+    groww_ltp = quote_call_attempts(
+        get_ltp,
+        [
+            "NSE:NIFTY",
+            "NFO:NIFTY26AUG24500CE",
+            "NFO:NIFTY26AUG24500PE",
+        ],
+    )
+    assert groww_ltp[0] == {
+        "segment": "CASH",
+        "exchange_symbols": "NSE_NIFTY",
+    }
+    assert groww_ltp[1] == {
+        "segment": "FNO",
+        "exchange_symbols": "NSE_NIFTY26AUG24500CE,NSE_NIFTY26AUG24500PE",
+    }
 
     kite = quote_call_attempts(kite_quote, ["NSE:RELIANCE"])
     assert kite[0]["instruments"] == "NSE:RELIANCE"

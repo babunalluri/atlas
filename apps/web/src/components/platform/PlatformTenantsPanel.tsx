@@ -11,10 +11,14 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
 import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
   ExternalLinkIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
+  PlusIcon,
+  UploadIcon,
 } from "@/components/ui/icons";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
@@ -245,7 +249,7 @@ export function PlatformTenantsPanel({
             creates the organization and owner account.
           </p>
         </div>
-        <Button variant="accent" onClick={() => setProvisioning(true)}>
+        <Button variant="accent" icon={<PlusIcon />} onClick={() => setProvisioning(true)}>
           Provision tenant
         </Button>
       </header>
@@ -304,6 +308,7 @@ export function PlatformTenantsPanel({
                 <Button
                   size="sm"
                   variant="secondary"
+                  icon={<ChevronLeftIcon />}
                   disabled={safePage <= 1}
                   onClick={() => setPage((current) => Math.max(1, current - 1))}
                 >
@@ -315,6 +320,7 @@ export function PlatformTenantsPanel({
                 <Button
                   size="sm"
                   variant="secondary"
+                  icon={<ChevronRightIcon />}
                   disabled={safePage >= totalPages}
                   onClick={() =>
                     setPage((current) => Math.min(totalPages, current + 1))
@@ -535,6 +541,7 @@ export function PlatformTenantsPanel({
         <Button
           className="mt-4"
           variant="accent"
+          icon={<UploadIcon />}
           disabled={
             importing ||
             !sourceTenantId ||

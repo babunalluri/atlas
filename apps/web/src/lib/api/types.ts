@@ -341,6 +341,7 @@ export interface TeamSummary {
 }
 
 export interface TeamDraftInput {
+  slug: string;
   name: string;
   description: string;
   instructions: string;

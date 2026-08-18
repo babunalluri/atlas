@@ -12,6 +12,8 @@ import {
 } from "@/components/ui/CatalogControls";
 import {
   CloneIcon,
+  CloseIcon,
+  PlusIcon,
   HistoryIcon,
   PencilIcon,
   TrashIcon,
@@ -302,6 +304,7 @@ export function TeamList({
           href="/admin/teams/new"
           className={buttonClassName({ variant: "accent" })}
         >
+          <PlusIcon />
           Create
         </Link>
       </header>
@@ -437,7 +440,7 @@ export function TeamList({
                   /{versionsTeam.slug}
                 </p>
               </div>
-              <Button size="sm" variant="ghost" onClick={closeVersions}>
+              <Button size="sm" variant="ghost" icon={<CloseIcon />} onClick={closeVersions}>
                 Close
               </Button>
             </div>

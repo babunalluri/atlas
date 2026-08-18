@@ -1,7 +1,9 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { formatNotificationForDesk } from "@/components/domains/desk-chat-draft";
 import {
   getMyUnreadNotificationCount,
   listMyNotifications,
@@ -28,15 +30,34 @@ function BellGlyph({ className }: { className?: string }) {
   );
 }
 
+function CopyGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      className={className}
+      aria-hidden
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
 /** Inbox bell — loads on mount and when opened (no polling loop). */
 export function NotificationBell({ className }: { className?: string }) {
+  const t = useTranslations("common");
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
   const [items, setItems] = useState<UserNotification[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const copiedTimerRef = useRef<number | null>(null);
 
   const refreshCount = useCallback(async () => {
     if (!isLoaded || !isSignedIn) return;
@@ -94,8 +115,32 @@ export function NotificationBell({ className }: { className?: string }) {
     };
   }, [open]);
 
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current != null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+    };
+  }, []);
+
   if (!isLoaded || !isSignedIn) {
     return null;
+  }
+
+  async function copyNotification(item: UserNotification) {
+    const text = formatNotificationForDesk(item);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(item.id);
+      if (copiedTimerRef.current != null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => {
+        setCopiedId((current) => (current === item.id ? null : current));
+      }, 2000);
+    } catch {
+      setError(t("notifications.copyFailed"));
+    }
   }
 
   async function onRead(id: string) {
@@ -184,31 +229,58 @@ export function NotificationBell({ className }: { className?: string }) {
                   const unreadItem = !item.readAt;
                   return (
                     <li key={item.id}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (unreadItem) void onRead(item.id);
-                        }}
+                      <div
                         className={cn(
-                          "block w-full px-3 py-2.5 text-left transition hover:bg-mist/60",
+                          "flex gap-2 px-3 py-2.5 transition hover:bg-mist/60",
                           unreadItem && "bg-teal/5",
                         )}
                       >
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-sm font-medium text-ink">
-                            {item.title}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (unreadItem) void onRead(item.id);
+                          }}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="text-sm font-medium text-ink">
+                              {item.title}
+                            </p>
+                            {unreadItem ? (
+                              <span className="mt-1 size-1.5 shrink-0 rounded-full bg-teal" />
+                            ) : null}
+                          </div>
+                          <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-xs text-slate-muted">
+                            {item.body}
                           </p>
-                          {unreadItem ? (
-                            <span className="mt-1 size-1.5 shrink-0 rounded-full bg-teal" />
-                          ) : null}
-                        </div>
-                        <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-xs text-slate-muted">
-                          {item.body}
-                        </p>
-                        <p className="mt-1 text-[10px] uppercase tracking-[0.1em] text-slate-muted">
-                          {formatRelative(item.createdAt)}
-                        </p>
-                      </button>
+                          <p className="mt-1 text-[10px] uppercase tracking-[0.1em] text-slate-muted">
+                            {formatRelative(item.createdAt)}
+                          </p>
+                        </button>
+                        <button
+                          type="button"
+                          title={
+                            copiedId === item.id
+                              ? t("notifications.copied")
+                              : t("notifications.copy")
+                          }
+                          aria-label={
+                            copiedId === item.id
+                              ? t("notifications.copied")
+                              : t("notifications.copy")
+                          }
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void copyNotification(item);
+                          }}
+                          className={cn(
+                            "mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line text-slate-muted transition hover:border-line-strong hover:bg-raised/80 hover:text-ink",
+                            copiedId === item.id && "border-teal/40 text-teal",
+                          )}
+                        >
+                          <CopyGlyph className="size-3.5" />
+                        </button>
+                      </div>
                     </li>
                   );
                 })}

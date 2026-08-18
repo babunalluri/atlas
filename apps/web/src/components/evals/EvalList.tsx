@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { PlusIcon } from "@/components/ui/icons";
 import { Input, Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
@@ -180,7 +181,12 @@ export function EvalList({
             </div>
             <div className="flex items-center justify-between">
               <p className="text-xs text-rose">{error}</p>
-              <Button variant="accent" disabled={busy || targets.length === 0} onClick={create}>
+              <Button
+                variant="accent"
+                icon={<PlusIcon />}
+                disabled={busy || targets.length === 0}
+                onClick={create}
+              >
                 {busy ? "Creating…" : "Create eval"}
               </Button>
             </div>

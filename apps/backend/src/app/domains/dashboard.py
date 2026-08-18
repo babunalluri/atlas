@@ -19,6 +19,7 @@ from app.db.models import (
 from app.domains.desk_snapshot import DeskSnapshotService
 from app.domains.types import (
     DOMAIN_LABELS,
+    STOCK_BROKER_ADMIN_DESK_TEAMS,
     STOCK_BROKER_DESK_TEAMS,
     WorkspaceDomain,
     normalize_domain,
@@ -27,6 +28,18 @@ from app.metrics.service import MetricsService
 from app.tenancy.context import TenantContext
 
 STOCK_BROKER_CHAT_ORDER = STOCK_BROKER_DESK_TEAMS
+
+
+def order_admin_desk_chat_targets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Admin desk tabs: Signals ops (when published) + standard customer desk teams."""
+    by_slug: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not row.get("published"):
+            continue
+        slug = str(row.get("slug") or "")
+        if slug in STOCK_BROKER_ADMIN_DESK_TEAMS and slug not in by_slug:
+            by_slug[slug] = row
+    return [by_slug[slug] for slug in STOCK_BROKER_ADMIN_DESK_TEAMS if slug in by_slug]
 
 
 def order_desk_chat_targets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -127,6 +140,25 @@ class DomainDashboardService:
             if widget.get("id") in keep_ids or widget.get("group") == "brokers"
         ]
         payload["quick_links"] = []
+        payload["chat_targets"] = [
+            row
+            for row in payload["chat_targets"]
+            if row.get("slug") in STOCK_BROKER_DESK_TEAMS
+        ]
+        return payload
+
+    async def admin_desk(self, *, desk_snapshot: bool = False) -> dict[str, Any]:
+        """Tenant-admin trading desk: Signals ops chat + live signal board."""
+        payload = await self.dashboard(days=30, desk_snapshot=desk_snapshot)
+        if payload["domain"] != "stock_broker":
+            return {
+                **payload,
+                "chat_targets": [],
+                "desk_snapshot": None,
+            }
+        catalog = payload.get("catalog") or {}
+        detail = list(catalog.get("teams_detail") or [])
+        payload["chat_targets"] = order_admin_desk_chat_targets(detail)
         return payload
 
     async def _catalog_counts(self) -> dict[str, Any]:
@@ -396,6 +428,7 @@ class DomainDashboardService:
     ) -> list[dict[str, str]]:
         if domain == "stock_broker":
             return [
+                {"label": "Admin trading desk", "href": "/admin/desk"},
                 {"label": "Learning / Paper / Live / Research", "href": "/admin/teams"},
                 {"label": "Broker tools", "href": "/admin/tools"},
                 {"label": "Workflows", "href": "/admin/workflows"},

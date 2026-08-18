@@ -25,6 +25,11 @@ STOCK_BROKER_DESK_TEAMS: tuple[str, ...] = (
     "research",
 )
 
+STOCK_BROKER_ADMIN_DESK_TEAMS: tuple[str, ...] = (
+    "signals-ops",
+    *STOCK_BROKER_DESK_TEAMS,
+)
+
 DOMAIN_DEFAULT_TEAM_SLUGS: dict[WorkspaceDomain, tuple[str, ...]] = {
     "stock_broker": STOCK_BROKER_DESK_TEAMS,
 }

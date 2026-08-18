@@ -2,6 +2,7 @@
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { CloseIcon, EyeIcon, PencilIcon, PublishIcon, RefreshIcon } from "@/components/ui/icons";
 import { formatRelative } from "@/lib/utils";
 
 export interface VersionHistoryItem {
@@ -45,6 +46,7 @@ export function VersionHistoryPanel({
         <Button
           size="sm"
           variant="secondary"
+          icon={<RefreshIcon className={busy ? "animate-spin" : undefined} />}
           onClick={onRefresh}
           disabled={busy}
         >
@@ -92,6 +94,7 @@ export function VersionHistoryPanel({
                 <Button
                   size="sm"
                   variant="ghost"
+                  icon={<EyeIcon />}
                   disabled={busy}
                   onClick={() => onView(version)}
                 >
@@ -100,6 +103,7 @@ export function VersionHistoryPanel({
                 <Button
                   size="sm"
                   variant="ghost"
+                  icon={<PencilIcon />}
                   disabled={busy}
                   onClick={() => onRestoreDraft(version)}
                 >
@@ -108,6 +112,7 @@ export function VersionHistoryPanel({
                 <Button
                   size="sm"
                   variant="secondary"
+                  icon={<PublishIcon />}
                   disabled={busy || version.isLive}
                   onClick={() => onRestoreLive(version)}
                 >
@@ -124,7 +129,7 @@ export function VersionHistoryPanel({
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold">Version details</h3>
             {onCloseView ? (
-              <Button size="sm" variant="ghost" onClick={onCloseView}>
+              <Button size="sm" variant="ghost" icon={<CloseIcon />} onClick={onCloseView}>
                 Close
               </Button>
             ) : null}

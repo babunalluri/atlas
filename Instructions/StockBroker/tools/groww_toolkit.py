@@ -311,44 +311,99 @@ async def get_order_trades(ctx, groww_order_id: str, segment: str = "CASH") -> A
 # --- Live data (read) ---
 
 
-async def get_quote(ctx, exchange: str, segment: str, trading_symbols: str) -> Any:
-    """Market quote. trading_symbols: comma-separated symbols."""
-    return await _get(
-        ctx,
-        "/v1/live-data/quote",
-        "get_quote",
-        query={
-            "exchange": exchange.upper(),
-            "segment": segment.upper(),
-            "trading_symbols": trading_symbols,
-        },
-    )
+def _split_trading_symbols(*parts: str) -> list[str]:
+    symbols: list[str] = []
+    for part in parts:
+        for piece in str(part or "").split(","):
+            text = piece.strip()
+            if text:
+                symbols.append(text)
+    return symbols
 
 
-async def get_ltp(ctx, exchange: str, segment: str, trading_symbols: str) -> Any:
-    """Last traded price for symbols (comma-separated)."""
+async def get_quote(
+    ctx,
+    exchange: str = "NSE",
+    segment: str = "CASH",
+    trading_symbols: str = "",
+    trading_symbol: str = "",
+) -> Any:
+    """Market quote. Groww accepts one trading_symbol per request; comma-separated batching is handled here."""
+    symbols = _split_trading_symbols(trading_symbols, trading_symbol)
+    if not symbols:
+        raise RuntimeError("trading_symbol or trading_symbols is required")
+    merged: dict[str, Any] = {}
+    for sym in symbols:
+        result = await _get(
+            ctx,
+            "/v1/live-data/quote",
+            "get_quote",
+            query={
+                "exchange": exchange.upper(),
+                "segment": segment.upper(),
+                "trading_symbol": sym,
+            },
+        )
+        payload = result.get("data") if isinstance(result, dict) else result
+        if not isinstance(payload, dict):
+            continue
+        merged[sym] = payload
+        ts = payload.get("trading_symbol")
+        if ts and str(ts) not in merged:
+            merged[str(ts)] = payload
+    if len(symbols) == 1 and merged:
+        return {"ok": True, "data": merged[symbols[0]]}
+    return {"ok": True, "data": merged}
+
+
+async def get_ltp(
+    ctx,
+    exchange: str = "NSE",
+    segment: str = "CASH",
+    trading_symbols: str = "",
+    exchange_symbols: str = "",
+) -> Any:
+    """Last traded price. Prefer exchange_symbols (NSE_RELIANCE); or trading_symbols + exchange."""
+    if exchange_symbols:
+        symbols_param = exchange_symbols
+    else:
+        syms = _split_trading_symbols(trading_symbols)
+        if not syms:
+            raise RuntimeError("exchange_symbols or trading_symbols is required")
+        symbols_param = ",".join(f"{exchange.upper()}_{sym}" for sym in syms)
     return await _get(
         ctx,
         "/v1/live-data/ltp",
         "get_ltp",
         query={
-            "exchange": exchange.upper(),
             "segment": segment.upper(),
-            "trading_symbols": trading_symbols,
+            "exchange_symbols": symbols_param,
         },
     )
 
 
-async def get_ohlc(ctx, exchange: str, segment: str, trading_symbols: str) -> Any:
-    """OHLC for symbols (comma-separated)."""
+async def get_ohlc(
+    ctx,
+    exchange: str = "NSE",
+    segment: str = "CASH",
+    trading_symbols: str = "",
+    exchange_symbols: str = "",
+) -> Any:
+    """OHLC snapshot. Prefer exchange_symbols (NSE_RELIANCE); or trading_symbols + exchange."""
+    if exchange_symbols:
+        symbols_param = exchange_symbols
+    else:
+        syms = _split_trading_symbols(trading_symbols)
+        if not syms:
+            raise RuntimeError("exchange_symbols or trading_symbols is required")
+        symbols_param = ",".join(f"{exchange.upper()}_{sym}" for sym in syms)
     return await _get(
         ctx,
         "/v1/live-data/ohlc",
         "get_ohlc",
         query={
-            "exchange": exchange.upper(),
             "segment": segment.upper(),
-            "trading_symbols": trading_symbols,
+            "exchange_symbols": symbols_param,
         },
     )
 

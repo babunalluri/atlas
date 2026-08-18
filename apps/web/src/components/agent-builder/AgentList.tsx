@@ -12,6 +12,8 @@ import {
 } from "@/components/ui/CatalogControls";
 import {
   CloneIcon,
+  CloseIcon,
+  PlusIcon,
   HistoryIcon,
   PencilIcon,
   TrashIcon,
@@ -316,6 +318,7 @@ export function AgentList({
           href="/admin/agents/new"
           className={buttonClassName({ variant: "accent" })}
         >
+          <PlusIcon />
           Create
         </Link>
       </header>
@@ -448,7 +451,7 @@ export function AgentList({
                   /{versionsAgent.slug}
                 </p>
               </div>
-              <Button size="sm" variant="ghost" onClick={closeVersions}>
+              <Button size="sm" variant="ghost" icon={<CloseIcon />} onClick={closeVersions}>
                 Close
               </Button>
             </div>

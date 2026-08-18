@@ -1,19 +1,40 @@
 "use client";
 
-import { Link } from "@/i18n/navigation";
+import { useEffect, useState } from "react";
 
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
+import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
-import { MetricsDashboard } from "@/components/metrics/MetricsDashboard";
 import { Button } from "@/components/ui/Button";
+import { ChevronLeftIcon, ChevronRightIcon } from "@/components/ui/icons";
 import type { DomainDashboard } from "@/lib/api/admin";
+import { cn } from "@/lib/utils";
 
-function formatFetchedAt(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString();
+const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
+
+function useDeskChatCollapsed() {
+  const [collapsed, setCollapsedState] = useState(false);
+
+  useEffect(() => {
+    try {
+      setCollapsedState(window.localStorage.getItem(CHAT_COLLAPSED_KEY) === "1");
+    } catch {
+      // private mode / blocked storage
+    }
+  }, []);
+
+  function setCollapsed(next: boolean) {
+    setCollapsedState(next);
+    try {
+      window.localStorage.setItem(CHAT_COLLAPSED_KEY, next ? "1" : "0");
+    } catch {
+      // private mode / blocked storage
+    }
+  }
+
+  return { collapsed, setCollapsed };
 }
 
 export function StockBrokerWorkspace({
@@ -21,29 +42,65 @@ export function StockBrokerWorkspace({
   refreshing,
   onRefresh,
   variant = "admin",
+  deskTitle = "Trading desk",
 }: {
   data: DomainDashboard;
   refreshing?: boolean;
-  onRefresh: () => void;
+  onRefresh?: () => void;
   variant?: "admin" | "customer";
+  deskTitle?: string;
 }) {
   const customer = variant === "customer";
+  const { collapsed: chatCollapsed, setCollapsed: setChatCollapsed } =
+    useDeskChatCollapsed();
+  const hasChat = data.chat_targets.length > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row">
-      <section className="flex min-h-[42vh] min-w-0 flex-1 flex-col border-b border-line lg:h-full lg:min-h-0 lg:min-w-[20rem] lg:max-w-[24rem] lg:flex-none lg:basis-[34%] lg:border-b-0 lg:border-r">
-        {data.chat_targets.length > 0 ? (
-          <WorkspaceDeskChat
-            targets={data.chat_targets}
-            brokerTools={data.broker_tools ?? []}
-            allowPreview={!customer}
+      {hasChat && chatCollapsed ? (
+        <button
+          type="button"
+          aria-label="Expand desk chat"
+          title="Expand desk chat"
+          onClick={() => setChatCollapsed(false)}
+          className={cn(
+            "flex shrink-0 items-center justify-center gap-2 border-b border-line bg-raised/60 px-3 py-2 text-xs font-medium text-slate-muted transition hover:bg-mist hover:text-ink lg:h-full lg:w-10 lg:flex-col lg:border-b-0 lg:border-r lg:px-0 lg:py-4",
+          )}
+        >
+          <ChevronRightIcon />
+          <span className="lg:[writing-mode:vertical-rl] lg:rotate-180 lg:text-[10px] lg:font-semibold lg:uppercase lg:tracking-[0.14em]">
+            Desk chat
+          </span>
+        </button>
+      ) : null}
+
+      {hasChat && !chatCollapsed ? (
+        <section className="relative flex min-h-[38vh] min-w-0 flex-1 flex-col border-b border-line lg:h-full lg:min-h-0 lg:min-w-[20rem] lg:max-w-[24rem] lg:flex-none lg:basis-[34%] lg:border-b-0 lg:border-r">
+          <Button
+            type="button"
+            size="icon"
+            variant="secondary"
+            aria-label="Collapse desk chat"
+            title="Collapse desk chat"
+            icon={<ChevronLeftIcon />}
+            onClick={() => setChatCollapsed(true)}
+            className="absolute right-1.5 top-1.5 z-20 h-6 w-6 shadow-sm lg:top-1/2 lg:right-0 lg:h-7 lg:w-7 lg:translate-x-1/2 lg:-translate-y-1/2 lg:rounded-full lg:shadow-md"
           />
-        ) : (
+          <div className="flex min-h-0 flex-1 flex-col pt-8 lg:pt-0">
+            <WorkspaceDeskChat
+              targets={data.chat_targets}
+              brokerTools={data.broker_tools ?? []}
+              allowPreview={!customer}
+            />
+          </div>
+        </section>
+      ) : !hasChat ? (
+        <section className="flex min-h-[38vh] min-w-0 flex-1 flex-col border-b border-line lg:h-full lg:min-h-0 lg:min-w-[20rem] lg:max-w-[24rem] lg:flex-none lg:basis-[34%] lg:border-b-0 lg:border-r">
           <div className="flex h-full items-center justify-center px-6 text-center text-sm text-slate-muted">
             {deskChatEmptyCopy(customer)}
           </div>
-        )}
-      </section>
+        </section>
+      ) : null}
 
       <section className="min-h-0 min-w-0 flex-1 overflow-y-auto px-5 py-5 lg:basis-[66%]">
         <header className="flex flex-wrap items-start justify-between gap-3">
@@ -52,84 +109,33 @@ export function StockBrokerWorkspace({
               {data.domain_label} workspace
             </p>
             <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
-              {customer ? "Your trading desk" : "Trading desk"}
+              {customer ? "Your trading desk" : deskTitle}
             </h1>
             <p className="mt-1 max-w-xl text-sm text-slate-muted">
               {customer
-                ? "Research is for analysis; live orders stay on Live trading. Chat tabs match the teams assigned to you. Use Refresh to load orders, positions, and watchlist from the toolkit on a trading team."
-                : "Research is for analysis; live orders stay on Live trading. Chat tabs match assigned teams. Desk books load through the toolkit assigned on a trading team. Chart is TradingView. Refresh loads a new snapshot."}
-            </p>
-          </div>
-          <div className="flex flex-col items-end gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onRefresh}
-              disabled={refreshing}
-            >
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </Button>
-            <p className="text-[11px] text-slate-muted">
-              Last fetched {formatFetchedAt(data.fetched_at)} · {data.range_days}d
+                ? "Research is for analysis; live orders stay on Live trading. Chat tabs match the teams assigned to you."
+                : "Research is for analysis; live orders stay on Live trading. Chat tabs match assigned teams. Signal config and metrics below."}
             </p>
           </div>
         </header>
 
-        <div className="mt-5">
-          <TradingViewChartWidget />
-        </div>
+        {customer ? (
+          <div className="mt-5">
+            <TradingViewChartWidget />
+          </div>
+        ) : null}
+
+        {!customer ? <SignalMetricsPanel /> : null}
 
         <DeskBooksPanel
           snapshot={data.desk_snapshot}
           customer={customer}
           brokerTools={data.broker_tools ?? []}
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          fetchedAt={data.fetched_at}
+          rangeDays={data.range_days}
         />
-
-        {customer ? null : (
-          <section className="mt-5 grid gap-3 sm:grid-cols-3">
-            <div className="surface-panel rounded-xl p-4">
-              <p className="th-label">Agents</p>
-              <p className="mt-2 text-xl font-semibold tnum">
-                {data.catalog.published_agents}/{data.catalog.agents}
-              </p>
-              <p className="mt-1 text-xs text-slate-muted">Published / total</p>
-            </div>
-            <div className="surface-panel rounded-xl p-4">
-              <p className="th-label">Teams</p>
-              <p className="mt-2 text-xl font-semibold tnum">
-                {data.catalog.published_teams}/{data.catalog.teams}
-              </p>
-              <p className="mt-1 text-xs text-slate-muted">Published / total</p>
-            </div>
-            <div className="surface-panel rounded-xl p-4">
-              <p className="th-label">Workflows</p>
-              <p className="mt-2 text-xl font-semibold tnum">
-                {data.catalog.published_workflows}/{data.catalog.workflows}
-              </p>
-              <p className="mt-1 text-xs text-slate-muted">Published / total</p>
-            </div>
-          </section>
-        )}
-
-        {!customer && data.quick_links.length > 0 ? (
-          <section className="mt-3 flex flex-wrap gap-2">
-            {data.quick_links.map((link) => (
-              <Link
-                key={link.href + link.label}
-                href={link.href}
-                className="rounded-full border border-line px-3 py-1.5 text-xs font-medium text-ink-soft transition hover:border-teal/40 hover:text-teal"
-              >
-                {link.label}
-              </Link>
-            ))}
-          </section>
-        ) : null}
-
-        {customer ? null : (
-          <div className="mt-6">
-            <MetricsDashboard data={data.metrics} compact />
-          </div>
-        )}
       </section>
     </div>
   );

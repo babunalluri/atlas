@@ -2,6 +2,8 @@ import { Link } from "@/i18n/navigation";
 
 import { MetricsDashboard } from "@/components/metrics/MetricsDashboard";
 import { Button } from "@/components/ui/Button";
+import { RefreshIcon } from "@/components/ui/icons";
+import { cn } from "@/lib/utils";
 import type { DomainDashboard } from "@/lib/api/admin";
 
 export function DomainWorkspaceDashboard({
@@ -40,6 +42,10 @@ export function DomainWorkspaceDashboard({
               size="sm"
               onClick={onRefresh}
               disabled={refreshing}
+              aria-label="Refresh dashboard"
+              icon={
+                <RefreshIcon className={cn(refreshing && "animate-spin")} />
+              }
             >
               {refreshing ? "Refreshing…" : "Refresh"}
             </Button>

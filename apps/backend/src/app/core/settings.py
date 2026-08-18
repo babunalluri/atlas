@@ -290,6 +290,11 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: int = Field(
         default=15, ge=1, validation_alias="SCHEDULER_POLL_SECONDS"
     )
+    signal_engine_ticker_enabled: bool = Field(
+        default=False,
+        validation_alias="SIGNAL_ENGINE_TICKER_ENABLED",
+        description="Pre-compute signal snapshots for watched admin desks (~8 Hz when active).",
+    )
     scheduler_run_timeout_seconds: int = Field(
         default=900,
         ge=30,
@@ -491,7 +496,7 @@ class Settings(BaseSettings):
         # Env replaces the Python default; keep Groww hosts on local stacks so
         # Stock Broker orgs can save MCP / groww_toolkit without editing
         # REST_TOOL_ALLOWED_HOSTS.
-        if self.environment.lower() in {"development", "dev", "local"}:
+        if self.is_development:
             hosts.add(GROWW_MCP_HOST)
             hosts.add(GROWW_API_HOST)
         self.allowed_outbound_hosts = hosts

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { CopyIcon } from "@/components/ui/icons";
 import { Label, Select } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
@@ -177,6 +178,7 @@ export function PublicApiShareEmbed() {
               <Button
                 variant="secondary"
                 size="sm"
+                icon={<CopyIcon />}
                 onClick={() => void copy("link", snippets.chatUrl)}
               >
                 {copied === "link" ? "Copied" : "Copy"}
@@ -194,6 +196,7 @@ export function PublicApiShareEmbed() {
               <Button
                 variant="secondary"
                 size="sm"
+                icon={<CopyIcon />}
                 onClick={() => void copy("iframe", snippets.iframe)}
               >
                 {copied === "iframe" ? "Copied" : "Copy"}
@@ -211,6 +214,7 @@ export function PublicApiShareEmbed() {
               <Button
                 variant="secondary"
                 size="sm"
+                icon={<CopyIcon />}
                 onClick={() => void copy("script", snippets.script)}
               >
                 {copied === "script" ? "Copied" : "Copy"}

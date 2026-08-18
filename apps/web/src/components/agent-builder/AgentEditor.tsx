@@ -206,28 +206,28 @@ export function AgentEditor({
           <Button
             variant="danger"
             size="sm"
+            icon={<TrashIcon />}
             onClick={() => void onDelete()}
             disabled={saving || publishing || deleting}
           >
-            <TrashIcon />
             {deleting ? "Deleting…" : "Delete"}
           </Button>
           <Button
             variant="secondary"
             size="sm"
+            icon={<SaveIcon />}
             onClick={onSave}
             disabled={saving || publishing || deleting}
           >
-            <SaveIcon />
             {saving ? "Saving…" : "Save"}
           </Button>
           <Button
             variant="accent"
             size="sm"
+            icon={<PublishIcon />}
             onClick={onPublish}
             disabled={saving || publishing || deleting}
           >
-            <PublishIcon />
             {publishing ? "Publishing…" : "Publish"}
           </Button>
         </EditorActions>

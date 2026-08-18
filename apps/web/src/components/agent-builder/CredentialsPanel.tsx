@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
-import { TrashIcon } from "@/components/ui/icons";
+import { SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createCredential,
   deleteCredential,
@@ -195,6 +195,7 @@ export function CredentialsPanel({
           </div>
           <Button
             variant="accent"
+            icon={<SaveIcon />}
             disabled={!name.trim() || !value || saving}
             onClick={save}
           >

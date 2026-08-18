@@ -4,11 +4,7 @@ import type { Session } from "next-auth";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { ChatAccountBar } from "@/components/chat/ChatAccountBar";
-import { NotificationBell } from "@/components/notifications/NotificationBell";
-import {
-  ThemeToggle,
-  useSurfaceTheme,
-} from "@/components/layout/ThemeToggle";
+import { useSurfaceTheme } from "@/components/layout/ThemeToggle";
 import {
   listAvailableTeams,
   listAvailableWorkflows,
@@ -145,12 +141,12 @@ export function WorkflowChooser({
               <p className="mt-1 text-sm text-slate-muted">Workspace portal</p>
             </div>
             <div className="flex items-center gap-2">
-              <NotificationBell />
-              <ThemeToggle theme={theme} onChange={changeTheme} />
               <ChatAccountBar
                 tenantSlug={tenant.slug}
                 signInRedirect={`/t/${tenant.slug}/chat`}
                 serverSession={serverSession}
+                theme={theme}
+                onThemeChange={changeTheme}
               />
             </div>
           </header>

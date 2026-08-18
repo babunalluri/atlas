@@ -22,7 +22,7 @@ import type { ChatMessage } from "@/lib/api/types";
 import { TraceSpanPanel } from "@/components/observability/TraceSpanPanel";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { CloseIcon } from "@/components/ui/icons";
+import { CloseIcon, TracesIcon } from "@/components/ui/icons";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +68,7 @@ export function WorkspaceTracesButton() {
         type="button"
         size="sm"
         variant="secondary"
+        icon={<TracesIcon />}
         aria-label={t("open")}
         onClick={() => setOpen(true)}
       >

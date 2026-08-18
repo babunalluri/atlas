@@ -5,6 +5,7 @@ import { useState } from "react";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Button } from "@/components/ui/Button";
 import { FieldHint, Input, Label } from "@/components/ui/Field";
+import { CloseIcon, SaveIcon } from "@/components/ui/icons";
 import { TimezoneSelect } from "@/components/ui/TimezoneSelect";
 import { passwordError } from "@/components/users/SetPasswordForm";
 import { updatePlatformTenant } from "@/lib/api/admin";
@@ -196,6 +197,7 @@ export function EditTenantDialog({
             type="button"
             variant="secondary"
             size="sm"
+            icon={<CloseIcon />}
             disabled={busy}
             onClick={onClose}
           >
@@ -205,6 +207,7 @@ export function EditTenantDialog({
             type="button"
             variant="accent"
             size="sm"
+            icon={<SaveIcon />}
             disabled={saveDisabled}
             onClick={() => void save()}
           >

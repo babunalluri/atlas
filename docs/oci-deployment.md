@@ -8,6 +8,9 @@ recommended production shape.
 Prefer region **Mumbai (`ap-mumbai-1`)** for India-facing workloads (e.g.
 Stock Broker tenants); use the home region that matches data-residency needs.
 
+For a **$0 non-production pilot** on one Always Free VM, see
+[`oci-free-tier-pilot.md`](./oci-free-tier-pilot.md).
+
 ## Recommended first production shape
 
 | Concern | OCI service |

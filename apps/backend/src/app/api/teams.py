@@ -260,7 +260,12 @@ async def update_team(
     session: Annotated[AsyncSession, Depends(tenant_session)],
 ) -> TeamConfigOut:
     repo = TeamRepository(session, context)
-    config = await repo.update_config(team_id, name=body.name, description=body.description)
+    try:
+        config = await repo.update_config(
+            team_id, slug=body.slug, name=body.name, description=body.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if config is None:
         raise HTTPException(status_code=404, detail="Team not found")
 

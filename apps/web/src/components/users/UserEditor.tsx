@@ -13,7 +13,7 @@ import {
   TimezoneSelect,
   browserTimezone,
 } from "@/components/ui/TimezoneSelect";
-import { SaveIcon, TrashIcon } from "@/components/ui/icons";
+import { PlusIcon, RefreshIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createTenantUser,
   deleteTenantUser,
@@ -324,6 +324,7 @@ export function UserEditor({
             <Button
               variant="secondary"
               size="sm"
+              icon={<RefreshIcon />}
               onClick={() => void syncIdentity()}
               disabled={busy !== null}
             >
@@ -335,11 +336,11 @@ export function UserEditor({
               <Button
                 variant="secondary"
                 size="sm"
+                icon={<TrashIcon />}
                 disabled
                 title="Admin users cannot be deleted"
                 aria-label="Admin users cannot be deleted"
               >
-                <TrashIcon />
                 Delete
               </Button>
             </span>
@@ -347,20 +348,20 @@ export function UserEditor({
             <Button
               variant="secondary"
               size="sm"
+              icon={<TrashIcon />}
               onClick={() => setConfirmDelete(true)}
               disabled={busy !== null}
             >
-              <TrashIcon />
               {busy === "delete" ? "Deleting…" : "Delete"}
             </Button>
           ) : null}
           <Button
             variant="accent"
             size="sm"
+            icon={mode === "create" ? <PlusIcon /> : <SaveIcon />}
             onClick={() => void save()}
             disabled={busy !== null}
           >
-            <SaveIcon />
             {busy === "save"
               ? tCommon("saving")
               : mode === "create"

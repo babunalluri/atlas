@@ -10,7 +10,15 @@ import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select, Textarea } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
-import { SaveIcon, TrashIcon } from "@/components/ui/icons";
+import {
+  CheckIcon,
+  EyeIcon,
+  PencilIcon,
+  PublishIcon,
+  SaveIcon,
+  SearchIcon,
+  TrashIcon,
+} from "@/components/ui/icons";
 import {
   createToolDefinition,
   deleteToolDefinition,
@@ -606,10 +614,10 @@ export function ToolEditor({
             <Button
               variant="secondary"
               size="sm"
+              icon={<TrashIcon />}
               onClick={remove}
               disabled={busy !== null}
             >
-              <TrashIcon />
               {busy === "delete" ? "Deleting…" : "Delete"}
             </Button>
           ) : null}
@@ -618,6 +626,7 @@ export function ToolEditor({
               <Button
                 variant="secondary"
                 size="sm"
+                icon={<CheckIcon />}
                 onClick={validateSource}
                 disabled={busy !== null}
               >
@@ -626,6 +635,7 @@ export function ToolEditor({
               <Button
                 variant="secondary"
                 size="sm"
+                icon={<PublishIcon />}
                 onClick={publishSource}
                 disabled={busy !== null}
               >
@@ -637,10 +647,10 @@ export function ToolEditor({
             <Button
               variant="accent"
               size="sm"
+              icon={<SaveIcon />}
               onClick={() => void saveLifecycle(!form.active)}
               disabled={busy !== null}
             >
-              <SaveIcon />
               {busy === "save"
                 ? "Saving…"
                 : form.active
@@ -651,10 +661,10 @@ export function ToolEditor({
             <Button
               variant="accent"
               size="sm"
+              icon={<SaveIcon />}
               onClick={save}
               disabled={busy !== null || sourceEmpty}
             >
-              <SaveIcon />
               {busy === "save" ? "Saving…" : "Save tool"}
             </Button>
           )}
@@ -911,6 +921,7 @@ export function ToolEditor({
                         <Button
                           size="sm"
                           variant="secondary"
+                          icon={<PencilIcon />}
                           onClick={unlockSource}
                           disabled={busy !== null}
                         >
@@ -1013,6 +1024,7 @@ export function ToolEditor({
                   <Button
                     variant="secondary"
                     size="sm"
+                    icon={<SearchIcon />}
                     onClick={() => inspectProvider(false)}
                     disabled={!initial}
                   >
@@ -1021,6 +1033,7 @@ export function ToolEditor({
                   <Button
                     variant="secondary"
                     size="sm"
+                    icon={<CheckIcon />}
                     onClick={() => inspectProvider(true)}
                     disabled={!initial}
                   >

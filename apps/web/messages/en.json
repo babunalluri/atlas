@@ -11,8 +11,16 @@
     "language": "Language",
     "backToWorkspace": "Back to workspace",
     "exitTenant": "Exit",
+    "settings": {
+      "title": "Settings",
+      "description": "Manage your preferences, secrets, and variables for the tools assigned to you.",
+      "preferences": "Preferences",
+      "languageHint": "Choose the language used across your workspace.",
+      "vault": "Secrets & variables"
+    },
     "profile": {
-      "open": "Open profile and settings",
+      "open": "Open profile menu",
+      "menu": "Profile menu",
       "settings": "Your settings",
       "vaultHint": "Keys for the broker tools assigned to you. Names must match what the tool reads (for example access_token).",
       "secrets": "Secrets",
@@ -24,6 +32,12 @@
       "newValue": "New value",
       "noSecrets": "No secrets yet.",
       "noVariables": "No variables yet."
+    },
+    "notifications": {
+      "copy": "Copy",
+      "copied": "Copied",
+      "copyFailed": "Could not copy — select the text and copy manually",
+      "useInLiveTrading": "Use in Live trading"
     },
     "traces": {
       "open": "Traces",

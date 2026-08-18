@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label, Select } from "@/components/ui/Field";
-import { PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
+import { ArrowDownIcon, ArrowUpIcon, MinusIcon, PublishIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   deleteWorkflow,
   publishWorkflow,
@@ -200,28 +200,28 @@ export function WorkflowEditor({
           <Button
             variant="danger"
             size="sm"
+            icon={<TrashIcon />}
             onClick={() => void remove()}
             disabled={busy !== null}
           >
-            <TrashIcon />
             {busy === "delete" ? "Deleting…" : "Delete"}
           </Button>
           <Button
             variant="secondary"
             size="sm"
+            icon={<SaveIcon />}
             onClick={save}
             disabled={busy !== null}
           >
-            <SaveIcon />
             {busy === "save" ? "Saving…" : "Save"}
           </Button>
           <Button
             variant="accent"
             size="sm"
+            icon={<PublishIcon />}
             onClick={publish}
             disabled={busy !== null}
           >
-            <PublishIcon />
             {busy === "publish" ? "Publishing…" : "Publish"}
           </Button>
         </EditorActions>
@@ -316,6 +316,7 @@ export function WorkflowEditor({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<ArrowUpIcon />}
                     onClick={() => move(index, -1)}
                     disabled={index === 0}
                   >
@@ -324,6 +325,7 @@ export function WorkflowEditor({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<ArrowDownIcon />}
                     onClick={() => move(index, 1)}
                     disabled={index === form.steps.length - 1}
                   >
@@ -332,6 +334,7 @@ export function WorkflowEditor({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<MinusIcon />}
                     onClick={() =>
                       setForm((previous) => ({
                         ...previous,

@@ -827,6 +827,7 @@ export async function saveTeamDraft(
       accessToken,
       method: "PATCH",
       body: {
+        slug: draft.slug,
         name: draft.name,
         description: draft.description,
         instructions: draft.instructions,
@@ -3581,6 +3582,134 @@ export async function getDomainDashboard(
   });
 }
 
+export interface SignalMetricRow {
+  id: string;
+  label: string;
+  value: number | null;
+  target: string;
+  rule: string;
+  tier: string;
+  passed: boolean | null;
+  hint?: string;
+}
+
+export type SignalEntryStatus = "ready" | "blocked" | "waiting";
+
+export interface SignalEntry {
+  side: string;
+  atm: number | null;
+  ce: number;
+  pe: number;
+  exit_pct: number;
+  label: string;
+  status?: SignalEntryStatus;
+  status_note?: string;
+}
+
+export interface SignalUnderlyingPreset {
+  label: string;
+  symbol: string;
+  strike_step: number;
+}
+
+export interface SignalEngineAdminConfig {
+  underlying_symbol: string;
+  underlying_label: string;
+  fut_symbol: string;
+  ce_symbol: string;
+  pe_symbol: string;
+  crude_symbol: string;
+  india_vix_symbol: string;
+  strike_step: number;
+  pcr: number | null;
+  max_pain: number | null;
+  ivp: number | null;
+  dow_change_pct: number | null;
+  oi_pct_chg?: number | null;
+  iv_chg?: number | null;
+  india_vix?: number | null;
+  fii_net?: number | null;
+  mock?: boolean;
+  engine_enabled?: boolean;
+}
+
+export interface SignalEngineConfigResponse {
+  config: SignalEngineAdminConfig;
+  presets: SignalUnderlyingPreset[];
+  tool_bound: boolean;
+  tool_slug: string | null;
+}
+
+export interface SignalEngineState {
+  metrics: SignalMetricRow[];
+  entry_ready: boolean;
+  entry: SignalEntry | null;
+  passed: number;
+  evaluable: number;
+  feed_source: string;
+  evaluated_at: number;
+  poll_ms: number;
+  broker_poll_ms?: number;
+  stream?: boolean;
+  mock?: boolean;
+  live: boolean;
+  has_broker: boolean;
+  engine_enabled?: boolean;
+  engine_active?: boolean;
+  live_warnings: string[];
+  team_slug: string;
+  underlying?: { symbol: string; label: string };
+}
+
+export interface SignalPublishResult {
+  ok: boolean;
+  error?: string;
+  deduped?: boolean;
+  entry?: SignalEntry;
+  notification?: {
+    batch_id: string;
+    recipient_count: number;
+    title: string;
+    body: string;
+  };
+}
+
+export async function getSignalConfig(
+  accessToken: string,
+): Promise<SignalEngineConfigResponse> {
+  return apiFetch<SignalEngineConfigResponse>("/admin/signals/config", {
+    accessToken,
+  });
+}
+
+export async function patchSignalConfig(
+  accessToken: string,
+  config: Partial<SignalEngineAdminConfig>,
+): Promise<SignalEngineConfigResponse & { ok: boolean }> {
+  return apiFetch("/admin/signals/config", {
+    accessToken,
+    method: "PATCH",
+    body: config,
+  });
+}
+
+export async function getSignalState(
+  accessToken: string,
+): Promise<SignalEngineState> {
+  return apiFetch<SignalEngineState>("/admin/signals/state", { accessToken });
+}
+
+export async function publishSignalEntry(
+  accessToken: string,
+  title?: string,
+): Promise<SignalPublishResult> {
+  return apiFetch<SignalPublishResult>("/admin/signals/publish", {
+    accessToken,
+    method: "POST",
+    body: title ? { title } : {},
+  });
+}
+
 export async function getCustomerDesk(
   accessToken: string,
   deskSnapshot = false,
@@ -3589,6 +3718,18 @@ export async function getCustomerDesk(
     desk_snapshot: deskSnapshot ? "true" : "false",
   });
   return apiFetch<DomainDashboard>(`/api/desk?${params}`, { accessToken });
+}
+
+export async function getAdminDesk(
+  accessToken: string,
+  deskSnapshot = false,
+): Promise<DomainDashboard> {
+  const params = new URLSearchParams({
+    desk_snapshot: deskSnapshot ? "true" : "false",
+  });
+  return apiFetch<DomainDashboard>(`/admin/domains/desk?${params}`, {
+    accessToken,
+  });
 }
 
 export type EvalEvaluator =

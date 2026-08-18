@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { PencilIcon, TrashIcon } from "@/components/ui/icons";
+import { ChevronLeftIcon, ChevronRightIcon, PencilIcon, PlusIcon, TrashIcon } from "@/components/ui/icons";
 import { deleteTenantUser, updateTenantUser } from "@/lib/api/admin";
 import { isProtectedAdminRole, type TenantUser } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -96,6 +96,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
           href="/admin/users/new"
           className={buttonClassName({ variant: "accent" })}
         >
+          <PlusIcon />
           Create
         </Link>
       </header>
@@ -148,6 +149,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
               <Button
                 size="sm"
                 variant="secondary"
+                icon={<ChevronLeftIcon />}
                 disabled={safePage <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
               >
@@ -159,6 +161,7 @@ export function UserList({ initialUsers }: { initialUsers: TenantUser[] }) {
               <Button
                 size="sm"
                 variant="secondary"
+                icon={<ChevronRightIcon />}
                 disabled={safePage >= totalPages}
                 onClick={() =>
                   setPage((current) => Math.min(totalPages, current + 1))

@@ -9,7 +9,14 @@ import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
-import { SaveIcon } from "@/components/ui/icons";
+import {
+  ExternalLinkIcon,
+  RefreshIcon,
+  SaveIcon,
+  SearchIcon,
+  TrashIcon,
+  UploadIcon,
+} from "@/components/ui/icons";
 import {
   deleteKnowledgeSource,
   ingestKnowledgeGithub,
@@ -213,10 +220,10 @@ export function KnowledgeEditor({
           <Button
             variant="accent"
             size="sm"
+            icon={<SaveIcon />}
             disabled={saving || !dirty}
             onClick={() => void saveName()}
           >
-            <SaveIcon />
             {saving ? "Saving…" : "Save"}
           </Button>
         </EditorActions>
@@ -282,6 +289,7 @@ export function KnowledgeEditor({
             </div>
             <Button
               variant="accent"
+              icon={<UploadIcon />}
               disabled={!file || uploading}
               onClick={() => void upload()}
             >
@@ -302,6 +310,7 @@ export function KnowledgeEditor({
             </div>
             <Button
               variant="accent"
+              icon={<ExternalLinkIcon />}
               disabled={!urlValue.trim() || uploading}
               onClick={() => void ingest()}
             >
@@ -322,6 +331,7 @@ export function KnowledgeEditor({
             </div>
             <Button
               variant="accent"
+              icon={<ExternalLinkIcon />}
               disabled={!s3Uri.trim() || uploading}
               onClick={() => void ingest()}
             >
@@ -362,6 +372,7 @@ export function KnowledgeEditor({
             </div>
             <Button
               variant="accent"
+              icon={<ExternalLinkIcon />}
               disabled={
                 !githubRepo.trim() || !githubPath.trim() || uploading
               }
@@ -387,6 +398,7 @@ export function KnowledgeEditor({
           />
           <Button
             variant="secondary"
+            icon={<SearchIcon />}
             disabled={!searchQuery.trim() || searching}
             onClick={() => void search()}
           >
@@ -459,6 +471,7 @@ export function KnowledgeEditor({
                 <Button
                   size="sm"
                   variant="secondary"
+                  icon={<RefreshIcon />}
                   onClick={() => void reindex(source.id)}
                 >
                   Reindex
@@ -466,6 +479,7 @@ export function KnowledgeEditor({
                 <Button
                   size="sm"
                   variant="danger"
+                  icon={<TrashIcon />}
                   onClick={() => void remove(source.id)}
                 >
                   Delete

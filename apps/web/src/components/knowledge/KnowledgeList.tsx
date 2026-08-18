@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button, buttonClassName } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { PencilIcon, TrashIcon } from "@/components/ui/icons";
+import { ChevronLeftIcon, ChevronRightIcon, PencilIcon, PlusIcon, TrashIcon } from "@/components/ui/icons";
 import { deleteKnowledgeBase } from "@/lib/api/admin";
 import type { KnowledgeSource } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -140,6 +140,7 @@ export function KnowledgeList({
           href="/admin/knowledge/new"
           className={buttonClassName({ variant: "accent" })}
         >
+          <PlusIcon />
           Create
         </Link>
       </header>
@@ -193,6 +194,7 @@ export function KnowledgeList({
               <Button
                 size="sm"
                 variant="secondary"
+                icon={<ChevronLeftIcon />}
                 disabled={safePage <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
               >
@@ -204,6 +206,7 @@ export function KnowledgeList({
               <Button
                 size="sm"
                 variant="secondary"
+                icon={<ChevronRightIcon />}
                 disabled={safePage >= totalPages}
                 onClick={() =>
                   setPage((current) => Math.min(totalPages, current + 1))

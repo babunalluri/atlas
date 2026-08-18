@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { FieldError, FieldHint, Input, Label, Select } from "@/components/ui/Field";
+import { CloseIcon, SaveIcon } from "@/components/ui/icons";
 import type { TenantUser, TenantUserInput } from "@/lib/api/types";
 import { formatApiError } from "@/lib/agentos/client";
 import { passwordError } from "@/components/users/SetPasswordForm";
@@ -154,6 +155,7 @@ export function EditUserForm({
           type="button"
           variant="secondary"
           size="sm"
+          icon={<CloseIcon />}
           disabled={busy}
           onClick={onCancel}
         >
@@ -163,6 +165,7 @@ export function EditUserForm({
           type="button"
           variant="accent"
           size="sm"
+          icon={<SaveIcon />}
           disabled={busy}
           onClick={() => void save()}
         >

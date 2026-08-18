@@ -613,11 +613,23 @@ class TeamRepository(TenantRepository):
         return config
 
     async def update_config(
-        self, config_id: uuid.UUID, *, name: str | None = None, description: str | None = None
+        self,
+        config_id: uuid.UUID,
+        *,
+        slug: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> TeamConfig | None:
         config = await self.get_config(config_id)
         if config is None:
             return None
+        if slug is not None:
+            normalized = validate_slug(slug)
+            if normalized != config.slug:
+                existing = await self.get_config_by_slug(normalized)
+                if existing is not None and existing.id != config.id:
+                    raise ValueError(f"Team slug '{normalized}' is already in use")
+                config.slug = normalized
         if name is not None:
             config.name = name
         if description is not None:
@@ -2104,6 +2116,7 @@ class UserVaultRepository(TenantRepository):
             existing.encrypted_value = encrypted_value
             existing.key_version = key_version
             await self.session.flush()
+            await self.session.refresh(existing)
             await self.audit(
                 action="user_vault.update",
                 resource_type="user_vault_entry",
@@ -2122,6 +2135,7 @@ class UserVaultRepository(TenantRepository):
         )
         self.session.add(row)
         await self.session.flush()
+        await self.session.refresh(row)
         await self.audit(
             action="user_vault.create",
             resource_type="user_vault_entry",

@@ -7,7 +7,7 @@ import { useState } from "react";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
-import { EyeIcon, EyeOffIcon } from "@/components/ui/icons";
+import { EyeIcon, EyeOffIcon, SignInIcon } from "@/components/ui/icons";
 import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
 import { keycloakResetCredentialsUrl } from "@/lib/auth/keycloak-public";
 import {
@@ -141,6 +141,7 @@ export function SignInDialog({
           type="submit"
           variant="accent"
           className="w-full"
+          icon={<SignInIcon />}
           disabled={busy || !username.trim() || !password}
         >
           {busy ? t("signingIn") : tCommon("signIn")}

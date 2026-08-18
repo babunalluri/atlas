@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Textarea } from "@/components/ui/Field";
+import { PlusIcon, RefreshIcon, TrashIcon } from "@/components/ui/icons";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   createLearning,
@@ -143,10 +144,10 @@ export function LearningsPanel() {
           />
         </div>
         <div className="flex gap-2 md:col-span-2">
-          <Button disabled={busy} onClick={() => refresh()}>
+          <Button disabled={busy} icon={<RefreshIcon />} onClick={() => refresh()}>
             Refresh
           </Button>
-          <Button variant="accent" disabled={busy} onClick={create}>
+          <Button variant="accent" disabled={busy} icon={<PlusIcon />} onClick={create}>
             Create learning
           </Button>
         </div>
@@ -173,7 +174,7 @@ export function LearningsPanel() {
               </pre>
             </div>
             <div className="flex items-start">
-              <Button variant="secondary" onClick={() => remove(row)}>
+              <Button variant="secondary" icon={<TrashIcon />} onClick={() => remove(row)}>
                 Delete
               </Button>
             </div>

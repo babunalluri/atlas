@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "@/i18n/navigation";
 
 import { Button } from "@/components/ui/Button";
+import { PlusIcon } from "@/components/ui/icons";
 import { Input, Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
@@ -186,6 +187,7 @@ export function OnboardingPanel() {
           </div>
           <Button
             variant="accent"
+            icon={<PlusIcon />}
             disabled={saving || !name.trim() || !slug.trim()}
             onClick={() => void onCreate()}
           >

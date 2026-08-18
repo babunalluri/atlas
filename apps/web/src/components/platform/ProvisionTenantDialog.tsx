@@ -5,6 +5,7 @@ import { useState } from "react";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Button } from "@/components/ui/Button";
 import { FieldHint, Input, Label } from "@/components/ui/Field";
+import { CloseIcon, PlusIcon } from "@/components/ui/icons";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   TimezoneSelect,
@@ -200,6 +201,7 @@ export function ProvisionTenantDialog({
             type="button"
             variant="secondary"
             size="sm"
+            icon={<CloseIcon />}
             disabled={busy}
             onClick={onClose}
           >
@@ -209,6 +211,7 @@ export function ProvisionTenantDialog({
             type="button"
             variant="accent"
             size="sm"
+            icon={<PlusIcon />}
             disabled={saveDisabled}
             onClick={() => void provision()}
           >

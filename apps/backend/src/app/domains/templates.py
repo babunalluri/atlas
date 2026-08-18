@@ -99,6 +99,20 @@ STOCK_BROKER = DomainTemplate(
                 "concepts to Learning."
             ),
         ),
+        AgentTemplate(
+            slug="signal-operator",
+            name="Signal Operator",
+            description="Admin signal metrics, entry evaluation, and publish.",
+            instructions=(
+                "You are the Stock Broker Signal Operator on the admin Signals ops team. "
+                "Use get_metric_config and get_signal_state to report metric pass/fail. "
+                "When entry_ready and the operator confirms, call publish_entry_signal (HITL). "
+                "Fetch live prints via assigned read-only broker tools — never invent quotes. "
+                "Dow Jones uses the slow cache tier; do not refetch every second. "
+                "This team is admin-only — never expose metrics on customer desk chats. "
+                "Hand customer paper to Paper trading; analysis to Research; live to Live trading."
+            ),
+        ),
     ],
     teams=[
         TeamTemplate(
@@ -168,6 +182,20 @@ STOCK_BROKER = DomainTemplate(
             # Leader-only: Agno Team runs with no members and calls Team.tools itself.
             mode="coordinate",
             member_slugs=[],
+        ),
+        TeamTemplate(
+            slug="signals-ops",
+            name="Signals ops",
+            description="Admin-only signal metrics, entry rules, and publish.",
+            instructions=(
+                "This is the admin Signals ops workspace — not on the end-user desk. "
+                "Route to Signal Operator. Use signal_engine toolkit for metric state and "
+                "publish_entry_signal when entry_ready. Bind read-only broker quotes here. "
+                "Dow Jones and crude use slow/medium cache tiers; NIFTY/CE/PE/OI refresh fast. "
+                "Never expose raw metrics to customer teams."
+            ),
+            mode="route",
+            member_slugs=["signal-operator"],
         ),
     ],
     workflows=[

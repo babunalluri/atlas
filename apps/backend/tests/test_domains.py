@@ -47,7 +47,9 @@ def test_stock_broker_pack_includes_research_and_auto_assign() -> None:
         "paper-trading",
         "live-trading",
         "research",
+        "signals-ops",
     }
+    assert "signals-ops" not in STOCK_BROKER_DESK_TEAMS
     # Research is leader-only: no member agent, so the team itself must carry the
     # tool-required rules and run in a mode that does not route to members.
     research = next(row for row in STOCK_BROKER.teams if row.slug == "research")
@@ -123,18 +125,20 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
                 select(WorkflowConfig).where(WorkflowConfig.tenant_id == tenant.id)
             )
         ).all()
-        assert len(agents) == 3
+        assert len(agents) == 4
         assert {row.slug for row in agents} == {
             "learning-guide",
             "paper-trader",
             "live-trader",
+            "signal-operator",
         }
-        assert len(teams) == 4
+        assert len(teams) == 5
         assert {row.slug for row in teams} == {
             "learning",
             "paper-trading",
             "live-trading",
             "research",
+            "signals-ops",
         }
         assert len(workflows) == 2
         assignments = (
@@ -196,7 +200,8 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
             "paper_flow",
             "learning",
         }
-        assert body["catalog"]["teams"] == 4
+        assert body["catalog"]["teams"] == 5
+        # signals-ops stays off customer desk and the metrics dashboard payload.
         assert [row["slug"] for row in body["chat_targets"]] == [
             "learning",
             "paper-trading",
@@ -206,6 +211,26 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
         assert body["broker_tools"] == []
         assert any(row["id"] == "broker_tools" for row in body["widgets"])
         assert body["desk_snapshot"] is None
+
+        admin_desk = await client.get(
+            "/admin/domains/desk",
+            headers={
+                "X-Dev-User-ID": "broker-admin",
+                "X-Dev-Org-ID": "org_stock_broker_dash",
+                "X-Dev-Org-Role": "org:admin",
+                "X-Dev-Tenant-Id": tenant_id,
+                "X-Dev-Role": "tenant_admin",
+            },
+        )
+        assert admin_desk.status_code == 200, admin_desk.text
+        desk_body = admin_desk.json()
+        assert [row["slug"] for row in desk_body["chat_targets"]] == [
+            "signals-ops",
+            "learning",
+            "paper-trading",
+            "live-trading",
+            "research",
+        ]
 
         snapshot = await client.get(
             "/admin/domains/dashboard",
@@ -552,14 +577,12 @@ async def test_customer_desk_includes_extra_assigned_team_by_name(domains_db):
             "paper-trading",
             "live-trading",
             "research",
-            "learning-copy",
         ]
         assert [row["name"] for row in body["chat_targets"]] == [
             "Learning",
             "Paper trading",
             "Live trading",
             "Research",
-            "Options lab",
         ]
         dashboard = await client.get(
             "/admin/domains/dashboard",

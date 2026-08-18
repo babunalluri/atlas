@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input, Label } from "@/components/ui/Field";
-import { TrashIcon } from "@/components/ui/icons";
+import { SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   deleteAdminUserVaultEntry,
   listAdminUserVault,
@@ -153,6 +153,7 @@ export function UserVaultSection({ userId }: { userId: string }) {
         <div className="flex items-end">
           <Button
             size="sm"
+            icon={<SaveIcon />}
             onClick={() => void onSave()}
             disabled={busy || loading}
           >

@@ -12,6 +12,8 @@ import {
 } from "@/components/ui/CatalogControls";
 import {
   CloneIcon,
+  CloseIcon,
+  PlusIcon,
   HistoryIcon,
   PencilIcon,
   TrashIcon,
@@ -319,6 +321,7 @@ export function WorkflowList({
           href="/admin/workflows/new"
           className={buttonClassName({ variant: "accent" })}
         >
+          <PlusIcon />
           Create
         </Link>
       </header>
@@ -457,7 +460,7 @@ export function WorkflowList({
                   /{versionsWorkflow.slug}
                 </p>
               </div>
-              <Button size="sm" variant="ghost" onClick={closeVersions}>
+              <Button size="sm" variant="ghost" icon={<CloseIcon />} onClick={closeVersions}>
                 Close
               </Button>
             </div>

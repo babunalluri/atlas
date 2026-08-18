@@ -380,3 +380,17 @@ async def test_restore_version_tenant_isolation(session, tenant_a, tenant_b):
     assert list(await teams_b.list_versions(config.id)) == []
     with pytest.raises(LookupError, match="Team not found"):
         await teams_b.restore_version(config.id, version.id)
+
+
+@pytest.mark.asyncio
+async def test_team_update_config_slug(session, tenant_a):
+    session.info["tenant_id"] = tenant_a.tenant_id
+    repo = TeamRepository(session, tenant_a)
+    config = await repo.create_config(slug="team-ex5ym4", name="Signal")
+    updated = await repo.update_config(config.id, slug="signals-ops")
+    assert updated is not None
+    assert updated.slug == "signals-ops"
+
+    other = await repo.create_config(slug="learning", name="Learning")
+    with pytest.raises(ValueError, match="already in use"):
+        await repo.update_config(other.id, slug="signals-ops")

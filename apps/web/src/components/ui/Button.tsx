@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, PropsWithChildren } from "react";
+import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -51,12 +51,15 @@ export function Button({
   className,
   variant = "primary",
   size = "md",
+  icon,
   ...props
 }: PropsWithChildren<
   ButtonHTMLAttributes<HTMLButtonElement> & {
     variant?: Variant;
     size?: Size;
     className?: string;
+    /** Optional leading icon (before label). */
+    icon?: ReactNode;
   }
 >) {
   return (
@@ -64,6 +67,7 @@ export function Button({
       className={buttonClassName({ variant, size, className })}
       {...props}
     >
+      {icon ? <span className="inline-flex shrink-0">{icon}</span> : null}
       {children}
     </button>
   );

@@ -4,6 +4,7 @@ import { useTranslations } from "next-intl";
 import { useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { CloseIcon, CopyIcon, EyeIcon, EyeOffIcon, SendIcon } from "@/components/ui/icons";
 import { Input, Label } from "@/components/ui/Field";
 import { extractTextContent, parseSseChunk } from "@/lib/agentos/sse";
 import type { PublicApiCatalogRow } from "@/lib/api/public-api-catalog";
@@ -311,6 +312,7 @@ export function PublicApiTestBed({
         />
         <Button
           variant="accent"
+          icon={<SendIcon />}
           disabled={streaming || catalogLoading || catalog.length === 0}
           onClick={() => void run()}
         >
@@ -331,12 +333,13 @@ export function PublicApiTestBed({
         <Button
           size="sm"
           variant="secondary"
+          icon={showCurl ? <EyeOffIcon /> : <EyeIcon />}
           onClick={() => setShowCurl((open) => !open)}
         >
           {showCurl ? "Hide cURL" : "Show cURL"}
         </Button>
         {showCurl ? (
-          <Button size="sm" variant="secondary" onClick={() => void copyCurl()}>
+          <Button size="sm" variant="secondary" icon={<CopyIcon />} onClick={() => void copyCurl()}>
             {copiedCurl ? "Copied" : "Copy cURL"}
           </Button>
         ) : null}
@@ -344,6 +347,7 @@ export function PublicApiTestBed({
           <Button
             size="sm"
             variant="ghost"
+            icon={<CloseIcon />}
             onClick={() => abortRef.current?.abort()}
           >
             {tCommon("cancel")}

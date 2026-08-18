@@ -11,7 +11,7 @@ A branded platform for configuring and operating tenant-isolated Agno agents. Th
 - Mutating tools pause for approval and can be resolved only by tenant/platform admins.
 - Atlas schedules pin published target versions and execute through the same tenant-aware factories as interactive runs.
 
-See [docs/architecture.md](docs/architecture.md), [docs/auth.md](docs/auth.md), [docs/aws-deployment.md](docs/aws-deployment.md), and [docs/oci-deployment.md](docs/oci-deployment.md).
+See [docs/architecture.md](docs/architecture.md), [docs/auth.md](docs/auth.md), [docs/aws-deployment.md](docs/aws-deployment.md), [docs/oci-deployment.md](docs/oci-deployment.md), and [docs/oci-free-tier-pilot.md](docs/oci-free-tier-pilot.md) (non-prod $0 OCI pilot).
 
 ## Repository layout
 

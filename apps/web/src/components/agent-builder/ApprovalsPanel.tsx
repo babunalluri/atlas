@@ -5,6 +5,7 @@ import { useState, type CSSProperties } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { CheckIcon, CloseIcon } from "@/components/ui/icons";
 import { resolveApproval } from "@/lib/api/admin";
 import type { ApprovalRequest } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -129,6 +130,7 @@ export function ApprovalsPanel({
                   <div className="flex gap-2">
                     <Button
                       variant="accent"
+                      icon={<CheckIcon />}
                       disabled={busyId === item.id}
                       onClick={() => void decide(item.id, "approved")}
                     >
@@ -136,6 +138,7 @@ export function ApprovalsPanel({
                     </Button>
                     <Button
                       variant="danger"
+                      icon={<CloseIcon />}
                       disabled={
                         busyId === item.id || !(reasons[item.id] ?? "").trim()
                       }

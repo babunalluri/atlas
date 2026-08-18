@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/Button";
+import { CloseIcon, TrashIcon } from "@/components/ui/icons";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 
 function deleteUserConfirmMessage(user: {
@@ -37,6 +38,7 @@ export function DeleteUserDialog({
           type="button"
           variant="secondary"
           size="sm"
+          icon={<CloseIcon />}
           disabled={busy}
           onClick={onClose}
         >
@@ -46,6 +48,7 @@ export function DeleteUserDialog({
           type="button"
           variant="danger"
           size="sm"
+          icon={<TrashIcon />}
           disabled={busy}
           onClick={onConfirm}
         >

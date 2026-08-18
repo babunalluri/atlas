@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Input, Label, Textarea } from "@/components/ui/Field";
+import { CloseIcon, PencilIcon, PlusIcon, RefreshIcon, SaveIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createUserMemory,
   deleteUserMemory,
@@ -131,12 +132,12 @@ export function MemoriesPanel({
           />
         </div>
         <div className="flex items-end">
-          <Button disabled={busy} onClick={() => refresh()}>
+          <Button disabled={busy} icon={<RefreshIcon />} onClick={() => refresh()}>
             {busy ? "Loading…" : "Load"}
           </Button>
         </div>
         <div className="flex items-end">
-          <Button variant="secondary" disabled={busy || !userId.trim()} onClick={optimize}>
+          <Button variant="secondary" disabled={busy || !userId.trim()} icon={<RefreshIcon />} onClick={optimize}>
             Optimize
           </Button>
         </div>
@@ -157,6 +158,7 @@ export function MemoriesPanel({
           {editingId ? (
             <Button
               variant="secondary"
+              icon={<CloseIcon />}
               onClick={() => {
                 setEditingId(null);
                 setDraft("");
@@ -165,7 +167,12 @@ export function MemoriesPanel({
               {tCommon("cancel")}
             </Button>
           ) : null}
-          <Button variant="accent" disabled={busy} onClick={save}>
+          <Button
+            variant="accent"
+            disabled={busy}
+            icon={editingId ? <SaveIcon /> : <PlusIcon />}
+            onClick={save}
+          >
             {editingId ? "Update" : "Create"}
           </Button>
         </div>
@@ -186,6 +193,7 @@ export function MemoriesPanel({
             <div className="flex gap-2">
               <Button
                 variant="secondary"
+                icon={<PencilIcon />}
                 onClick={() => {
                   setEditingId(memory.id);
                   setDraft(memory.memory);
@@ -193,7 +201,7 @@ export function MemoriesPanel({
               >
                 Edit
               </Button>
-              <Button variant="secondary" onClick={() => remove(memory)}>
+              <Button variant="secondary" icon={<TrashIcon />} onClick={() => remove(memory)}>
                 Delete
               </Button>
             </div>

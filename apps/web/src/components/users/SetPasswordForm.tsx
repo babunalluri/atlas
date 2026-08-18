@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { FieldHint, Input, Label } from "@/components/ui/Field";
+import { SaveIcon } from "@/components/ui/icons";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -114,6 +115,7 @@ export function SetPasswordForm({
         type="button"
         variant="accent"
         size="sm"
+        icon={<SaveIcon />}
         disabled={busy || !password || !confirm}
         onClick={() => void save()}
       >

@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EditorActions } from "@/components/ui/EditorActions";
 import { Input, Label } from "@/components/ui/Field";
-import { TrashIcon } from "@/components/ui/icons";
+import { CloseIcon, CopyIcon, PlusIcon, TrashIcon } from "@/components/ui/icons";
 import {
   createServiceAccount,
   revokeServiceAccount,
@@ -220,7 +220,7 @@ export function ServiceAccountEditor({
                 onChange={(event) => setExpiresAt(event.target.value)}
               />
             </div>
-            <Button type="submit" variant="accent" disabled={busy !== null}>
+            <Button type="submit" variant="accent" icon={<PlusIcon />} disabled={busy !== null}>
               {busy === "create" ? "Issuing…" : "Issue token"}
             </Button>
           </div>
@@ -321,10 +321,10 @@ export function ServiceAccountEditor({
             <Button
               variant="danger"
               size="sm"
+              icon={<TrashIcon />}
               disabled={busy !== null}
               onClick={() => void onRevoke()}
             >
-              <TrashIcon />
               {busy === "revoke" ? "Revoking…" : "Revoke"}
             </Button>
           ) : null}
@@ -345,6 +345,7 @@ export function ServiceAccountEditor({
                 type="button"
                 variant="accent"
                 size="sm"
+                icon={<CopyIcon />}
                 onClick={() => void copyToken()}
               >
                 {copied ? "Copied" : "Copy"}
@@ -353,6 +354,7 @@ export function ServiceAccountEditor({
                 type="button"
                 variant="ghost"
                 size="sm"
+                icon={<CloseIcon />}
                 onClick={() => {
                   setCreatedToken(null);
                   setCopied(false);

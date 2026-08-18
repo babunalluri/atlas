@@ -32,3 +32,14 @@ async def get_domain_dashboard(
     return await DomainDashboardService(session, context).dashboard(
         days=days, desk_snapshot=desk_snapshot
     )
+
+
+@router.get("/desk")
+async def get_admin_desk(
+    context: AdminContext,
+    session: TenantSession,
+    desk_snapshot: bool = Query(False),
+) -> dict[str, Any]:
+    return await DomainDashboardService(session, context).admin_desk(
+        desk_snapshot=desk_snapshot
+    )

@@ -75,6 +75,7 @@ from app.api import workflow_access as workflow_access_api
 from app.api import customers as customers_api
 from app.api import domains as domains_api
 from app.api import desk as desk_api
+from app.api import signals as signals_api
 from app.api import users as users_api
 from app.auth.dependencies import require_tenant
 from app.auth.middleware import TenantAuthMiddleware
@@ -94,6 +95,7 @@ from app.db.session import SessionFactory
 from app.observability.repository import TraceRepository
 from app.observability.tracing import redact
 from app.scheduler.service import SchedulerWorker
+from app.domains.signal_engine_worker import SignalEngineWorker
 from app.tenancy.context import current_tenant, set_tenant_context
 
 logger = get_logger(__name__)
@@ -574,11 +576,15 @@ def create_app() -> FastAPI:
         await get_redis()
         await _configure_redis_run_cancellation()
         worker = SchedulerWorker()
+        signal_worker = SignalEngineWorker()
         if settings.scheduler_enabled and settings.environment.lower() != "test":
             worker.start()
+        if settings.signal_engine_ticker_enabled and settings.environment.lower() != "test":
+            signal_worker.start()
         try:
             yield
         finally:
+            await signal_worker.stop()
             await worker.stop()
             await close_redis()
 
@@ -616,6 +622,7 @@ def create_app() -> FastAPI:
     base_app.include_router(interfaces_api.router)
     base_app.include_router(onboarding_api.router)
     base_app.include_router(domains_api.router)
+    base_app.include_router(signals_api.router)
     base_app.include_router(desk_api.router)
     base_app.include_router(workspace_api.router)
     base_app.include_router(schedules_api.router)

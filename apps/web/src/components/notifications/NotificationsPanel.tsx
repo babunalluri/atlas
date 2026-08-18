@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { SendIcon } from "@/components/ui/icons";
 import { Input, Label, Textarea } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import { listSentNotifications, sendOrgNotification } from "@/lib/api/admin";
@@ -208,6 +209,7 @@ export function NotificationsPanel({
             <Button
               variant="accent"
               size="sm"
+              icon={<SendIcon />}
               onClick={() => void onSend()}
               disabled={busy || selectable.length === 0}
             >

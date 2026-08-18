@@ -5,6 +5,8 @@ import { useSession } from "next-auth/react";
 import { useLocale, useTranslations } from "next-intl";
 
 import { UserIdentityChip } from "@/components/auth/UserIdentityChip";
+import { Button } from "@/components/ui/Button";
+import { SignOutIcon } from "@/components/ui/icons";
 import {
   sessionLooksSignedIn,
   visibleAuthSession,
@@ -45,13 +47,15 @@ export function AuthControls({
   return (
     <div className="flex min-w-0 items-center gap-2">
       <UserIdentityChip user={session?.user} />
-      <button
+      <Button
         type="button"
+        variant="secondary"
+        size="sm"
+        icon={<SignOutIcon />}
         onClick={() => void signOutFederated(`/${locale}`)}
-        className="rounded-md border border-line bg-raised px-3 py-2 text-sm font-medium text-ink"
       >
         {t("signOut")}
-      </button>
+      </Button>
     </div>
   );
 }

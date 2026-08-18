@@ -3,6 +3,7 @@
 import { useEffect, useId, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { PlusIcon } from "@/components/ui/icons";
 import { Input, Label } from "@/components/ui/Field";
 
 const DEFAULT_PRESETS = [1_000, 5_000, 10_000, 50_000];
@@ -128,7 +129,11 @@ export function GrantCreditsForm({
             placeholder="e.g. Welcome bonus, support adjustment"
           />
         </div>
-        <Button disabled={busy || disabled} onClick={() => void submit()}>
+        <Button
+          icon={<PlusIcon />}
+          disabled={busy || disabled}
+          onClick={() => void submit()}
+        >
           {busy ? "Granting…" : label}
         </Button>
       </div>

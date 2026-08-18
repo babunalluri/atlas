@@ -12,21 +12,46 @@ describe("workspace profile copy", () => {
     expect(hint).not.toMatch(/groww/i);
     expect(hint).not.toMatch(/kite/i);
     expect(en.common.profile.settings).toBe("Your settings");
+    expect(en.common.settings.title).toBe("Settings");
   });
 
-  it("does not hardcode broker-only fields in the profile panel", () => {
+  it("links settings gear to the vault page instead of a profile dropdown", () => {
     const source = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "WorkspaceProfileMenu.tsx"),
       "utf8",
     );
     expect(source).not.toMatch(/Groww|GrowwTest|Kite/i);
-    expect(source).toContain("listUserVault");
-    expect(source).toContain("upsertUserVaultEntry");
+    expect(source).not.toContain("listUserVault");
+    expect(source).toContain("settings.title");
+    expect(source).toContain("/settings");
+    expect(source).toContain("SettingsGearIcon");
+    expect(source).not.toContain("aria-haspopup");
+    expect(source).not.toContain("LanguageSwitcher");
+  });
+
+  it("keeps sign out on the main header bar and language in settings", () => {
+    const barSource = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "ChatAccountBar.tsx"),
+      "utf8",
+    );
+    expect(barSource).not.toContain("LanguageSwitcher");
+    expect(barSource).toContain("signOutFederated");
+    expect(barSource).toContain('t("signOut")');
+
+    const settingsSource = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "WorkspaceSettingsPage.tsx"),
+      "utf8",
+    );
+    expect(settingsSource).toContain("LanguageSwitcher");
+    expect(settingsSource).toContain("settings.preferences");
   });
 
   it("lets users overwrite a saved secret without reading the stored value", () => {
     const source = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "WorkspaceProfileMenu.tsx"),
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../vault/UserSelfVaultEditor.tsx",
+      ),
       "utf8",
     );
     expect(source).toContain("beginUpdate");

@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { PlayIcon } from "@/components/ui/icons";
 import { useSurfaceTheme } from "@/components/layout/ThemeToggle";
 import { cn } from "@/lib/utils";
 
@@ -94,7 +95,12 @@ export function TradingViewChartWidget() {
           placeholder="NSE:NIFTY"
           aria-label="Chart symbol"
         />
-        <Button size="sm" variant="secondary" onClick={() => loadSymbol(draft)}>
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={<PlayIcon />}
+          onClick={() => loadSymbol(draft)}
+        >
           Load
         </Button>
         <div className="flex gap-1">

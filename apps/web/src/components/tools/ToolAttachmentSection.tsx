@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { MinusIcon } from "@/components/ui/icons";
 import { Input } from "@/components/ui/Field";
 import {
   TOOL_CATALOG,
@@ -293,6 +294,7 @@ export function ToolAttachmentSection({
                   <Button
                     size="sm"
                     variant="ghost"
+                    icon={<MinusIcon />}
                     onClick={() => removeTool(tool)}
                   >
                     Remove

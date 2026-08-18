@@ -4,6 +4,12 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  EyeIcon,
+  EyeOffIcon,
+} from "@/components/ui/icons";
 import { Input } from "@/components/ui/Field";
 import { updateEndCustomer } from "@/lib/api/admin";
 import type { EndCustomer } from "@/lib/api/types";
@@ -169,6 +175,9 @@ export function CustomerList({
                       type="button"
                       variant="ghost"
                       size="sm"
+                      icon={
+                        customer.isActive ? <EyeOffIcon /> : <EyeIcon />
+                      }
                       disabled={busyIds.has(customer.id)}
                       onClick={() => void toggleActive(customer)}
                     >
@@ -192,6 +201,7 @@ export function CustomerList({
               type="button"
               variant="ghost"
               size="sm"
+              icon={<ChevronLeftIcon />}
               disabled={safePage <= 1}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
             >
@@ -201,6 +211,7 @@ export function CustomerList({
               type="button"
               variant="ghost"
               size="sm"
+              icon={<ChevronRightIcon />}
               disabled={safePage >= totalPages}
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             >

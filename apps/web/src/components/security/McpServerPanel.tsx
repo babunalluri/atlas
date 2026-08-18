@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { EyeIcon, EyeOffIcon } from "@/components/ui/icons";
 import {
   setMcpServerEnabled,
   type McpServerSettings,
@@ -62,6 +63,7 @@ export function McpServerPanel({
           </Badge>
           <Button
             variant={settings.enabled ? "ghost" : "accent"}
+            icon={settings.enabled ? <EyeOffIcon /> : <EyeIcon />}
             disabled={busy}
             onClick={toggle}
           >
