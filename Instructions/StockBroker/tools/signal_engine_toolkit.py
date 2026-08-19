@@ -5,11 +5,10 @@ metrics (~8×/sec SSE on the admin desk; broker quotes ~2×/sec), evaluates BUY 
 and can fan-out in-app notifications to all users when entry passes.
 
 Data sources (configure in tool settings):
-- NIFTY / ATM / CE / PE — assigned broker toolkit (`get_ltp` / `get_quote`) on this team
-- OI — NIFTY FUT quote (Kite full quote)
-- ADX — computed from supplied OHLC closes (pass `ohlc_closes` or bind OHLC tool)
-- CrudeOil — MCX symbol via Kite (`MCX:CRUDEOILM`)
-- DowJones — set once via `dow_change_pct` in settings (slow tier; no per-second fetch)
+- NIFTY / ATM / CE / PE — **Kite** toolkit (`get_ltp` / `get_quote`) bound on Signals ops
+- OI / ADX / RSI — Kite full quote + `get_historical_candles`
+- CrudeOil / VIX — Kite MCX/NSE symbols
+- Global indices — backend Yahoo slow tier (~1 h); optional manual `dow_change_pct`
 
 Extend metrics later via `metrics_json` in settings (array of metric defs).
 """

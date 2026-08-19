@@ -7,7 +7,7 @@ import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAut
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Field";
-import { PauseIcon, PlayIcon, RefreshIcon, BellIcon } from "@/components/ui/icons";
+import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon } from "@/components/ui/icons";
 import {
   getSignalState,
   publishSignalEntry,
@@ -21,59 +21,61 @@ import { streamSignalState } from "@/lib/api/signals-stream";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
 
-/** Three columns: options chain · spot/vol · macro filters. */
-const METRIC_COLUMN_ORDER = [
-  [
-    "atm",
-    "ce",
-    "pe",
-    "ce_oi",
-    "pe_oi",
-    "oi",
-    "oi_pct_chg",
-  ],
-  [
-    "spot_chg",
-    "spot_vs_open",
-    "fut_basis",
-    "iv",
-    "ivp",
-    "iv_chg",
-    "pcr",
-    "max_pain",
-  ],
-  [
-    "adx",
-    "rsi",
-    "vix_chg",
-    "india_vix",
-    "dow_jones",
-    "crude_oil",
-    "fii_net",
-  ],
+/** Trade Desk Checklist category order (matches backend). */
+const CHECKLIST_CATEGORY_ORDER = [
+  "Data & Charts Watch",
+  "Timing & No-Trade Rules",
+  "Levels & Technicals",
+  "Global Markets Watch",
+  "Stock Big-Move Watch",
+  "Trade Discipline Check",
 ] as const;
 
-function layoutMetricColumns(metrics: SignalMetricRow[]): SignalMetricRow[][] {
-  const byId = new Map(metrics.map((row) => [row.id, row]));
-  const pick = (ids: readonly string[]) =>
-    ids
-      .map((id) => byId.get(id))
-      .filter((row): row is SignalMetricRow => row != null);
-
-  const columns = METRIC_COLUMN_ORDER.map((ids) => pick(ids));
-  const placed = new Set(columns.flatMap((col) => col.map((row) => row.id)));
-
+function groupMetricsByCategory(
+  metrics: SignalMetricRow[],
+): { category: string; rows: SignalMetricRow[]; passing: string }[] {
+  const buckets = new Map<string, SignalMetricRow[]>();
   for (const row of metrics) {
-    if (placed.has(row.id)) continue;
+    const cat = row.category?.trim() || "Other";
+    const list = buckets.get(cat) ?? [];
+    list.push(row);
+    buckets.set(cat, list);
+  }
+
+  const ordered: string[] = [
+    ...CHECKLIST_CATEGORY_ORDER.filter((cat) => buckets.has(cat)),
+    ...[...buckets.keys()].filter(
+      (cat) => !(CHECKLIST_CATEGORY_ORDER as readonly string[]).includes(cat),
+    ),
+  ];
+
+  return ordered.map((category) => {
+    const rows = [...(buckets.get(category) ?? [])].sort(
+      (a, b) => (a.check_no ?? 999) - (b.check_no ?? 999),
+    );
+    const gated = rows.filter((r) => r.gates_entry);
+    const passing =
+      gated.length === 0
+        ? `${rows.length} checks`
+        : `${gated.filter((r) => r.passed === true).length}/${gated.length} gated pass`;
+    return { category, rows, passing };
+  });
+}
+
+/** Split rows evenly across three columns (same density as the legacy board). */
+function splitMetricColumns(
+  rows: SignalMetricRow[],
+  columnCount = 3,
+): SignalMetricRow[][] {
+  const columns: SignalMetricRow[][] = Array.from({ length: columnCount }, () => []);
+  for (const row of rows) {
     let shortest = 0;
-    for (let i = 1; i < columns.length; i += 1) {
+    for (let i = 1; i < columnCount; i += 1) {
       if (columns[i].length < columns[shortest].length) shortest = i;
     }
     columns[shortest].push(row);
-    placed.add(row.id);
   }
-
-  return columns;
+  return columns.filter((col) => col.length > 0);
 }
 
 const CONFIG_OVERRIDE_METRICS: Record<
@@ -82,8 +84,10 @@ const CONFIG_OVERRIDE_METRICS: Record<
 > = {
   pcr: "pcr",
   max_pain: "max_pain",
+  max_pain_check: "max_pain",
   ivp: "ivp",
   india_vix: "india_vix",
+  india_vix_level: "india_vix",
   dow_jones: "dow_change_pct",
   oi_pct_chg: "oi_pct_chg",
   iv_chg: "iv_chg",
@@ -94,6 +98,148 @@ function formatValue(value: number | null | undefined) {
   if (value === null || value === undefined) return "—";
   if (Number.isInteger(value)) return String(value);
   return value.toFixed(2);
+}
+
+type ValueTick = "up" | "down" | null;
+
+const TICK_STICKY_MS = 3_000;
+
+function ValueTickMark({ tick }: { tick: "up" | "down" }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 10 10"
+      className={cn(
+        "size-2.5 shrink-0",
+        tick === "up" ? "text-teal" : "text-rose",
+      )}
+    >
+      {tick === "up" ? (
+        <path d="M5 1.5 L8.5 7 H1.5 Z" fill="currentColor" />
+      ) : (
+        <path d="M5 8.5 L1.5 3 H8.5 Z" fill="currentColor" />
+      )}
+    </svg>
+  );
+}
+
+function LiveMetricValue({
+  value,
+  tick,
+  passed,
+  gatesEntry,
+}: {
+  value: number | null | undefined;
+  tick: ValueTick;
+  passed: boolean | null | undefined;
+  gatesEntry?: boolean;
+}) {
+  const formatted = formatValue(value);
+  if (formatted === "—") {
+    return <span className="tabular-nums text-slate-muted">—</span>;
+  }
+
+  const movementTick = tick === "up" || tick === "down" ? tick : null;
+  const showFailMark = movementTick === null && gatesEntry && passed === false;
+  const showPassMark = movementTick === null && gatesEntry && passed === true;
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center justify-end gap-0.5 tabular-nums font-semibold transition-colors duration-300",
+        movementTick === "up" && "text-teal",
+        movementTick === "down" && "text-rose",
+        showPassMark && "text-teal",
+        showFailMark && "text-rose",
+        !movementTick && !showPassMark && !showFailMark && "text-ink",
+      )}
+    >
+      {movementTick ? <ValueTickMark tick={movementTick} /> : null}
+      {showFailMark ? <ValueTickMark tick="down" /> : null}
+      {showPassMark ? (
+        <svg
+          aria-hidden
+          viewBox="0 0 10 10"
+          className="size-2.5 shrink-0 text-teal"
+        >
+          <path d="M5 1.5 L8.5 7 H1.5 Z" fill="currentColor" />
+        </svg>
+      ) : null}
+      <span>{formatted}</span>
+    </span>
+  );
+}
+
+/** Track up/down ticks; sticky 3s after each change so arrows stay visible. */
+function useStickyValueTicks(metrics: SignalMetricRow[]): Map<string, ValueTick> {
+  const prevValuesRef = useRef<Map<string, number>>(new Map());
+  const stickyRef = useRef<Map<string, { tick: "up" | "down"; until: number }>>(
+    new Map(),
+  );
+  const [generation, setGeneration] = useState(0);
+
+  useEffect(() => {
+    const now = Date.now();
+    let moved = false;
+
+    for (const row of metrics) {
+      const cur = row.value;
+      if (cur == null || typeof cur !== "number" || Number.isNaN(cur)) {
+        continue;
+      }
+      const prev = prevValuesRef.current.get(row.id);
+      if (prev !== undefined && cur !== prev) {
+        stickyRef.current.set(row.id, {
+          tick: cur > prev ? "up" : "down",
+          until: now + TICK_STICKY_MS,
+        });
+        moved = true;
+      }
+      prevValuesRef.current.set(row.id, cur);
+    }
+
+    for (const [id, entry] of stickyRef.current) {
+      if (entry.until <= now) {
+        stickyRef.current.delete(id);
+        moved = true;
+      }
+    }
+
+    if (moved) {
+      setGeneration((g) => g + 1);
+    }
+
+    const timer = window.setInterval(() => {
+      const ts = Date.now();
+      let expired = false;
+      for (const [id, entry] of stickyRef.current) {
+        if (entry.until <= ts) {
+          stickyRef.current.delete(id);
+          expired = true;
+        }
+      }
+      if (expired) {
+        setGeneration((g) => g + 1);
+      }
+    }, 400);
+
+    return () => window.clearInterval(timer);
+  }, [metrics]);
+
+  return useMemo(() => {
+    const now = Date.now();
+    const out = new Map<string, ValueTick>();
+    for (const row of metrics) {
+      const sticky = stickyRef.current.get(row.id);
+      if (sticky && sticky.until > now) {
+        out.set(row.id, sticky.tick);
+      } else {
+        out.set(row.id, null);
+      }
+    }
+    void generation;
+    return out;
+  }, [metrics, generation]);
 }
 
 function formatEvaluatedAt(epoch: number | undefined): string | null {
@@ -189,7 +335,7 @@ function BuySignalBanner({
       ? `${state.passed}/${state.evaluable} rules passing`
       : "Loading buy signal…");
   const statusLine = publishMsg ?? note;
-  const canNotify = entryReady && engineEnabled && !publishing;
+  const canNotify = !publishing;
 
   return (
     <div
@@ -230,11 +376,11 @@ function BuySignalBanner({
           {statusLine}
         </span>
         <Button
-          variant={tone === "ready" ? "accent" : "secondary"}
+          variant="accent"
           size="icon"
           className="shrink-0"
           icon={<BellIcon />}
-          disabled={!canNotify || publishing}
+          disabled={!canNotify}
           aria-label={
             publishing
               ? "Sending notification"
@@ -243,11 +389,9 @@ function BuySignalBanner({
           title={
             publishing
               ? "Sending notification…"
-              : !engineEnabled
-                ? "Start the engine to notify users"
-                : !entryReady
-                  ? "All evaluable rules must pass before notifying"
-                  : "Notify all users"
+              : entryReady
+                ? "Notify all users — entry rules pass"
+                : "Notify all users with current signal snapshot"
           }
           onClick={onPublish}
         />
@@ -310,10 +454,12 @@ function MetricTable({
   rows,
   config,
   patchConfig,
+  valueTicks,
 }: {
   rows: SignalMetricRow[];
   config: SignalEngineAdminConfig | null;
   patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
+  valueTicks: Map<string, ValueTick>;
 }) {
   if (rows.length === 0) return null;
 
@@ -325,7 +471,7 @@ function MetricTable({
             <th className="px-2 py-2 text-left font-medium">Metric</th>
             <th className="px-2 py-2 text-right font-medium">Value</th>
             <th className="px-2 py-2 text-left font-medium">Target</th>
-            <th className="w-[4.25rem] min-w-[4.25rem] px-1 py-2 text-center font-medium">
+            <th className="w-[4.75rem] min-w-[4.75rem] px-1 py-2 text-center font-medium">
               Status
             </th>
           </tr>
@@ -344,6 +490,11 @@ function MetricTable({
                 title={row.hint}
               >
                 <td className="max-w-[5.5rem] truncate px-2 py-1.5 font-medium">
+                  {row.check_no ? (
+                    <span className="mr-1 text-[10px] text-slate-muted tnum">
+                      {row.check_no}.
+                    </span>
+                  ) : null}
                   {row.label}
                 </td>
                 <td className="whitespace-nowrap px-2 py-1.5 text-right tnum">
@@ -355,18 +506,28 @@ function MetricTable({
                       patchConfig={patchConfig}
                     />
                   ) : (
-                    <span className="tabular-nums">{formatValue(row.value)}</span>
+                    <LiveMetricValue
+                      value={row.value}
+                      tick={valueTicks.get(row.id) ?? null}
+                      passed={row.passed}
+                      gatesEntry={row.gates_entry}
+                    />
                   )}
                 </td>
                 <td className="max-w-[6.5rem] truncate px-2 py-1.5 text-slate-muted">
                   {row.target}
                 </td>
-                <td className="w-[4.25rem] min-w-[4.25rem] px-1 py-1.5 text-center">
+                <td className="w-[4.75rem] min-w-[4.75rem] px-1 py-1.5 text-center">
                   <Badge
                     tone={statusTone(row.passed)}
-                    dot
-                    className="inline-flex w-[3.5rem] justify-center whitespace-nowrap px-1 py-0.5 text-[9px]"
+                    dot={row.passed == null}
+                    className="inline-flex min-w-[4rem] justify-center gap-1 whitespace-nowrap px-1 py-0.5 text-[9px]"
                   >
+                    {row.passed === true ? (
+                      <CheckIcon className="size-2.5 shrink-0" />
+                    ) : row.passed === false ? (
+                      <CloseIcon className="size-2.5 shrink-0" />
+                    ) : null}
                     {row.passed === true
                       ? "Pass"
                       : row.passed === false
@@ -416,18 +577,21 @@ export function SignalMetricsPanel() {
   const failingRules = useMemo(
     () =>
       metrics
-        .filter((row) => row.passed === false)
-        .map((row) => row.label),
+        .filter((row) => row.gates_entry && row.passed === false)
+        .map((row) =>
+          row.check_no ? `#${row.check_no} ${row.label}` : row.label,
+        ),
     [metrics],
   );
   const atmHint = useMemo(() => {
     const atm = metrics.find((row) => row.id === "atm")?.value;
     return atm != null ? Math.round(atm) : null;
   }, [metrics]);
-  const metricColumns = useMemo(
-    () => layoutMetricColumns(metrics),
+  const metricGroups = useMemo(
+    () => groupMetricsByCategory(metrics),
     [metrics],
   );
+  const valueTicks = useStickyValueTicks(metrics);
 
   const refreshOnce = useCallback(async () => {
     try {
@@ -705,17 +869,28 @@ export function SignalMetricsPanel() {
             Waiting for signal stream…
           </p>
         ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {metricColumns.map((column, index) => (
-              <div
-                key={`metric-col-${index}`}
-                className="min-w-0 overflow-hidden rounded-lg border border-line bg-white/60"
-              >
-                <MetricTable
-                  rows={column}
-                  config={config}
-                  patchConfig={patchConfig}
-                />
+          <div className="space-y-4">
+            {metricGroups.map(({ category, rows, passing }) => (
+              <div key={category} className="min-w-0">
+                <div className="mb-2 flex items-baseline justify-between gap-2 px-1">
+                  <h3 className="text-sm font-semibold text-ink">{category}</h3>
+                  <span className="shrink-0 text-xs text-slate-muted">{passing}</span>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {splitMetricColumns(rows).map((column, index) => (
+                    <div
+                      key={`${category}-col-${index}`}
+                      className="min-w-0 overflow-hidden rounded-lg border border-line bg-white/60"
+                    >
+                      <MetricTable
+                        rows={column}
+                        config={config}
+                        patchConfig={patchConfig}
+                        valueTicks={valueTicks}
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
@@ -724,8 +899,8 @@ export function SignalMetricsPanel() {
 
       {state ? (
         <p className="mt-2 shrink-0 text-xs text-slate-muted">
-          {metrics.length} metrics in 3 columns · stream {state.poll_ms}ms ·
-          broker {state.broker_poll_ms ?? 500}ms
+          {metrics.length} checklist metrics · 3 columns per group · stream{" "}
+          {state.poll_ms}ms · broker {state.broker_poll_ms ?? 500}ms
         </p>
       ) : null}
     </section>

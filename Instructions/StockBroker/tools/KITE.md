@@ -58,12 +58,16 @@ Instrument ids for quotes: `NSE:INFY`, `NFO:NIFTY25APRFUT` (comma-separated).
 
 ## Signals ops (admin desk)
 
-Kite is the **recommended** broker for the signal engine (full quote + OI + MCX crude + India VIX).
+Kite is **required** for the signal engine (full quote + OI + MCX crude + India VIX + historical candles).
 
 1. Allowlist `api.kite.trade`.
 2. Publish `kite_toolkit.py` in Tool Builder.
-3. Bind on **`signals-ops`** team (read-only: `get_quote`, `get_ltp`, `get_ohlc`).
-4. Credential/settings: `api_key`, `api_secret`, daily `access_token` (via `create_session`).
+3. Bind on **`signals-ops`** team only (read-only: `get_quote`, `get_ltp`, `get_ohlc`, **`get_historical_candles`**).
+4. Credential/settings: `api_key`, `api_secret`, daily `access_token` (via `create_session` or `scripts/kite_get_access_token.py`).
+
+Global indices (Dow, Nikkei, etc.) are fetched by the backend Yahoo slow tier — **no Yahoo/yfinance tool binding** on the team.
+
+**Do not** bind Groww on Signals ops when using Kite-only setup.
 
 **Example signal setup symbols (adjust expiry/strike to current series):**
 

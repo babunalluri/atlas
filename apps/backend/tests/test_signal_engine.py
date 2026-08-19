@@ -22,6 +22,7 @@ from app.domains.signal_engine import (
     _round_strike,
     evaluate_signal_state,
 )
+from app.domains.trade_desk_checklist import CHECKLIST_CATEGORIES, CHECKLIST_ITEM_COUNT
 
 
 def test_round_strike_nifty() -> None:
@@ -77,22 +78,17 @@ def test_engine_enabled_from_settings() -> None:
     assert off.to_admin_dict()["engine_enabled"] is False
 
 
-def test_default_metrics_count() -> None:
-    assert len(DEFAULT_METRICS) == 22
+def test_trade_desk_checklist_metrics() -> None:
+    assert len(DEFAULT_METRICS) >= CHECKLIST_ITEM_COUNT
+    assert CHECKLIST_ITEM_COUNT == 115
+    assert len(CHECKLIST_CATEGORIES) == 6
     ids = {row["id"] for row in DEFAULT_METRICS}
-    assert "dow_jones" in ids
     assert "atm" in ids
-    assert "pcr" in ids
-    assert "india_vix" in ids
-    assert "max_pain" in ids
-    assert "spot_chg" in ids
-    assert "spot_vs_open" in ids
-    assert "fut_basis" in ids
-    assert "rsi" in ids
-    assert "vix_chg" in ids
-    assert "ce_oi" in ids
-    assert "pe_oi" in ids
-    assert "fii_net" in ids
+    assert "chk_008" in ids
+    assert "no_trade_after_10" in ids
+    by_no = {row["check_no"]: row for row in DEFAULT_METRICS if row.get("check_no")}
+    assert by_no[8]["feed_key"] == "pcr"
+    assert by_no[19]["rule"] == "before_time"
 
 
 def test_pcr_between_rule() -> None:
@@ -107,6 +103,13 @@ def test_spot_below_max_pain() -> None:
     assert _evaluate_rule("spot_below_max_pain", None, 0, feed=feed2, ce=None, pe=None) is False
 
 
+def test_before_time_rule() -> None:
+    feed = {"ist_hour": 9.5}
+    assert _evaluate_rule("before_time", 9.5, 10, feed=feed, ce=None, pe=None) is True
+    feed_late = {"ist_hour": 10.5}
+    assert _evaluate_rule("before_time", 10.5, 10, feed=feed_late, ce=None, pe=None) is False
+
+
 def test_india_vix_lt_18() -> None:
     assert _evaluate_rule("lt", 14.2, 18, feed={}, ce=None, pe=None) is True
     assert _evaluate_rule("lt", 19.0, 18, feed={}, ce=None, pe=None) is False
@@ -117,11 +120,20 @@ def test_sensibull_mock_metrics_partial_pass() -> None:
     feed = _mock_feed(config)
     result = evaluate_signal_state(config, feed)
     by_id = {row["id"]: row["passed"] for row in result["metrics"]}
-    assert by_id.get("pcr") is True
-    assert by_id.get("india_vix") is True
-    assert by_id.get("max_pain") is True
-    assert by_id.get("adx") is False
+    assert by_id.get("chk_008") is True
+    assert by_id.get("india_vix_level") is True
+    assert by_id.get("max_pain_check") is True
+    assert by_id.get("chk_003") is False
     assert result["entry_ready"] is False
+
+
+def test_gates_entry_only_counts_gated_rules() -> None:
+    config = SignalEngineConfig(mock=True)
+    feed = _mock_feed(config)
+    result = evaluate_signal_state(config, feed)
+    gated = [r for r in result["metrics"] if r.get("gates_entry")]
+    assert result["evaluable"] == len([r for r in gated if r["passed"] is not None])
+    assert result["evaluable"] <= len(gated)
 
 
 def test_normalize_groww_ltp_payload() -> None:
@@ -301,7 +313,7 @@ def test_info_metrics_never_pass_or_block() -> None:
     config = SignalEngineConfig(mock=True)
     feed = _mock_feed(config)
     result = evaluate_signal_state(config, feed)
-    for mid in ("atm", "oi", "ce_oi", "pe_oi"):
+    for mid in ("atm", "chk_001"):
         row = next(r for r in result["metrics"] if r["id"] == mid)
         assert row["passed"] is None
 

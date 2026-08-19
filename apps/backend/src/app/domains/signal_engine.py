@@ -34,6 +34,23 @@ from app.domains.signal_engine_constants import (
     TIER_TTL_MS,
     Tier,
 )
+from app.domains.signal_engine_chain import build_chain_symbols, chain_metrics_from_quotes
+from app.domains.signal_engine_levels import (
+    apply_spot_derived_fields,
+    levels_from_candles,
+    mock_levels,
+)
+from app.domains.signal_engine_nse import fetch_nse_slow_fields, mock_nse_fields
+from app.domains.signal_engine_yahoo import (
+    ALL_YAHOO_TICKERS,
+    INDEX_KITE_SYMBOLS,
+    STOCK_KITE_SYMBOLS,
+    TIMING_YAHOO_TICKERS,
+    USD_INR_KITE_SYMBOL,
+    fetch_yahoo_changes,
+    mock_yahoo_changes,
+)
+from app.domains.trade_desk_checklist import CHECKLIST_CATEGORIES, DEFAULT_METRICS, normalize_metrics
 from app.tenancy.context import TenantContext
 
 QUOTE_TOOL_PRIORITY = {"get_quote": 0, "get_ltp": 1, "get_ohlc": 2}
@@ -56,212 +73,8 @@ Rule = Literal[
     "iv_pct_day_high",
     "between",
     "spot_below_max_pain",
+    "before_time",
     "info",
-]
-
-DEFAULT_METRICS: list[dict[str, Any]] = [
-    # Spot + ATM options (displayed together in admin UI)
-    {
-        "id": "atm",
-        "label": "ATM",
-        "rule": "info",
-        "target": 0,
-        "tier": "fast",
-        "source": "nifty_ltp",
-        "hint": "Nearest strike from live NIFTY",
-    },
-    {
-        "id": "ce",
-        "label": "CE",
-        "rule": "ce_pe_balance",
-        "target": 0,
-        "tier": "fast",
-        "source": "atm_ce",
-        "hint": "ATM call premium",
-    },
-    {
-        "id": "pe",
-        "label": "PE",
-        "rule": "ce_pe_balance",
-        "target": 0,
-        "tier": "fast",
-        "source": "atm_pe",
-        "hint": "ATM put premium — must match CE",
-    },
-    {
-        "id": "oi",
-        "label": "OI",
-        "rule": "info",
-        "target": 0,
-        "tier": "fast",
-        "source": "nifty_fut_quote",
-        "hint": "NIFTY FUT open interest (display)",
-    },
-    {
-        "id": "ce_oi",
-        "label": "CE OI",
-        "rule": "info",
-        "target": 0,
-        "tier": "fast",
-        "source": "atm_ce",
-        "hint": "ATM call open interest",
-    },
-    {
-        "id": "pe_oi",
-        "label": "PE OI",
-        "rule": "info",
-        "target": 0,
-        "tier": "fast",
-        "source": "atm_pe",
-        "hint": "ATM put open interest",
-    },
-    {
-        "id": "spot_chg",
-        "label": "Spot %",
-        "rule": "between",
-        "target": -0.5,
-        "target_high": 1.5,
-        "tier": "fast",
-        "source": "nifty_ltp",
-        "hint": "Spot vs previous close — avoid gap-down / overextended",
-    },
-    {
-        "id": "spot_vs_open",
-        "label": "Vs Open",
-        "rule": "gt",
-        "target": 0,
-        "tier": "fast",
-        "source": "nifty_ltp",
-        "hint": "Spot above session open (intraday momentum)",
-    },
-    {
-        "id": "fut_basis",
-        "label": "Fut basis",
-        "rule": "lte",
-        "target": 0.8,
-        "tier": "fast",
-        "source": "nifty_fut_quote",
-        "hint": "FUT premium over spot % — avoid rich contango",
-    },
-    {
-        "id": "oi_pct_chg",
-        "label": "OI % Chg",
-        "rule": "gt",
-        "target": 0,
-        "tier": "fast",
-        "source": "nifty_fut_quote",
-        "hint": "FUT OI building vs session open",
-    },
-    {
-        "id": "iv",
-        "label": "IV",
-        "rule": "iv_pct_day_high",
-        "target": 50,
-        "tier": "fast",
-        "source": "atm_options",
-        "hint": "ATM implied vol as % of session high",
-    },
-    {
-        "id": "ivp",
-        "label": "IVP",
-        "rule": "lt",
-        "target": 70,
-        "tier": "medium",
-        "source": "iv_history",
-        "hint": "IV percentile — avoid extreme premium (>70)",
-    },
-    {
-        "id": "iv_chg",
-        "label": "IV Chg",
-        "rule": "lte",
-        "target": 0,
-        "tier": "fast",
-        "source": "atm_options",
-        "hint": "Sensibull: IV contracting (≤ 0)",
-    },
-    {
-        "id": "pcr",
-        "label": "PCR",
-        "rule": "between",
-        "target": 1.0,
-        "target_high": 1.3,
-        "tier": "fast",
-        "source": "option_chain",
-        "hint": "Sensibull: bullish band 1.0–1.3; avoid >1.3 overbought",
-    },
-    {
-        "id": "max_pain",
-        "label": "Max Pain",
-        "rule": "spot_below_max_pain",
-        "target": 0,
-        "tier": "medium",
-        "source": "option_chain",
-        "hint": "BUY CE: spot below max pain (upward drift bias)",
-    },
-    {
-        "id": "adx",
-        "label": "ADX",
-        "rule": "lt",
-        "target": 25,
-        "tier": "medium",
-        "source": "nifty_ohlc",
-        "hint": "Trend strength — lower is calmer",
-    },
-    {
-        "id": "rsi",
-        "label": "RSI",
-        "rule": "between",
-        "target": 35,
-        "target_high": 65,
-        "tier": "medium",
-        "source": "nifty_ohlc",
-        "hint": "14-period RSI on 15m — avoid overbought extremes",
-    },
-    {
-        "id": "vix_chg",
-        "label": "VIX Chg",
-        "rule": "lte",
-        "target": 0,
-        "tier": "medium",
-        "source": "nse_vix",
-        "hint": "India VIX vs session open — prefer falling VIX",
-    },
-    {
-        "id": "dow_jones",
-        "label": "DowJones",
-        "rule": "abs_lte",
-        "target": 0.5,
-        "tier": "slow",
-        "source": "global_index",
-        "hint": "Session change within ±0.5%",
-    },
-    {
-        "id": "india_vix",
-        "label": "India VIX",
-        "rule": "lt",
-        "target": 18,
-        "tier": "medium",
-        "source": "nse_vix",
-        "hint": "Sensibull filter: skip signals when VIX ≥ 18",
-    },
-    {
-        "id": "crude_oil",
-        "label": "CrudeOil",
-        "rule": "below_prev_close",
-        "target": 0,
-        "tier": "medium",
-        "source": "mcx_crude",
-        "hint": "MCX crude below yesterday close",
-    },
-    {
-        "id": "fii_net",
-        "label": "FII net",
-        "rule": "gt",
-        "target": 0,
-        "tier": "slow",
-        "source": "fii_dii",
-        "hint": "Manual daily FII net (₹ Cr) — Sensibull / NSE; skip if unset",
-    },
 ]
 
 
@@ -387,13 +200,13 @@ class SignalEngineConfig:
     @classmethod
     def from_settings(cls, settings: dict[str, Any] | None) -> SignalEngineConfig:
         raw = settings or {}
-        metrics = list(DEFAULT_METRICS)
+        metrics = normalize_metrics(list(DEFAULT_METRICS))
         override = raw.get("metrics_json")
         if override:
             try:
                 parsed = json.loads(override) if isinstance(override, str) else override
                 if isinstance(parsed, list) and parsed:
-                    metrics = parsed
+                    metrics = normalize_metrics(parsed)
             except (TypeError, json.JSONDecodeError):
                 pass
         dow = raw.get("dow_change_pct")
@@ -654,6 +467,245 @@ def _fut_basis_pct(spot: float | None, fut: float | None) -> float | None:
     return round((fut - spot) / spot * 100, 3)
 
 
+def _apply_quote_pct_map(
+    feed: dict[str, Any],
+    quotes: dict[str, Any],
+    mapping: dict[str, str],
+) -> None:
+    for feed_key, symbol in mapping.items():
+        row = _find_quote_row(quotes, symbol)
+        vs_prev, _ = _quote_change_pcts(row)
+        if vs_prev is not None:
+            feed[feed_key] = vs_prev
+
+
+def _enrich_derived_feed_fields(feed: dict[str, Any]) -> None:
+    ce = feed.get("ce")
+    pe = feed.get("pe")
+    if ce is not None and pe is not None:
+        feed["straddle"] = round(float(ce) + float(pe), 2)
+    if feed.get("gap_pct") is None and feed.get("spot_chg") is not None:
+        feed["gap_pct"] = feed["spot_chg"]
+    spot = feed.get("nifty_ltp")
+    open_key = "nifty_session_open"
+    if spot is not None:
+        if feed.get("nifty_points_move") is None:
+            session_open = feed.get("_session_open_ltp")
+            if session_open is not None:
+                feed["nifty_points_move"] = round(float(spot) - float(session_open), 2)
+    if feed.get("index_sensex_chg") is not None and feed.get("sensex_points_move") is None:
+        # points move filled when sensex quote batch includes session open
+        pass
+    now = _ist_now()
+    feed["ist_hour"] = round(now.hour + now.minute / 60.0, 3)
+
+
+async def _merge_yahoo_slow_tier(
+    tenant_id: str,
+    feed: dict[str, Any],
+    *,
+    mock: bool,
+) -> None:
+    cached = await _cache_get(tenant_id, "yahoo_global")
+    if cached is not None:
+        feed.update(cached)
+        return
+    if mock:
+        payload = mock_yahoo_changes(ALL_YAHOO_TICKERS)
+        payload.update(mock_yahoo_changes(TIMING_YAHOO_TICKERS))
+    else:
+        payload = fetch_yahoo_changes(ALL_YAHOO_TICKERS)
+        payload.update(fetch_yahoo_changes(TIMING_YAHOO_TICKERS))
+    if payload:
+        feed.update(payload)
+        await _cache_set(tenant_id, "yahoo_global", "slow", payload)
+
+
+def _extract_candle_rows(result: Any) -> list[Any]:
+    if not isinstance(result, dict) or result.get("ok") is False:
+        return []
+    data = result.get("data", result)
+    if isinstance(data, dict):
+        raw = data.get("candles")
+        if isinstance(raw, list):
+            return raw
+    return []
+
+
+async def _merge_nse_slow_tier(
+    tenant_id: str,
+    feed: dict[str, Any],
+    config: SignalEngineConfig,
+    *,
+    mock: bool,
+) -> None:
+    if mock:
+        feed.update(mock_nse_fields())
+        return
+    cached = await _cache_get(tenant_id, "nse_slow")
+    if cached is not None:
+        if config.fii_net is None and cached.get("fii_net") is not None:
+            feed["fii_net"] = cached["fii_net"]
+        if cached.get("advance_decline_ratio") is not None:
+            feed["advance_decline_ratio"] = cached["advance_decline_ratio"]
+        return
+    payload = await asyncio.to_thread(fetch_nse_slow_fields)
+    if not payload:
+        return
+    if config.fii_net is None and payload.get("fii_net") is not None:
+        feed["fii_net"] = payload["fii_net"]
+    if payload.get("advance_decline_ratio") is not None:
+        feed["advance_decline_ratio"] = payload["advance_decline_ratio"]
+    await _cache_set(tenant_id, "nse_slow", "slow", payload)
+
+
+async def _merge_levels_tier(
+    service: "SignalEngineService",
+    tenant_id: str,
+    feed: dict[str, Any],
+    *,
+    spot_row: dict[str, Any] | None,
+    mock: bool,
+) -> None:
+    merged = False
+    try:
+        cached = await _cache_get(tenant_id, "levels")
+        if cached is not None:
+            feed.update(cached)
+            merged = True
+            return
+        if mock:
+            spot = float(feed.get("nifty_ltp") or 24312.5)
+            payload = mock_levels(spot)
+            feed.update(payload)
+            await _cache_set(tenant_id, "levels", "medium", payload)
+            merged = True
+            return
+        if spot_row is None:
+            return
+        token_raw = spot_row.get("instrument_token")
+        try:
+            token = int(token_raw) if token_raw is not None else 0
+        except (TypeError, ValueError):
+            token = 0
+        if token <= 0:
+            return
+        now = _ist_now()
+        daily_from = (now - timedelta(days=12)).strftime("%Y-%m-%d")
+        daily_to = now.strftime("%Y-%m-%d")
+        intra_from = now.replace(hour=9, minute=15, second=0, microsecond=0).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        intra_to = now.strftime("%Y-%m-%d %H:%M:%S")
+        daily_hist = await service._invoke_broker_tool(
+            "get_historical_candles",
+            {
+                "instrument_token": token,
+                "interval": "day",
+                "from_date": daily_from,
+                "to_date": daily_to,
+            },
+        )
+        intra_hist = await service._invoke_broker_tool(
+            "get_historical_candles",
+            {
+                "instrument_token": token,
+                "interval": "5minute",
+                "from_date": intra_from,
+                "to_date": intra_to,
+            },
+        )
+        payload = levels_from_candles(
+            daily_candles=_extract_candle_rows(daily_hist),
+            intraday_5m=_extract_candle_rows(intra_hist),
+            spot=feed.get("nifty_ltp"),
+        )
+        if not payload:
+            return
+        feed.update(payload)
+        await _cache_set(tenant_id, "levels", "medium", payload)
+        merged = True
+    finally:
+        if merged:
+            _refresh_level_spot_fields(feed, spot_row)
+
+
+def _refresh_level_spot_fields(
+    feed: dict[str, Any],
+    spot_row: dict[str, Any] | None,
+) -> None:
+    """Live day range + spot comparisons — must run each feed tick."""
+    if spot_row:
+        ohlc = spot_row.get("ohlc") if isinstance(spot_row.get("ohlc"), dict) else {}
+        day_high = _pick_float(ohlc, "high")
+        day_low = _pick_float(ohlc, "low")
+        if day_high is not None:
+            feed["day_high"] = day_high
+        if day_low is not None:
+            feed["day_low"] = day_low
+    spot = feed.get("nifty_ltp")
+    if spot is not None and feed.get("pivot_point") is not None:
+        apply_spot_derived_fields(feed, float(spot))
+
+
+async def _merge_option_chain_tier(
+    service: "SignalEngineService",
+    tenant_id: str,
+    feed: dict[str, Any],
+    config: SignalEngineConfig,
+    *,
+    atm_strike: int | None,
+    mock: bool,
+) -> None:
+    if atm_strike is None or not config.nifty_fut_symbol:
+        return
+    need_pcr = config.pcr is None and feed.get("pcr") is None
+    need_max_pain = config.max_pain is None and feed.get("max_pain") is None
+    if not need_pcr and not need_max_pain:
+        return
+    cached = await _cache_get(tenant_id, "option_chain")
+    if isinstance(cached, dict):
+        if need_pcr and cached.get("pcr") is not None:
+            feed["pcr"] = cached["pcr"]
+            feed["pcr_source"] = "chain_oi"
+        if need_max_pain and cached.get("max_pain") is not None:
+            feed["max_pain"] = cached["max_pain"]
+        return
+    if mock:
+        payload = {"pcr": 1.25, "max_pain": float(atm_strike + 100)}
+        if need_pcr:
+            feed["pcr"] = payload["pcr"]
+            feed["pcr_source"] = "chain_oi"
+        if need_max_pain:
+            feed["max_pain"] = payload["max_pain"]
+        await _cache_set(tenant_id, "option_chain", "medium", payload)
+        return
+    strikes, ce_syms, pe_syms = build_chain_symbols(
+        config.nifty_fut_symbol,
+        atm_strike,
+        config.strike_step,
+        wings=5,
+    )
+    if not ce_syms or not pe_syms:
+        return
+    chain_quotes = await service._fetch_quote(ce_syms + pe_syms, prefer="get_quote")
+    payload = chain_metrics_from_quotes(
+        chain_quotes,
+        find_row=_find_quote_row,
+        strikes=strikes,
+        ce_symbols=ce_syms,
+        pe_symbols=pe_syms,
+    )
+    if not payload:
+        return
+    if need_pcr and payload.get("pcr") is not None:
+        feed["pcr"] = payload["pcr"]
+        feed["pcr_source"] = "chain_oi"
+    if need_max_pain and payload.get("max_pain") is not None:
+        feed["max_pain"] = payload["max_pain"]
+    await _cache_set(tenant_id, "option_chain", "medium", payload)
+
+
 def _oi_baseline_cache_key() -> str:
     return f"oi_baseline:{_ist_session_date()}"
 
@@ -690,8 +742,39 @@ def _mock_feed(config: SignalEngineConfig) -> dict[str, Any]:
         "pe_oi": 1_560_000.0,
         "vix_chg": -0.4,
         "rsi": 52.0,
+        "straddle": 180.0,
+        "atm_volume": 125000.0,
+        "usd_inr": 83.12,
+        "gap_pct": 0.25,
+        "index_nifty_chg": 0.25,
+        "index_sensex_chg": 0.22,
+        "index_banknifty_chg": 0.18,
+        "index_finnifty_chg": 0.15,
+        "nifty_points_move": 35.0,
+        "sensex_points_move": 120.0,
+        "ist_hour": 9.5,
+        **mock_yahoo_changes(ALL_YAHOO_TICKERS),
+        **mock_yahoo_changes(TIMING_YAHOO_TICKERS),
+        **mock_levels(24312.5),
+        **mock_nse_fields(),
         "source": "mock",
     }
+
+
+def _mock_feed_live(config: SignalEngineConfig) -> dict[str, Any]:
+    """Mock feed with time-varying fast-tier fields for stream rehearsal."""
+    feed = _mock_feed(config)
+    t = time.time()
+    wobble = math.sin(t / 4.0) * 8.0
+    spot = 24312.5 + wobble
+    feed["nifty_ltp"] = round(spot, 2)
+    feed["atm"] = _round_strike(spot, config.strike_step)
+    feed["ce"] = round(125.0 + wobble * 0.15, 2)
+    feed["pe"] = round(55.0 - wobble * 0.08, 2)
+    feed["india_vix"] = round(14.2 + math.sin(t / 7.0) * 0.3, 2)
+    _enrich_derived_feed_fields(feed)
+    apply_spot_derived_fields(feed, spot)
+    return feed
 
 
 def _normalize_quote_payload(result: Any) -> dict[str, Any]:
@@ -789,10 +872,12 @@ def _live_setup_warnings(
         )
     if config.pcr is None and feed.get("pcr") is None:
         warnings.append(
-            "PCR missing — set manually or ensure CE/PE get_quote returns open_interest."
+            "PCR missing — set manually or ensure multi-strike OI quotes return open_interest."
         )
-    if config.max_pain is None:
-        warnings.append("Set max_pain in tool settings until chain API is wired.")
+    if config.max_pain is None and feed.get("max_pain") is None:
+        warnings.append(
+            "Max pain missing — set manually or ensure FUT + ATM ±5 strike OI quotes are available."
+        )
     if config.ivp is None:
         warnings.append("Set ivp in tool settings until IV history feed is wired.")
     if config.dow_change_pct is None:
@@ -892,6 +977,12 @@ def _evaluate_rule(
             return None
         pct = (float(iv) / float(high)) * 100
         return pct <= target
+    if rule == "before_time":
+        current = feed.get("ist_hour")
+        if current is None:
+            now = _ist_now()
+            current = now.hour + now.minute / 60.0
+        return float(current) < target
     return None
 
 
@@ -920,12 +1011,26 @@ def _format_target(rule: Rule, target: float, spec: dict[str, Any] | None = None
         return f"{target:g}% of day high"
     if rule == "spot_below_max_pain":
         return "spot < max pain"
+    if rule == "before_time":
+        return f"before {int(target):g}:00 IST"
     if rule == "info":
         return "live strike"
     return str(target)
 
 
-def _metric_value(metric_id: str, feed: dict[str, Any]) -> float | None:
+def _metric_value(
+    metric_id: str,
+    feed: dict[str, Any],
+    spec: dict[str, Any] | None = None,
+) -> float | None:
+    spec = spec or {}
+    feed_key = spec.get("feed_key")
+    if feed_key:
+        val = feed.get(feed_key)
+        if val is None and feed_key == "ist_hour":
+            now = _ist_now()
+            return round(now.hour + now.minute / 60.0, 3)
+        return float(val) if val is not None else None
     mapping = {
         "adx": "adx",
         "oi": "oi",
@@ -1182,14 +1287,8 @@ class SignalEngineService:
     async def _build_feed(self, config: SignalEngineConfig) -> dict[str, Any]:
         tenant_id = _tenant_key(self.context)
 
-        cached_feed = await _cache_get(tenant_id, "feed")
-        if cached_feed is not None:
-            return cached_feed
-
         if config.mock:
-            feed = _mock_feed(config)
-            await _cache_set(tenant_id, "feed", "fast", feed)
-            return feed
+            return _mock_feed_live(config)
 
         feed: dict[str, Any] = {"source": "live"}
 
@@ -1200,6 +1299,8 @@ class SignalEngineService:
         elif config.dow_change_pct is not None:
             feed["dow_change_pct"] = config.dow_change_pct
             await _cache_set(tenant_id, "dow_jones", "slow", config.dow_change_pct)
+
+        await _merge_nse_slow_tier(tenant_id, feed, config, mock=False)
         if config.fii_net is not None:
             feed["fii_net"] = config.fii_net
 
@@ -1238,6 +1339,16 @@ class SignalEngineService:
                     feed["spot_chg"] = vs_prev
                 if vs_open is not None:
                     feed["spot_vs_open"] = vs_open
+                ohlc = spot_row.get("ohlc") if isinstance(spot_row.get("ohlc"), dict) else {}
+                open_ltp = _pick_float(ohlc, "open") if ohlc else None
+                if open_ltp is not None:
+                    session_key = f"underlying_open:{_ist_session_date()}"
+                    cached_open = await cache.get_session_value(tenant_id, session_key)
+                    if cached_open is None:
+                        await cache.set_session_value(tenant_id, session_key, open_ltp)
+                        cached_open = open_ltp
+                    feed["_session_open_ltp"] = cached_open
+                    feed["nifty_points_move"] = round(spot_ltp - float(cached_open), 2)
 
         ce_symbol, pe_symbol = _resolve_option_symbols(config, atm_strike)
         if ce_symbol:
@@ -1270,6 +1381,11 @@ class SignalEngineService:
                 pe_oi = _pick_float(pe_row, "oi", "open_interest")
                 if pe_oi is not None:
                     feed["pe_oi"] = pe_oi
+
+        ce_vol = _pick_float(ce_row or {}, "volume") if ce_row else None
+        pe_vol = _pick_float(pe_row or {}, "volume") if pe_row else None
+        if ce_vol is not None or pe_vol is not None:
+            feed["atm_volume"] = (ce_vol or 0) + (pe_vol or 0)
 
         iv_val = _merge_option_iv(ce_row, pe_row)
         if iv_val is not None:
@@ -1336,8 +1452,16 @@ class SignalEngineService:
             if config.iv_chg is None:
                 feed["iv_chg"] = iv_f - float(session_open)
 
-        # Sensibull-aligned fields — settings override until option chain API wired
-        if config.pcr is None:
+        # Sensibull-aligned fields — chain OI first, then ATM estimate, manual override last
+        await _merge_option_chain_tier(
+            self,
+            tenant_id,
+            feed,
+            config,
+            atm_strike=atm_strike,
+            mock=False,
+        )
+        if config.pcr is None and feed.get("pcr") is None:
             estimated_pcr = _estimate_pcr(ce_row, pe_row)
             if estimated_pcr is not None:
                 feed["pcr"] = estimated_pcr
@@ -1397,6 +1521,14 @@ class SignalEngineService:
                 if trend_payload:
                     await _cache_set(tenant_id, "trend", "medium", trend_payload)
 
+        await _merge_levels_tier(
+            self,
+            tenant_id,
+            feed,
+            spot_row=spot_row,
+            mock=False,
+        )
+
         # India VIX quote (medium tier) when not set manually
         if feed.get("india_vix") is None and config.india_vix_symbol:
             vix_cached = await _cache_get(tenant_id, "india_vix")
@@ -1418,7 +1550,47 @@ class SignalEngineService:
                 session_vix = vix_ltp
             feed["vix_chg"] = round(vix_ltp - float(session_vix), 3)
 
-        await _cache_set(tenant_id, "feed", "fast", feed)
+        # Index / stock / USD-INR — medium tier batch
+        aux_cached = await _cache_get(tenant_id, "aux_quotes")
+        if isinstance(aux_cached, dict):
+            feed.update(aux_cached)
+        else:
+            aux_symbols = list(
+                dict.fromkeys(
+                    [
+                        *INDEX_KITE_SYMBOLS.values(),
+                        *STOCK_KITE_SYMBOLS.values(),
+                        USD_INR_KITE_SYMBOL,
+                    ]
+                )
+            )
+            aux_quotes = await self._fetch_quote(aux_symbols) if aux_symbols else {}
+            aux_payload: dict[str, Any] = {}
+            _apply_quote_pct_map(feed, aux_quotes, INDEX_KITE_SYMBOLS)
+            _apply_quote_pct_map(feed, aux_quotes, STOCK_KITE_SYMBOLS)
+            for key, val in feed.items():
+                if key.startswith(("index_", "stock_")):
+                    aux_payload[key] = val
+            usd_row = _find_quote_row(aux_quotes, USD_INR_KITE_SYMBOL)
+            usd_ltp = _pick_float(usd_row or {}, "last_price", "ltp", "last")
+            if usd_ltp is not None:
+                feed["usd_inr"] = usd_ltp
+                aux_payload["usd_inr"] = usd_ltp
+            sensex_row = _find_quote_row(aux_quotes, INDEX_KITE_SYMBOLS["index_sensex_chg"])
+            if sensex_row:
+                sensex_ltp = _pick_float(sensex_row, "last_price", "ltp", "last")
+                ohlc = sensex_row.get("ohlc") if isinstance(sensex_row.get("ohlc"), dict) else {}
+                sensex_open = _pick_float(ohlc, "open") if ohlc else None
+                if sensex_ltp is not None and sensex_open is not None:
+                    feed["sensex_points_move"] = round(sensex_ltp - sensex_open, 2)
+                    aux_payload["sensex_points_move"] = feed["sensex_points_move"]
+            if aux_payload:
+                feed.update(aux_payload)
+                await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
+
+        await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
+        _enrich_derived_feed_fields(feed)
+
         return feed
 
     async def state(self) -> dict[str, Any]:
@@ -1582,7 +1754,13 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
         metric_id = str(spec["id"])
         rule = spec.get("rule", "info")
         target = float(spec.get("target") or 0)
-        value = _metric_value(metric_id, feed)
+        gates_entry = bool(spec.get("gates_entry", False))
+        value = _metric_value(metric_id, feed, spec)
+        if rule == "before_time":
+            value = feed.get("ist_hour")
+            if value is None:
+                now = _ist_now()
+                value = round(now.hour + now.minute / 60.0, 3)
         if rule == "spot_below_max_pain":
             spot = feed.get("nifty_ltp") or feed.get("atm")
             value = float(spot) if spot is not None else None
@@ -1595,24 +1773,30 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
             pe=float(pe) if pe is not None else None,
             spec=spec,
         )
-        if ok is not None:
+        display_passed = ok
+        if ok is not None and gates_entry:
             evaluable += 1
             if ok:
                 passed += 1
+        elif rule == "info":
+            display_passed = None
         display_value = value
         if rule == "spot_below_max_pain":
             display_value = feed.get("max_pain")
         rows.append(
             {
                 "id": metric_id,
+                "check_no": spec.get("check_no", 0),
+                "category": spec.get("category", ""),
                 "label": spec.get("label", metric_id),
                 "value": display_value,
                 "target": _format_target(rule, target, spec),  # type: ignore[arg-type]
                 "rule": rule,
                 "tier": spec.get("tier", "fast"),
-                "passed": ok,
+                "passed": display_passed,
+                "gates_entry": gates_entry,
                 "hint": spec.get("hint", ""),
-                "source": spec.get("source", ""),
+                "source": spec.get("source", spec.get("feed_key", "")),
             }
         )
 

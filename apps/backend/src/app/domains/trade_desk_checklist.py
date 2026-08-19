@@ -1,0 +1,1558 @@
+"""Trade Desk Checklist — 115 signal parameters (from Trade_Desk_Checklist1.xlsx)."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+CHECKLIST_CATEGORIES: tuple[str, ...] = (
+    "Data & Charts Watch",
+    "Timing & No-Trade Rules",
+    "Levels & Technicals",
+    "Global Markets Watch",
+    "Stock Big-Move Watch",
+    "Trade Discipline Check",
+)
+
+CHECKLIST_ITEM_COUNT = 115
+
+# Longest phrases first — indices, tickers, and trading acronyms.
+_CHECKLIST_PHRASE_FIXES: tuple[tuple[str, str], ...] = (
+    ("Sbi big move", "SBI big move"),
+    ("Hdfc big move", "HDFC big move"),
+    ("Infosys big move", "INFOSYS big move"),
+    ("Icici bank big move", "ICICI BANK big move"),
+    ("Airtel big move", "AIRTEL big move"),
+    ("Bank nifty", "BANKNIFTY"),
+    ("Bank Nifty", "BANKNIFTY"),
+    ("Nifty Bank", "BANKNIFTY"),
+    ("Gift Nifty", "GIFT NIFTY"),
+    ("india sgx nifty", "India SGX NIFTY"),
+    ("nifty it", "NIFTY IT"),
+    ("Us futures", "US futures"),
+    ("Nifty ATM iv chart", "NIFTY ATM IV chart"),
+    ("Nifty ATM-CE", "NIFTY ATM-CE"),
+    ("Nifty ATM iv", "NIFTY ATM IV"),
+    ("Nifty ATM", "NIFTY ATM"),
+    ("Sensex ATM", "SENSEX ATM"),
+    ("Adx - Nifty", "ADX — NIFTY"),
+    ("How much % has Nifty", "How much % has NIFTY"),
+    ("How much % has Sensex", "How much % has SENSEX"),
+    ("How much % has nifty", "How much % has NIFTY"),
+    ("Nifty 1 minute", "NIFTY 1 minute"),
+    ("Nifty 50", "NIFTY 50"),
+    ("Sensex 100", "SENSEX 100"),
+    ("When two prices are equal Nifty", "When two prices are equal NIFTY"),
+    ("When two prices are equal Sensex", "When two prices are equal SENSEX"),
+    ("Atm straddle", "ATM straddle"),
+    ("Atm ce/pe", "ATM CE/PE"),
+    ("Vix chart", "VIX chart"),
+    ("for Sensex", "for SENSEX"),
+)
+
+_CHECKLIST_WORD_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bNifty\b"), "NIFTY"),
+    (re.compile(r"\bSensex\b"), "SENSEX"),
+    (re.compile(r"\bAdx\b"), "ADX"),
+    (re.compile(r"\bVix\b"), "VIX"),
+    (re.compile(r"\bPcr\b"), "PCR"),
+    (re.compile(r"\bAtm\b"), "ATM"),
+    (re.compile(r"\bSbi\b"), "SBI"),
+    (re.compile(r"\bHdfc\b"), "HDFC"),
+    (re.compile(r"\bIcici\b"), "ICICI"),
+    (re.compile(r"\bInfosys\b"), "INFOSYS"),
+    (re.compile(r"\bAirtel\b"), "AIRTEL"),
+    (re.compile(r"\bce/pe\b", re.I), "CE/PE"),
+    (re.compile(r"\biv\b"), "IV"),
+    (re.compile(r"\bnse\b"), "NSE"),
+    (re.compile(r"\bus\b"), "US"),
+    (re.compile(r"\buk\b"), "UK"),
+    (re.compile(r"\bagm\b", re.I), "AGM"),
+    (re.compile(r"\bfed\b"), "Fed"),
+    (re.compile(r"\bDoller\b"), "Dollar"),
+    (re.compile(r"\bcalander\b", re.I), "calendar"),
+    (re.compile(r"\bPerimums\b"), "Premiums"),
+    (re.compile(r"\bNikky\b"), "Nikkei"),
+    (re.compile(r"\bhonkong\b", re.I), "Hong Kong"),
+)
+
+
+def normalize_checklist_text(text: str) -> str:
+    """Normalize index/ticker/acronym casing for desk display."""
+    if not text:
+        return text
+    out = text
+    for old, new in _CHECKLIST_PHRASE_FIXES:
+        out = out.replace(old, new)
+    for pattern, repl in _CHECKLIST_WORD_FIXES:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def normalize_metric_display(metric: dict[str, Any]) -> dict[str, Any]:
+    row = dict(metric)
+    for key in ("label", "hint"):
+        val = row.get(key)
+        if isinstance(val, str):
+            row[key] = normalize_checklist_text(val)
+    return row
+
+
+def normalize_metrics(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [normalize_metric_display(m) for m in metrics]
+
+
+DEFAULT_METRICS: list[dict[str, Any]] = [
+    {
+        "id": "atm",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "ATM",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "feed_key": "atm",
+        "gates_entry": False,
+        "hint": "Live ATM strike"
+    },
+    {
+        "id": "spot_vs_open",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "Vs Open",
+        "rule": "gt",
+        "target": 0,
+        "tier": "fast",
+        "feed_key": "spot_vs_open",
+        "gates_entry": True,
+        "hint": "Spot above session open"
+    },
+    {
+        "id": "fut_basis",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "Fut basis",
+        "rule": "lte",
+        "target": 0.8,
+        "tier": "fast",
+        "feed_key": "fut_basis",
+        "gates_entry": True,
+        "hint": "FUT premium over spot %"
+    },
+    {
+        "id": "oi_pct_chg",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "OI % Chg",
+        "rule": "gt",
+        "target": 0,
+        "tier": "fast",
+        "feed_key": "oi_pct_chg",
+        "gates_entry": True,
+        "hint": "FUT OI building"
+    },
+    {
+        "id": "iv_chg",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "IV Chg",
+        "rule": "lte",
+        "target": 0,
+        "tier": "fast",
+        "feed_key": "iv_chg",
+        "gates_entry": True,
+        "hint": "IV contracting"
+    },
+    {
+        "id": "rsi",
+        "check_no": 0,
+        "category": "Levels & Technicals",
+        "label": "RSI",
+        "rule": "between",
+        "target": 35,
+        "target_high": 65,
+        "tier": "medium",
+        "feed_key": "rsi",
+        "gates_entry": True,
+        "hint": "14-period RSI 15m"
+    },
+    {
+        "id": "vix_chg",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "VIX Chg",
+        "rule": "lte",
+        "target": 0,
+        "tier": "medium",
+        "feed_key": "vix_chg",
+        "gates_entry": True,
+        "hint": "VIX vs session open"
+    },
+    {
+        "id": "india_vix_level",
+        "check_no": 0,
+        "category": "Data & Charts Watch",
+        "label": "India VIX lvl",
+        "rule": "lt",
+        "target": 18,
+        "tier": "medium",
+        "feed_key": "india_vix",
+        "gates_entry": True,
+        "hint": "Skip when VIX >= 18"
+    },
+    {
+        "id": "fii_net",
+        "check_no": 0,
+        "category": "Global Markets Watch",
+        "label": "FII net",
+        "rule": "gt",
+        "target": 0,
+        "tier": "slow",
+        "feed_key": "fii_net",
+        "gates_entry": True,
+        "hint": "Manual FII net (Cr)"
+    },
+    {
+        "id": "chk_001",
+        "check_no": 1,
+        "category": "Data & Charts Watch",
+        "label": "NIFTY oi chat, Full day, 10 strikes",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "NIFTY oi chat, Full day, 10 strikes",
+        "feed_key": "oi"
+    },
+    {
+        "id": "chk_002",
+        "check_no": 2,
+        "category": "Data & Charts Watch",
+        "label": "Vix chart- 1 minute",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Vix chart- 1 minute",
+        "feed_key": "india_vix"
+    },
+    {
+        "id": "chk_003",
+        "check_no": 3,
+        "category": "Data & Charts Watch",
+        "label": "Adx - Nifty 1 minute,5 minutes",
+        "rule": "lt",
+        "target": 25,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "Adx - Nifty 1 minute,5 minutes",
+        "feed_key": "adx"
+    },
+    {
+        "id": "nifty_ce_pe",
+        "check_no": 4,
+        "category": "Data & Charts Watch",
+        "label": "When two prices are equal Nifty ATM-CE, PE, d\u2026",
+        "rule": "ce_pe_balance",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "When two prices are equal Nifty ATM-CE, PE, decay",
+        "feed_key": "ce"
+    },
+    {
+        "id": "chk_005",
+        "check_no": 5,
+        "category": "Data & Charts Watch",
+        "label": "When two prices are equal Sensex ATM CE, PE, \u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Switch underlying to SENSEX for Sensex ATM CE=PE"
+    },
+    {
+        "id": "chk_006",
+        "check_no": 6,
+        "category": "Data & Charts Watch",
+        "label": "Nifty ATM iv chart",
+        "rule": "iv_pct_day_high",
+        "target": 50,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "Nifty ATM iv chart",
+        "feed_key": "iv"
+    },
+    {
+        "id": "chk_007",
+        "check_no": 7,
+        "category": "Data & Charts Watch",
+        "label": "Volume 1 minute chat Atm ce/pe",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Volume 1 minute chat Atm ce/pe",
+        "feed_key": "atm_volume"
+    },
+    {
+        "id": "chk_008",
+        "check_no": 8,
+        "category": "Data & Charts Watch",
+        "label": "Pcr",
+        "rule": "between",
+        "target": 1.0,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "Pcr",
+        "feed_key": "pcr",
+        "target_high": 1.3
+    },
+    {
+        "id": "chk_009",
+        "check_no": 9,
+        "category": "Data & Charts Watch",
+        "label": "Percentile",
+        "rule": "lt",
+        "target": 70,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "Percentile",
+        "feed_key": "ivp"
+    },
+    {
+        "id": "chk_010",
+        "check_no": 10,
+        "category": "Data & Charts Watch",
+        "label": "Atm straddle decay",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Atm straddle decay",
+        "feed_key": "straddle"
+    },
+    {
+        "id": "chk_011",
+        "check_no": 11,
+        "category": "Data & Charts Watch",
+        "label": "Advance / decline ratio",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Advance/decline \u2014 NSE breadth or manual"
+    },
+    {
+        "id": "crude_check",
+        "check_no": 12,
+        "category": "Data & Charts Watch",
+        "label": "Crude oil",
+        "rule": "below_prev_close",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "Crude oil",
+        "feed_key": "crude_ltp"
+    },
+    {
+        "id": "chk_013",
+        "check_no": 13,
+        "category": "Data & Charts Watch",
+        "label": "USD/INR(Doller)",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "USD/INR(Doller)",
+        "feed_key": "usd_inr"
+    },
+    {
+        "id": "chk_014",
+        "check_no": 14,
+        "category": "Data & Charts Watch",
+        "label": "How much % has Nifty moved sofar?(1% or 0.6%)\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "How much % has Nifty moved sofar?(1% or 0.6%), should not move morethan 0.5% up or down",
+        "feed_key": "index_nifty_chg"
+    },
+    {
+        "id": "chk_015",
+        "check_no": 15,
+        "category": "Data & Charts Watch",
+        "label": "How much % has Sensex moved sofar?(1% or 0.6%\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "How much % has Sensex moved sofar?(1% or 0.6%), should not move morethan 0.5% up or down",
+        "feed_key": "index_sensex_chg"
+    },
+    {
+        "id": "chk_016",
+        "check_no": 16,
+        "category": "Data & Charts Watch",
+        "label": "How much % has Bank nifty moved sofar?(1% or \u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "How much % has Bank nifty moved sofar?(1% or 0.6%), should not move morethan 0.5% up or down",
+        "feed_key": "index_banknifty_chg"
+    },
+    {
+        "id": "chk_017",
+        "check_no": 17,
+        "category": "Data & Charts Watch",
+        "label": "How much % has nifty it moved sofar?(1% or 0.\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "How much % has nifty it moved sofar?(1% or 0.6%), should not move morethan 0.5% up or down",
+        "feed_key": "index_finnifty_chg"
+    },
+    {
+        "id": "chk_018",
+        "check_no": 18,
+        "category": "Data & Charts Watch",
+        "label": "When two prices are equal Nifty Bank ATM CE, \u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Bank Nifty ATM CE=PE when underlying is BANKNIFTY"
+    },
+    {
+        "id": "no_trade_after_10",
+        "check_no": 19,
+        "category": "Timing & No-Trade Rules",
+        "label": "No trade after 10 AM",
+        "rule": "before_time",
+        "target": 10,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "No trade after 10 AM"
+    },
+    {
+        "id": "chk_020",
+        "check_no": 20,
+        "category": "Timing & No-Trade Rules",
+        "label": "Nifty 1 minute chat after big move",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Nifty 1 minute chat after big move"
+    },
+    {
+        "id": "chk_021",
+        "check_no": 21,
+        "category": "Timing & No-Trade Rules",
+        "label": "All sectors in research 360\u00b0",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "All sectors in research 360\u00b0"
+    },
+    {
+        "id": "chk_022",
+        "check_no": 22,
+        "category": "Timing & No-Trade Rules",
+        "label": "Before big news entry, no entry after big new\u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Before big news entry, no entry after big news because iv will collapse"
+    },
+    {
+        "id": "chk_023",
+        "check_no": 23,
+        "category": "Timing & No-Trade Rules",
+        "label": "Perimums melting",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Perimums melting"
+    },
+    {
+        "id": "chk_024",
+        "check_no": 24,
+        "category": "Timing & No-Trade Rules",
+        "label": "Iran war news",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Iran war news"
+    },
+    {
+        "id": "chk_025",
+        "check_no": 25,
+        "category": "Timing & No-Trade Rules",
+        "label": "Us futures",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Us futures",
+        "feed_key": "us_futures_chg"
+    },
+    {
+        "id": "chk_026",
+        "check_no": 26,
+        "category": "Timing & No-Trade Rules",
+        "label": "European futures",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "European futures",
+        "feed_key": "eu_futures_chg"
+    },
+    {
+        "id": "chk_027",
+        "check_no": 27,
+        "category": "Timing & No-Trade Rules",
+        "label": "Europe markets opening",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Europe markets opening"
+    },
+    {
+        "id": "chk_028",
+        "check_no": 28,
+        "category": "Timing & No-Trade Rules",
+        "label": "Gold",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Gold",
+        "feed_key": "gold_chg"
+    },
+    {
+        "id": "chk_029",
+        "check_no": 29,
+        "category": "Timing & No-Trade Rules",
+        "label": "Silver",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Silver",
+        "feed_key": "silver_chg"
+    },
+    {
+        "id": "chk_030",
+        "check_no": 30,
+        "category": "Timing & No-Trade Rules",
+        "label": "Intraday booster",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Intraday booster"
+    },
+    {
+        "id": "chk_031",
+        "check_no": 31,
+        "category": "Timing & No-Trade Rules",
+        "label": "Tomorrow trade ideas",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Tomorrow trade ideas"
+    },
+    {
+        "id": "gap_up_down",
+        "check_no": 32,
+        "category": "Timing & No-Trade Rules",
+        "label": "Gap up / Gap down",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "Gap up / Gap down",
+        "feed_key": "gap_pct"
+    },
+    {
+        "id": "chk_033",
+        "check_no": 33,
+        "category": "Timing & No-Trade Rules",
+        "label": "3'clock move",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "3'clock move"
+    },
+    {
+        "id": "chk_034",
+        "check_no": 34,
+        "category": "Timing & No-Trade Rules",
+        "label": "Big move is over",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Big move is over"
+    },
+    {
+        "id": "chk_035",
+        "check_no": 35,
+        "category": "Timing & No-Trade Rules",
+        "label": "Economic calander, (fed meeting)",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Economic calander, (fed meeting)"
+    },
+    {
+        "id": "chk_036",
+        "check_no": 36,
+        "category": "Timing & No-Trade Rules",
+        "label": "RELIANCE agm, or any agm's",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "RELIANCE agm, or any agm's"
+    },
+    {
+        "id": "chk_037",
+        "check_no": 37,
+        "category": "Timing & No-Trade Rules",
+        "label": "Big upcoming calander, economic calander",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Big upcoming calander, economic calander"
+    },
+    {
+        "id": "big_gap_no_trade",
+        "check_no": 38,
+        "category": "Timing & No-Trade Rules",
+        "label": "Big gap up / gap down.. No trade",
+        "rule": "abs_lte",
+        "target": 0.8,
+        "tier": "fast",
+        "gates_entry": True,
+        "hint": "Big gap up / gap down.. No trade",
+        "feed_key": "gap_pct"
+    },
+    {
+        "id": "chk_039",
+        "check_no": 39,
+        "category": "Timing & No-Trade Rules",
+        "label": "No trade on Cool friday with big gap up or ga\u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "No trade on Cool friday with big gap up or gap down"
+    },
+    {
+        "id": "chk_040",
+        "check_no": 40,
+        "category": "Timing & No-Trade Rules",
+        "label": "No trade on writers grip market",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "No trade on writers grip market"
+    },
+    {
+        "id": "chk_041",
+        "check_no": 41,
+        "category": "Timing & No-Trade Rules",
+        "label": "All news",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "All news"
+    },
+    {
+        "id": "chk_042",
+        "check_no": 42,
+        "category": "Timing & No-Trade Rules",
+        "label": "If no big news upcoming.. Long straddle will \u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "If no big news upcoming.. Long straddle will decay"
+    },
+    {
+        "id": "chk_043",
+        "check_no": 43,
+        "category": "Levels & Technicals",
+        "label": "Market holidays / us, uk, nse",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Market holidays / us, uk, nse"
+    },
+    {
+        "id": "max_pain_check",
+        "check_no": 44,
+        "category": "Levels & Technicals",
+        "label": "Max pain, (from where to where it moves)",
+        "rule": "spot_below_max_pain",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "Max pain, (from where to where it moves)",
+        "feed_key": "max_pain"
+    },
+    {
+        "id": "chk_045",
+        "check_no": 45,
+        "category": "Levels & Technicals",
+        "label": "Cpr stopping",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Cpr stopping"
+    },
+    {
+        "id": "chk_046",
+        "check_no": 46,
+        "category": "Levels & Technicals",
+        "label": "Pivot points stopping",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Pivot points stopping"
+    },
+    {
+        "id": "chk_047",
+        "check_no": 47,
+        "category": "Levels & Technicals",
+        "label": "Previous day.. high/low",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Previous day.. high/low"
+    },
+    {
+        "id": "chk_048",
+        "check_no": 48,
+        "category": "Levels & Technicals",
+        "label": "1st 5 minutes candle breaking",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "1st 5 minutes candle breaking"
+    },
+    {
+        "id": "chk_049",
+        "check_no": 49,
+        "category": "Levels & Technicals",
+        "label": "Day high / low breaking",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Day high / low breaking"
+    },
+    {
+        "id": "chk_050",
+        "check_no": 50,
+        "category": "Levels & Technicals",
+        "label": "20 sma crossing in 1 minutes, 5 minutes",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "20 sma crossing in 1 minutes, 5 minutes"
+    },
+    {
+        "id": "chk_051",
+        "check_no": 51,
+        "category": "Levels & Technicals",
+        "label": "1 minutes chart",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "1 minutes chart"
+    },
+    {
+        "id": "chk_052",
+        "check_no": 52,
+        "category": "Levels & Technicals",
+        "label": "5 minutes chart",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "5 minutes chart"
+    },
+    {
+        "id": "chk_053",
+        "check_no": 53,
+        "category": "Levels & Technicals",
+        "label": "1 hour chart",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "1 hour chart"
+    },
+    {
+        "id": "chk_054",
+        "check_no": 54,
+        "category": "Levels & Technicals",
+        "label": "1 day chart",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "1 day chart"
+    },
+    {
+        "id": "chk_055",
+        "check_no": 55,
+        "category": "Levels & Technicals",
+        "label": "1 week chart",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "1 week chart"
+    },
+    {
+        "id": "chk_056",
+        "check_no": 56,
+        "category": "Levels & Technicals",
+        "label": "1 month chart",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "1 month chart"
+    },
+    {
+        "id": "chk_057",
+        "check_no": 57,
+        "category": "Levels & Technicals",
+        "label": "Last expiry high / low",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Last expiry high / low"
+    },
+    {
+        "id": "chk_058",
+        "check_no": 58,
+        "category": "Levels & Technicals",
+        "label": "Last month expiry high / low",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Last month expiry high / low"
+    },
+    {
+        "id": "chk_059",
+        "check_no": 59,
+        "category": "Levels & Technicals",
+        "label": "Next day of Last month expiry or 1st day of c\u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Next day of Last month expiry or 1st day of current month high / low"
+    },
+    {
+        "id": "chk_060",
+        "check_no": 60,
+        "category": "Levels & Technicals",
+        "label": "Running month high / low",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Running month high / low"
+    },
+    {
+        "id": "chk_061",
+        "check_no": 61,
+        "category": "Global Markets Watch",
+        "label": "Gift Nifty (india sgx nifty)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Gift Nifty (india sgx nifty)",
+        "feed_key": "global_gift_nifty_chg"
+    },
+    {
+        "id": "chk_062",
+        "check_no": 62,
+        "category": "Global Markets Watch",
+        "label": "Nikky 225- japan",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Nikky 225- japan",
+        "feed_key": "global_nikkei_chg"
+    },
+    {
+        "id": "chk_063",
+        "check_no": 63,
+        "category": "Global Markets Watch",
+        "label": "The Straits Times Index (STI) - Singapore Exc\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "The Straits Times Index (STI) - Singapore Exchange (SGX)",
+        "feed_key": "global_sti_chg"
+    },
+    {
+        "id": "chk_064",
+        "check_no": 64,
+        "category": "Global Markets Watch",
+        "label": "Hang seng (honkong market)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Hang seng (honkong market)",
+        "feed_key": "global_hang_seng_chg"
+    },
+    {
+        "id": "chk_065",
+        "check_no": 65,
+        "category": "Global Markets Watch",
+        "label": "Taiwan market",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Taiwan market",
+        "feed_key": "global_taiwan_chg"
+    },
+    {
+        "id": "chk_066",
+        "check_no": 66,
+        "category": "Global Markets Watch",
+        "label": "Kospi (South Korea)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Kospi (South Korea)",
+        "feed_key": "global_kospi_chg"
+    },
+    {
+        "id": "chk_067",
+        "check_no": 67,
+        "category": "Global Markets Watch",
+        "label": "SET Composite Index(Thailand)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "SET Composite Index(Thailand)",
+        "feed_key": "global_set_thailand_chg"
+    },
+    {
+        "id": "chk_068",
+        "check_no": 68,
+        "category": "Global Markets Watch",
+        "label": "Jakarta Composite Index (IDX Composite or JCI\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Jakarta Composite Index (IDX Composite or JCI) (Indonesia)",
+        "feed_key": "global_jakarta_chg"
+    },
+    {
+        "id": "chk_069",
+        "check_no": 69,
+        "category": "Global Markets Watch",
+        "label": "Shanghai Stock Exchange(China)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Shanghai Stock Exchange(China)",
+        "feed_key": "global_shanghai_chg"
+    },
+    {
+        "id": "chk_070",
+        "check_no": 70,
+        "category": "Global Markets Watch",
+        "label": "FTSE (Financial Times Stock Exchange,United K\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "FTSE (Financial Times Stock Exchange,United Kingdom, Britain, British)",
+        "feed_key": "global_ftse_chg"
+    },
+    {
+        "id": "chk_071",
+        "check_no": 71,
+        "category": "Global Markets Watch",
+        "label": "CAC 40(Continuous Assisted Quotation)(France)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "CAC 40(Continuous Assisted Quotation)(France)",
+        "feed_key": "global_cac40_chg"
+    },
+    {
+        "id": "chk_072",
+        "check_no": 72,
+        "category": "Global Markets Watch",
+        "label": "DAX (Deutscher Aktienindex) (Germany)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "DAX (Deutscher Aktienindex) (Germany)",
+        "feed_key": "global_dax_chg"
+    },
+    {
+        "id": "chk_073",
+        "check_no": 73,
+        "category": "Global Markets Watch",
+        "label": "Dow futures, Dow Jones Industrial Average (DJ\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Dow futures, Dow Jones Industrial Average (DJIA)(America)",
+        "feed_key": "global_dow_fut_chg"
+    },
+    {
+        "id": "chk_074",
+        "check_no": 74,
+        "category": "Global Markets Watch",
+        "label": "S&P 500 futures (Standard & Poor's)(America)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "S&P 500 futures (Standard & Poor's)(America)",
+        "feed_key": "global_sp500_fut_chg"
+    },
+    {
+        "id": "chk_075",
+        "check_no": 75,
+        "category": "Global Markets Watch",
+        "label": "NASDAQ futures (National Association of Secur\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "NASDAQ futures (National Association of Securities Dealers Automated Quotations)(America)",
+        "feed_key": "global_nasdaq_fut_chg"
+    },
+    {
+        "id": "chk_076",
+        "check_no": 76,
+        "category": "Global Markets Watch",
+        "label": "Dow Jones Industrial Average (DJIA)(America)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Dow Jones Industrial Average (DJIA)(America)",
+        "feed_key": "global_dow_jones_chg"
+    },
+    {
+        "id": "chk_077",
+        "check_no": 77,
+        "category": "Global Markets Watch",
+        "label": "S&P 500 (Standard & Poor's) (America)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "S&P 500 (Standard & Poor's) (America)",
+        "feed_key": "global_sp500_chg"
+    },
+    {
+        "id": "chk_078",
+        "check_no": 78,
+        "category": "Global Markets Watch",
+        "label": "NASDAQ (National Association of Securities De\u2026",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "NASDAQ (National Association of Securities Dealers Automated Quotations)(America)",
+        "feed_key": "global_nasdaq_chg"
+    },
+    {
+        "id": "chk_079",
+        "check_no": 79,
+        "category": "Global Markets Watch",
+        "label": "S&P/ASX 200 (XJO)( Australia)",
+        "rule": "abs_lte",
+        "target": 0.5,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "S&P/ASX 200 (XJO)( Australia)",
+        "feed_key": "global_asx200_chg"
+    },
+    {
+        "id": "chk_080",
+        "check_no": 80,
+        "category": "Global Markets Watch",
+        "label": "If there is no negative news in market is als\u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "slow",
+        "gates_entry": False,
+        "hint": "If there is no negative news in market is also good news"
+    },
+    {
+        "id": "chk_081",
+        "check_no": 81,
+        "category": "Global Markets Watch",
+        "label": "Bond market",
+        "rule": "info",
+        "target": 0,
+        "tier": "slow",
+        "gates_entry": False,
+        "hint": "Bond market"
+    },
+    {
+        "id": "chk_082",
+        "check_no": 82,
+        "category": "Global Markets Watch",
+        "label": "Bitcoin",
+        "rule": "abs_lte",
+        "target": 2.0,
+        "tier": "slow",
+        "gates_entry": True,
+        "hint": "Bitcoin",
+        "feed_key": "global_bitcoin_chg"
+    },
+    {
+        "id": "chk_083",
+        "check_no": 83,
+        "category": "Global Markets Watch",
+        "label": "All crypto currency",
+        "rule": "info",
+        "target": 0,
+        "tier": "slow",
+        "gates_entry": False,
+        "hint": "All crypto currency"
+    },
+    {
+        "id": "chk_084",
+        "check_no": 84,
+        "category": "Global Markets Watch",
+        "label": "Holidays, elections, big reforms, fed meeting\u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "slow",
+        "gates_entry": False,
+        "hint": "Holidays, elections, big reforms, fed meeting, gdp data, inflation data"
+    },
+    {
+        "id": "chk_085",
+        "check_no": 85,
+        "category": "Stock Big-Move Watch",
+        "label": "RELIANCE big move",
+        "rule": "abs_lte",
+        "target": 1.5,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "RELIANCE big move",
+        "feed_key": "stock_reliance_chg"
+    },
+    {
+        "id": "chk_086",
+        "check_no": 86,
+        "category": "Stock Big-Move Watch",
+        "label": "HDFC big move",
+        "rule": "abs_lte",
+        "target": 1.5,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "HDFC big move",
+        "feed_key": "stock_hdfc_chg"
+    },
+    {
+        "id": "chk_087",
+        "check_no": 87,
+        "category": "Stock Big-Move Watch",
+        "label": "INFOSYS big move",
+        "rule": "abs_lte",
+        "target": 1.5,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "INFOSYS big move",
+        "feed_key": "stock_infosys_chg"
+    },
+    {
+        "id": "chk_088",
+        "check_no": 88,
+        "category": "Stock Big-Move Watch",
+        "label": "SBI big move",
+        "rule": "abs_lte",
+        "target": 1.5,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "SBI big move",
+        "feed_key": "stock_sbi_chg"
+    },
+    {
+        "id": "chk_089",
+        "check_no": 89,
+        "category": "Stock Big-Move Watch",
+        "label": "ICICI BANK big move",
+        "rule": "abs_lte",
+        "target": 1.5,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "ICICI BANK big move",
+        "feed_key": "stock_icici_chg"
+    },
+    {
+        "id": "chk_090",
+        "check_no": 90,
+        "category": "Stock Big-Move Watch",
+        "label": "AIRTEL big move",
+        "rule": "abs_lte",
+        "target": 1.5,
+        "tier": "medium",
+        "gates_entry": True,
+        "hint": "AIRTEL big move",
+        "feed_key": "stock_airtel_chg"
+    },
+    {
+        "id": "chk_091",
+        "check_no": 91,
+        "category": "Stock Big-Move Watch",
+        "label": "Nifty 50 points move is over",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Nifty 50 points move is over",
+        "feed_key": "nifty_points_move"
+    },
+    {
+        "id": "chk_092",
+        "check_no": 92,
+        "category": "Stock Big-Move Watch",
+        "label": "Sensex 100 points move is over",
+        "rule": "info",
+        "target": 0,
+        "tier": "fast",
+        "gates_entry": False,
+        "hint": "Sensex 100 points move is over",
+        "feed_key": "sensex_points_move"
+    },
+    {
+        "id": "chk_093",
+        "check_no": 93,
+        "category": "Trade Discipline Check",
+        "label": "Instructor 100% confidence trade or 80 to 90%\u2026",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Instructor 100% confidence trade or 80 to 90% confidence trade?"
+    },
+    {
+        "id": "chk_094",
+        "check_no": 94,
+        "category": "Trade Discipline Check",
+        "label": "Over trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Over trade?"
+    },
+    {
+        "id": "chk_095",
+        "check_no": 95,
+        "category": "Trade Discipline Check",
+        "label": "Revange trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Revange trade?"
+    },
+    {
+        "id": "chk_096",
+        "check_no": 96,
+        "category": "Trade Discipline Check",
+        "label": "Prediction trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Prediction trade?"
+    },
+    {
+        "id": "chk_097",
+        "check_no": 97,
+        "category": "Trade Discipline Check",
+        "label": "Social media influencers trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Social media influencers trade?"
+    },
+    {
+        "id": "chk_098",
+        "check_no": 98,
+        "category": "Trade Discipline Check",
+        "label": "Tips given trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Tips given trade?"
+    },
+    {
+        "id": "chk_099",
+        "check_no": 99,
+        "category": "Trade Discipline Check",
+        "label": "Over confidence trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Over confidence trade?"
+    },
+    {
+        "id": "chk_100",
+        "check_no": 100,
+        "category": "Trade Discipline Check",
+        "label": "To show built up to others trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "To show built up to others trade?"
+    },
+    {
+        "id": "chk_101",
+        "check_no": 101,
+        "category": "Trade Discipline Check",
+        "label": "Lack of personal expences trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Lack of personal expences trade?"
+    },
+    {
+        "id": "chk_102",
+        "check_no": 102,
+        "category": "Trade Discipline Check",
+        "label": "Emotional trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Emotional trade?"
+    },
+    {
+        "id": "chk_103",
+        "check_no": 103,
+        "category": "Trade Discipline Check",
+        "label": "FOMO ( Fear of missing out ) trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "FOMO ( Fear of missing out ) trade?"
+    },
+    {
+        "id": "chk_104",
+        "check_no": 104,
+        "category": "Trade Discipline Check",
+        "label": "Confusion trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Confusion trade?"
+    },
+    {
+        "id": "chk_105",
+        "check_no": 105,
+        "category": "Trade Discipline Check",
+        "label": "Fear trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Fear trade?"
+    },
+    {
+        "id": "chk_106",
+        "check_no": 106,
+        "category": "Trade Discipline Check",
+        "label": "Fear of recovering old losses trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Fear of recovering old losses trade?"
+    },
+    {
+        "id": "chk_107",
+        "check_no": 107,
+        "category": "Trade Discipline Check",
+        "label": "Time pass trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Time pass trade?"
+    },
+    {
+        "id": "chk_108",
+        "check_no": 108,
+        "category": "Trade Discipline Check",
+        "label": "Experimental trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Experimental trade?"
+    },
+    {
+        "id": "chk_109",
+        "check_no": 109,
+        "category": "Trade Discipline Check",
+        "label": "Full amount & full Lots trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Full amount & full Lots trade?"
+    },
+    {
+        "id": "chk_110",
+        "check_no": 110,
+        "category": "Trade Discipline Check",
+        "label": "To come out of red trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "To come out of red trade?"
+    },
+    {
+        "id": "chk_111",
+        "check_no": 111,
+        "category": "Trade Discipline Check",
+        "label": "To reach round figure trade",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "To reach round figure trade"
+    },
+    {
+        "id": "chk_112",
+        "check_no": 112,
+        "category": "Trade Discipline Check",
+        "label": "Investors satisfaction trade?",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Investors satisfaction trade?"
+    },
+    {
+        "id": "chk_113",
+        "check_no": 113,
+        "category": "Trade Discipline Check",
+        "label": "Trading view - super tend - vwap- volume 1.2Lakh",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Trading view - super tend - vwap- volume 1.2Lakh"
+    },
+    {
+        "id": "chk_114",
+        "check_no": 114,
+        "category": "Trade Discipline Check",
+        "label": "Previous lot recovery trade",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Previous lot recovery trade"
+    },
+    {
+        "id": "chk_115",
+        "check_no": 115,
+        "category": "Trade Discipline Check",
+        "label": "Price Averaging trade",
+        "rule": "info",
+        "target": 0,
+        "tier": "medium",
+        "gates_entry": False,
+        "hint": "Price Averaging trade"
+    }
+]
+
+CHECKLIST_FEED_PATCHES: dict[str, dict[str, Any]] = {
+    "chk_011": {"feed_key": "advance_decline_ratio", "source": "nse"},
+    "chk_045": {"feed_key": "cpr_bottom", "source": "kite_candles"},
+    "chk_046": {"feed_key": "pivot_point", "source": "kite_candles"},
+    "chk_047": {"feed_key": "prev_day_high", "source": "kite_candles"},
+    "chk_048": {"feed_key": "inside_first_5m_range", "source": "kite_candles"},
+    "chk_049": {"feed_key": "inside_day_range", "source": "kite_candles"},
+    "chk_050": {"feed_key": "spot_vs_sma20_5m", "source": "kite_candles"},
+}
+
+
+def _apply_checklist_feed_patches() -> None:
+    for metric in DEFAULT_METRICS:
+        patch = CHECKLIST_FEED_PATCHES.get(str(metric.get("id") or ""))
+        if patch:
+            metric.update(patch)
+
+
+def _finalize_checklist_metrics() -> None:
+    normalized = normalize_metrics(DEFAULT_METRICS)
+    DEFAULT_METRICS.clear()
+    DEFAULT_METRICS.extend(normalized)
+
+
+_apply_checklist_feed_patches()
+_finalize_checklist_metrics()

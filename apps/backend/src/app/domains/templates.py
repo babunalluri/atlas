@@ -190,8 +190,12 @@ STOCK_BROKER = DomainTemplate(
             instructions=(
                 "This is the admin Signals ops workspace — not on the end-user desk. "
                 "Route to Signal Operator. Use signal_engine toolkit for metric state and "
-                "publish_entry_signal when entry_ready. Bind read-only broker quotes here. "
-                "Dow Jones and crude use slow/medium cache tiers; NIFTY/CE/PE/OI refresh fast. "
+                "publish_entry_signal when entry_ready. "
+                "Bind Kite Connect (read-only) on this team: get_quote, get_ltp, get_ohlc, "
+                "get_historical_candles — Kite-only for signals; no Groww. "
+                "Global indices use backend Yahoo Finance slow tier (~1 h); do not poll Yahoo from chat. "
+                "Trade Desk Checklist metrics refresh fast (NIFTY/CE/PE/OI) via Kite; "
+                "ADX/RSI/crude/VIX medium tier; globals slow tier. "
                 "Never expose raw metrics to customer teams."
             ),
             mode="route",

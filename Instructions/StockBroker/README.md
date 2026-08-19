@@ -67,8 +67,8 @@ Instructions/StockBroker/
 4. Create Editable Python tools as needed:
    - `tools/stock_broker_toolkit.py` — bind on **Paper trading** (and optionally **Live trading** for algo).
    - `tools/research_toolkit.py` — bind on **Research**. See `tools/RESEARCH.md`.
+   - **`tools/kite_toolkit.py`** — bind on **Signals ops** (required for live signal engine) and **Live trading**. See `tools/KITE.md`.
    - `tools/signal_engine_toolkit.py` — optional on **Signals ops** (admin desk uses native API). See `tools/SIGNAL_ENGINE.md`.
-   - One **broker adapter** on **Live trading**; optional read-only on **Learning** / **Research** / **Signals ops**.
 5. Validate → Publish. Desk widgets load **Widget → Team → assigned tools** on manual refresh.
 
 ## Canonical API namespaces (from PRD)

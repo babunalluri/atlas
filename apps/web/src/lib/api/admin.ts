@@ -3584,12 +3584,15 @@ export async function getDomainDashboard(
 
 export interface SignalMetricRow {
   id: string;
+  check_no?: number;
+  category?: string;
   label: string;
   value: number | null;
   target: string;
   rule: string;
   tier: string;
   passed: boolean | null;
+  gates_entry?: boolean;
   hint?: string;
 }
 

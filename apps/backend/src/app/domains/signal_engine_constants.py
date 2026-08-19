@@ -21,5 +21,6 @@ TIER_TTL_MS: dict[Tier, int] = {
 TICKER_IDLE_POLL_SECONDS = 2.0
 
 WATCH_TTL_SECONDS = 2
-SNAPSHOT_TTL_MS = max(STREAM_INTERVAL_MS * 2, 250)
+# Coalesce concurrent stream readers; refresh at stream cadence (not 2× slower).
+SNAPSHOT_TTL_MS = STREAM_INTERVAL_MS
 LOCK_TTL_MS = max(BROKER_QUOTE_TTL_MS, STREAM_INTERVAL_MS * 2)

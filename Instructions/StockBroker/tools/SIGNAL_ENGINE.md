@@ -9,14 +9,14 @@ Bind in **Team Builder** on **Signals ops** (`signals-ops`) — not on the Signa
 | Toolkit | Required? | Notes |
 |---|---|---|
 | `signal_engine_toolkit.py` | optional (chat) | Native admin desk uses `/admin/signals/*` |
-| Kite or Groww (read-only) | recommended | `get_ltp`, `get_quote`, `get_ohlc` for live metrics |
+| Kite or Groww (read-only) | **Kite required** | `get_quote`, `get_ltp`, `get_ohlc`, `get_historical_candles` — backend engine reads **Signals ops** team bindings only |
 
 Do **not** bind on Learning, Paper, Live, or Research.
 
 ## Live setup checklist (no mock)
 
 1. **Signals ops** team — published  
-2. **Kite toolkit** — bound on team, valid `access_token`  
+2. **Kite toolkit** — bound on **Signals ops** team only, valid `access_token`  
 3. **Signal engine tool** — admin selects underlying on the desk **Signal config** panel, or PATCH `/admin/signals/config`:
 
 ```json
@@ -89,7 +89,11 @@ With `REDIS_URL=memory://` (local/test), caches fall back to in-process dicts �
 
 ## Metric rows (default)
 
-### Custom desk rules (spreadsheet)
+The engine ships **124 metric rows** — **115 Trade Desk Checklist** items plus 9 core gated helpers (ATM, OI % chg, RSI, etc.). Metrics include `check_no`, `category`, and `gates_entry` (only gated rules block `entry_ready`).
+
+UI groups metrics by checklist category on the admin desk.
+
+### Custom desk rules (legacy summary)
 
 | ID | Rule | Target |
 |---|---|---|
@@ -140,6 +144,23 @@ The backend signal engine (`apps/backend/.../signal_engine.py`) applies these ru
 
 Still set **max_pain**, **ivp**, and **dow_change_pct** manually (or via future chain API). PCR manual override wins over ATM-OI estimate.
 
+## Yahoo Finance (global macro — slow tier)
+
+Global indices, metals, and crypto for the Trade Desk checklist use **public Yahoo Finance** via `signal_engine_yahoo.py` — not Kite.
+
+Yahoo aggressively rate-limits scripted access (`429 Too Many Requests`). The engine therefore:
+
+| Rule | Value |
+|---|---|
+| Poll interval | **1 hour** (slow tier) — never on the 8 Hz stream |
+| Fetch method | One batched `yf.download` (5d daily candles), **not** per-ticker `.info` |
+| Session | `curl_cffi` Chrome impersonation (plain `requests` gets blocked more often) |
+| Chunking | 8 symbols per batch, 2 s pause between batches (~24 symbols ≈ 30 s) |
+| On 429 | **30 min cooldown** — serve last cached values, do not retry |
+| Mock mode | Deterministic demo values — no Yahoo calls |
+
+Prefer **Kite** for all Indian live data (NIFTY, VIX, MCX crude, USDINR). Use Yahoo only for offshore indices where Kite has no symbol.
+
 ## Data availability
 
 | Metric | Groww | Kite | Notes |
@@ -151,7 +172,7 @@ Still set **max_pain**, **ivp**, and **dow_change_pct** manually (or via future 
 | IVP | no | no | Needs 250d IV history — set manually |
 | India VIX | no | yes | `NSE:INDIA VIX` quote |
 | Crude | no (no MCX) | yes | MCX segment |
-| Dow Jones | no | no | Set `dow_change_pct` or external feed |
+| Dow Jones / global indices | no | no | Yahoo Finance slow tier (see below) or manual |
 | ADX / RSI | compute | compute | Live via `get_historical_candles` (15m) |
 | Spot % / vs open | yes | yes | From underlying full quote |
 | Fut basis | yes | yes | FUT vs spot from batch quote |

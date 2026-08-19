@@ -11,7 +11,7 @@ Atlas skill pack for the Stock Broker **end-user desk**: four chats.
   - Any later broker — publish the toolkit, assign it on those teams
 - **Learn policy:** Knowledge Base for lessons. Generic ticker questions (“predict TCS…”) stay in **Learning**: read-only quotes if a broker toolkit is assigned; **never** predict or guarantee prices. Do **not** rebuild Classplus.
 - **Research policy:** Analysis only. You MUST call tools for any price, position, Greek, IV, payoff, or what-if. Live orders stay on Live trading (HITL).
-- **Signal engine (admin):** `tools/signal_engine_toolkit.py` + `tools/SIGNAL_ENGINE.md` — metric board, entry rules, notify all users. Bind on **Signals ops** team; admin desk streams `GET /admin/signals/stream` ~8×/sec.
+- **Signal engine (admin):** `tools/signal_engine_toolkit.py` + `tools/SIGNAL_ENGINE.md` — Trade Desk Checklist metrics, entry rules, notify all users. Bind **Kite** on **Signals ops** (`signals-ops`); admin desk streams `GET /admin/signals/stream` ~8×/sec. Global macro via backend Yahoo slow tier (~1 h).
 
 ---
 
@@ -48,7 +48,7 @@ No ops-publisher, param-editor, feed-monitor, or compliance-officer agents on th
 | Paper trading | `paper-trading` | Paper Trader | Signal → paper fill |
 | Live trading | `live-trading` | Live Trader | Assigned broker + live status |
 | Research | `research` | Researcher | Tool-required stock / F&O analysis (no orders) |
-| Signals ops | `signals-ops` | Signal Operator | Admin metrics + entry publish (not on user desk) |
+| Signals ops | `signals-ops` | Signal Operator | Admin Trade Desk metrics + entry publish (Kite required; Yahoo globals in backend) |
 
 ---
 
