@@ -4,10 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SignalSetupBar } from "@/components/domains/SignalSetupBar";
 import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
+import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Field";
-import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon } from "@/components/ui/icons";
+import { Button, buttonClassName } from "@/components/ui/Button";
+import { FieldHint, Input, Label, Textarea } from "@/components/ui/Field";
+import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon, ChevronDownIcon } from "@/components/ui/icons";
 import {
   getSignalState,
   publishSignalEntry,
@@ -310,6 +311,130 @@ function buySignalTextClassName(tone: BuySignalTone): string {
   }
 }
 
+function defaultNotifyTitle(tone: BuySignalTone): string {
+  switch (tone) {
+    case "ready":
+      return "New trading signal — GO";
+    case "blocked":
+      return "Signal update — NO GO";
+    case "waiting":
+      return "Signal snapshot — PENDING";
+    default:
+      return "New trading signal";
+  }
+}
+
+function defaultNotifyBody(
+  entry: SignalEntry | null | undefined,
+  state: SignalEngineState | null,
+): string {
+  const label = entry?.label ?? "BUY= —, CE=—, PE=—, EXIT —";
+  const note =
+    entry?.status_note ??
+    (state ? `${state.passed}/${state.evaluable} rules passing` : "");
+  return note ? `${label}\n\n${note}` : label;
+}
+
+function notifyBellButtonClass(tone: BuySignalTone): string {
+  switch (tone) {
+    case "ready":
+      return "bg-teal text-white hover:bg-teal-bright focus-visible:ring-teal-bright/45";
+    case "blocked":
+      return "bg-rose text-white hover:bg-rose/90 focus-visible:ring-rose/45";
+    case "waiting":
+      return "bg-amber-500 text-white hover:bg-amber-600 focus-visible:ring-amber-400/45";
+    default:
+      return "bg-fog text-slate-muted hover:bg-mist focus-visible:ring-line/50";
+  }
+}
+
+function NotifySignalDialog({
+  open,
+  tone,
+  title,
+  body,
+  publishing,
+  onTitleChange,
+  onBodyChange,
+  onClose,
+  onSend,
+}: {
+  open: boolean;
+  tone: BuySignalTone;
+  title: string;
+  body: string;
+  publishing: boolean;
+  onTitleChange: (value: string) => void;
+  onBodyChange: (value: string) => void;
+  onClose: () => void;
+  onSend: () => void;
+}) {
+  if (!open) return null;
+
+  const statusHint =
+    tone === "ready"
+      ? "Entry rules pass — desk can act on this signal."
+      : tone === "blocked"
+        ? "Some gated rules are failing — edit before notifying if needed."
+        : "Snapshot only — edit the message before sending.";
+
+  return (
+    <AdminFormDialog
+      title="Notify all users"
+      subtitle={statusHint}
+      titleId="notify-signal-title"
+      onClose={onClose}
+      showCloseButton
+      className="max-w-lg"
+    >
+      <div className="space-y-4">
+        <div>
+          <Label htmlFor="notify-signal-subject">Notification title</Label>
+          <Input
+            id="notify-signal-subject"
+            value={title}
+            onChange={(event) => onTitleChange(event.target.value)}
+            maxLength={200}
+            disabled={publishing}
+          />
+        </div>
+        <div>
+          <Label htmlFor="notify-signal-body" hint="Shown in the in-app bell feed">
+            Message
+          </Label>
+          <Textarea
+            id="notify-signal-body"
+            value={body}
+            onChange={(event) => onBodyChange(event.target.value)}
+            maxLength={2000}
+            rows={5}
+            disabled={publishing}
+          />
+          <FieldHint>Adjust CE/PE, exit, or add desk notes before sending.</FieldHint>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={publishing}>
+            Cancel
+          </Button>
+          <Button
+            variant={tone === "blocked" ? "danger" : tone === "waiting" ? "secondary" : "accent"}
+            className={cn(
+              tone === "waiting" &&
+                "border-amber-400 bg-amber-500 text-white hover:bg-amber-600",
+              tone === "ready" && "bg-teal hover:bg-teal-bright",
+            )}
+            icon={<BellIcon />}
+            disabled={publishing || !title.trim() || !body.trim()}
+            onClick={onSend}
+          >
+            {publishing ? "Sending…" : "Send notification"}
+          </Button>
+        </div>
+      </div>
+    </AdminFormDialog>
+  );
+}
+
 function BuySignalBanner({
   state,
   entry,
@@ -317,7 +442,7 @@ function BuySignalBanner({
   entryReady,
   publishing,
   publishMsg,
-  onPublish,
+  onOpenNotify,
 }: {
   state: SignalEngineState | null;
   entry: SignalEntry | null | undefined;
@@ -325,7 +450,7 @@ function BuySignalBanner({
   entryReady: boolean;
   publishing: boolean;
   publishMsg: string | null;
-  onPublish: () => void;
+  onOpenNotify: () => void;
 }) {
   const tone = buySignalTone(state, entry);
   const buyLine = buySignalLine(entry);
@@ -335,7 +460,7 @@ function BuySignalBanner({
       ? `${state.passed}/${state.evaluable} rules passing`
       : "Loading buy signal…");
   const statusLine = publishMsg ?? note;
-  const canNotify = !publishing;
+  const canNotify = !publishing && Boolean(state?.entry);
 
   return (
     <div
@@ -375,11 +500,8 @@ function BuySignalBanner({
         <span className="min-w-0 flex-1 truncate text-[11px] leading-none opacity-80">
           {statusLine}
         </span>
-        <Button
-          variant="accent"
-          size="icon"
-          className="shrink-0"
-          icon={<BellIcon />}
+        <button
+          type="button"
           disabled={!canNotify}
           aria-label={
             publishing
@@ -391,10 +513,18 @@ function BuySignalBanner({
               ? "Sending notification…"
               : entryReady
                 ? "Notify all users — entry rules pass"
-                : "Notify all users with current signal snapshot"
+                : tone === "blocked"
+                  ? "Notify all users — rules failing (edit before send)"
+                  : "Notify all users with current signal snapshot"
           }
-          onClick={onPublish}
-        />
+          onClick={onOpenNotify}
+          className={cn(
+            buttonClassName({ variant: "secondary", size: "icon" }),
+            notifyBellButtonClass(tone),
+          )}
+        >
+          <BellIcon />
+        </button>
       </div>
     </div>
   );
@@ -447,6 +577,78 @@ function EditableOverrideValue({
     >
       {formatValue(row.value)}
     </button>
+  );
+}
+
+function MetricCategoryWidget({
+  category,
+  rows,
+  passing,
+  open,
+  onToggle,
+  config,
+  patchConfig,
+  valueTicks,
+}: {
+  category: string;
+  rows: SignalMetricRow[];
+  passing: string;
+  open: boolean;
+  onToggle: () => void;
+  config: SignalEngineAdminConfig | null;
+  patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
+  valueTicks: Map<string, ValueTick>;
+}) {
+  const failCount = rows.filter((r) => r.gates_entry && r.passed === false).length;
+
+  return (
+    <section className="min-w-0 overflow-hidden rounded-lg border border-line bg-white/60">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors hover:bg-fog/50"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls={`metric-category-${category.replace(/\s+/g, "-")}`}
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <ChevronDownIcon
+            className={cn(
+              "size-4 shrink-0 text-slate-muted transition-transform duration-200",
+              !open && "-rotate-90",
+            )}
+          />
+          <span className="truncate text-sm font-semibold text-ink">{category}</span>
+          {failCount > 0 ? (
+            <Badge tone="danger" className="px-1.5 py-0 text-[9px]">
+              {failCount} fail
+            </Badge>
+          ) : null}
+        </span>
+        <span className="shrink-0 text-xs text-slate-muted">{passing}</span>
+      </button>
+      {open ? (
+        <div
+          id={`metric-category-${category.replace(/\s+/g, "-")}`}
+          className="border-t border-line/60 px-2 pb-2 pt-1"
+        >
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {splitMetricColumns(rows).map((column, index) => (
+              <div
+                key={`${category}-col-${index}`}
+                className="min-w-0 overflow-hidden rounded-lg border border-line/70 bg-white/80"
+              >
+                <MetricTable
+                  rows={column}
+                  config={config}
+                  patchConfig={patchConfig}
+                  valueTicks={valueTicks}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -550,6 +752,9 @@ export function SignalMetricsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [publishMsg, setPublishMsg] = useState<string | null>(null);
+  const [notifyOpen, setNotifyOpen] = useState(false);
+  const [notifyTitle, setNotifyTitle] = useState("");
+  const [notifyBody, setNotifyBody] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [warningsOpen, setWarningsOpen] = useState(true);
   const [engineBusy, setEngineBusy] = useState(false);
@@ -591,6 +796,30 @@ export function SignalMetricsPanel() {
     () => groupMetricsByCategory(metrics),
     [metrics],
   );
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const toggleCategory = useCallback((category: string) => {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) {
+        next.delete(category);
+      } else {
+        next.add(category);
+      }
+      return next;
+    });
+  }, []);
+
+  const expandAllCategories = useCallback(() => {
+    setCollapsedCategories(new Set());
+  }, []);
+
+  const collapseAllCategories = useCallback(() => {
+    setCollapsedCategories(new Set(metricGroups.map((g) => g.category)));
+  }, [metricGroups]);
+
   const valueTicks = useStickyValueTicks(metrics);
 
   const refreshOnce = useCallback(async () => {
@@ -663,14 +892,21 @@ export function SignalMetricsPanel() {
     }
   }
 
-  async function onPublish() {
+  async function onPublish(editedTitle: string, editedBody: string) {
     setPublishing(true);
     setPublishMsg(null);
     try {
       const token = await getAccessToken();
-      if (!token) return;
-      const result = await publishSignalEntry(token);
+      if (!token) {
+        setPublishMsg("Not signed in — cannot publish.");
+        return;
+      }
+      const result = await publishSignalEntry(token, {
+        title: editedTitle.trim(),
+        body: editedBody.trim(),
+      });
       if (result.ok) {
+        setNotifyOpen(false);
         setPublishMsg(
           result.deduped
             ? "Already notified (deduped)."
@@ -686,6 +922,14 @@ export function SignalMetricsPanel() {
     }
   }
 
+  const buyTone = buySignalTone(state, state?.entry);
+
+  function openNotifyDialog() {
+    setNotifyTitle(defaultNotifyTitle(buyTone));
+    setNotifyBody(defaultNotifyBody(state?.entry, state));
+    setNotifyOpen(true);
+  }
+
   const entry = state?.entry;
   const entryReady = Boolean(state?.entry_ready);
   const warnings = state?.live_warnings ?? [];
@@ -698,9 +942,6 @@ export function SignalMetricsPanel() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="font-display text-lg font-semibold tracking-tight">
-                Signal engine
-              </h2>
               <Badge
                 tone={
                   !engineEnabled
@@ -847,7 +1088,21 @@ export function SignalMetricsPanel() {
         entryReady={entryReady}
         publishing={publishing}
         publishMsg={publishMsg}
-        onPublish={() => void onPublish()}
+        onOpenNotify={openNotifyDialog}
+      />
+
+      <NotifySignalDialog
+        open={notifyOpen}
+        tone={buyTone}
+        title={notifyTitle}
+        body={notifyBody}
+        publishing={publishing}
+        onTitleChange={setNotifyTitle}
+        onBodyChange={setNotifyBody}
+        onClose={() => {
+          if (!publishing) setNotifyOpen(false);
+        }}
+        onSend={() => void onPublish(notifyTitle, notifyBody)}
       />
 
       <div className="mt-3 shrink-0">
@@ -869,29 +1124,27 @@ export function SignalMetricsPanel() {
             Waiting for signal stream…
           </p>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-end gap-2 px-1">
+              <Button variant="secondary" size="sm" onClick={expandAllCategories}>
+                Expand all
+              </Button>
+              <Button variant="secondary" size="sm" onClick={collapseAllCategories}>
+                Collapse all
+              </Button>
+            </div>
             {metricGroups.map(({ category, rows, passing }) => (
-              <div key={category} className="min-w-0">
-                <div className="mb-2 flex items-baseline justify-between gap-2 px-1">
-                  <h3 className="text-sm font-semibold text-ink">{category}</h3>
-                  <span className="shrink-0 text-xs text-slate-muted">{passing}</span>
-                </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {splitMetricColumns(rows).map((column, index) => (
-                    <div
-                      key={`${category}-col-${index}`}
-                      className="min-w-0 overflow-hidden rounded-lg border border-line bg-white/60"
-                    >
-                      <MetricTable
-                        rows={column}
-                        config={config}
-                        patchConfig={patchConfig}
-                        valueTicks={valueTicks}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <MetricCategoryWidget
+                key={category}
+                category={category}
+                rows={rows}
+                passing={passing}
+                open={!collapsedCategories.has(category)}
+                onToggle={() => toggleCategory(category)}
+                config={config}
+                patchConfig={patchConfig}
+                valueTicks={valueTicks}
+              />
             ))}
           </div>
         )}

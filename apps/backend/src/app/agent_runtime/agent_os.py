@@ -75,6 +75,7 @@ from app.api import workflow_access as workflow_access_api
 from app.api import customers as customers_api
 from app.api import domains as domains_api
 from app.api import desk as desk_api
+from app.api import options_lab as options_lab_api
 from app.api import signals as signals_api
 from app.api import users as users_api
 from app.auth.dependencies import require_tenant
@@ -623,6 +624,7 @@ def create_app() -> FastAPI:
     base_app.include_router(onboarding_api.router)
     base_app.include_router(domains_api.router)
     base_app.include_router(signals_api.router)
+    base_app.include_router(options_lab_api.router)
     base_app.include_router(desk_api.router)
     base_app.include_router(workspace_api.router)
     base_app.include_router(schedules_api.router)

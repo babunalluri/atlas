@@ -88,7 +88,8 @@ export function isGenericAdminLanding(pathname: string): boolean {
     path === "/" ||
     path === "/admin" ||
     path === "/admin/workflows" ||
-    path === "/admin/agents"
+    path === "/admin/agents" ||
+    path === "/admin/teams"
   );
 }
 

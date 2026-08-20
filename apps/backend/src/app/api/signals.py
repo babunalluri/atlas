@@ -43,6 +43,11 @@ class SignalPublishIn(BaseModel):
         max_length=200,
         description="Notification title; defaults to 'New trading signal'.",
     )
+    body: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Notification body; defaults to the entry line label.",
+    )
 
 
 class SignalConfigPatchIn(BaseModel):
@@ -145,4 +150,7 @@ async def publish_signal_entry(
     session: TenantSession,
 ) -> dict[str, Any]:
     """When entry conditions pass, fan-out in-app notification to all active users."""
-    return await SignalEngineService(session, context).publish_entry(title=body.title)
+    return await SignalEngineService(session, context).publish_entry(
+        title=body.title,
+        body=body.body,
+    )

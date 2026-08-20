@@ -34,19 +34,26 @@ from app.domains.signal_engine_constants import (
     TIER_TTL_MS,
     Tier,
 )
+from app.domains.signal_engine_calendar import europe_session_max_abs_chg
 from app.domains.signal_engine_chain import build_chain_symbols, chain_metrics_from_quotes
 from app.domains.signal_engine_levels import (
     apply_spot_derived_fields,
+    chart_timeframe_snapshots,
+    contextual_desk_chart_feeds,
+    expiry_levels_from_daily,
+    intraday_indicators_from_candles,
     levels_from_candles,
     mock_levels,
 )
 from app.domains.signal_engine_nse import fetch_nse_slow_fields, mock_nse_fields
 from app.domains.signal_engine_yahoo import (
     ALL_YAHOO_TICKERS,
+    CRYPTO_YAHOO_TICKERS,
     INDEX_KITE_SYMBOLS,
     STOCK_KITE_SYMBOLS,
     TIMING_YAHOO_TICKERS,
     USD_INR_KITE_SYMBOL,
+    crypto_max_abs_change,
     fetch_yahoo_changes,
     mock_yahoo_changes,
 )
@@ -58,6 +65,8 @@ SIGNAL_BROKER_CAPABILITIES = (*QUOTE_CAPABILITIES, "get_historical_candles")
 IST = timezone(timedelta(hours=5, minutes=30))
 ADX_CANDLE_INTERVAL = "15minute"
 ADX_LOOKBACK_DAYS = 5
+# ~4 months of dailies for expiry levels; 10× vs prior 12-day window — watch Kite quota.
+LEVELS_DAILY_HISTORY_DAYS = 120
 
 SIGNAL_TEAM_SLUG = "signals-ops"
 
@@ -342,6 +351,10 @@ def _ist_session_date() -> str:
     return _ist_now().strftime("%Y-%m-%d")
 
 
+def _session_dated_key(name: str) -> str:
+    return f"{name}:{_ist_session_date()}"
+
+
 def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None:
     """Build `NFO:NIFTY26AUG24500CE` from `NFO:NIFTY26AUGFUT` + ATM strike."""
     side = side.upper()
@@ -376,6 +389,111 @@ def _resolve_option_symbols(config: SignalEngineConfig, atm: int | None) -> tupl
         if derived_ce and derived_pe:
             return derived_ce, derived_pe
     return ce, pe
+
+
+def _build_alt_fut_symbol(primary_fut: str, root: str, exchange: str) -> str | None:
+    """Reuse expiry suffix from the configured primary FUT (e.g. NIFTY26MAR26 → BANKNIFTY26MAR26)."""
+    raw = primary_fut.strip()
+    if not root or not raw:
+        return None
+    if ":" in raw:
+        _, sym = raw.split(":", 1)
+    else:
+        sym = raw
+    sym = sym.upper()
+    if not sym.endswith("FUT"):
+        return None
+    body = sym[:-3]
+    known_roots = ("MIDCPNIFTY", "BANKNIFTY", "FINNIFTY", "NIFTY50", "NIFTY", "SENSEX")
+    expiry_part: str | None = None
+    for known in known_roots:
+        if body.startswith(known):
+            expiry_part = body[len(known) :]
+            break
+    if not expiry_part:
+        return None
+    return f"{exchange.strip().upper()}:{root.strip().upper()}{expiry_part}FUT"
+
+
+async def _merge_secondary_ce_pe_quotes(
+    service: "SignalEngineService",
+    config: SignalEngineConfig,
+    feed: dict[str, Any],
+    quotes: dict[str, Any],
+) -> None:
+    """Fetch ATM CE/PE for alternate underlyings (SENSEX, BANKNIFTY) on checklist rows."""
+    if not config.nifty_fut_symbol:
+        return
+    pending: dict[str, dict[str, Any]] = {}
+    for spec in config.metrics:
+        if spec.get("rule") != "ce_pe_balance":
+            continue
+        underlying = str(spec.get("underlying_symbol") or "").strip()
+        if not underlying or underlying == config.underlying_symbol:
+            continue
+        ce_key = str(spec.get("ce_feed_key") or "").strip()
+        pe_key = str(spec.get("pe_feed_key") or "").strip()
+        if not ce_key or not pe_key:
+            continue
+        if underlying in pending:
+            continue
+        pending[underlying] = {
+            "root": str(spec.get("option_root") or "").strip(),
+            "exchange": str(spec.get("option_exchange") or "NFO").strip(),
+            "strike_step": int(spec.get("strike_step") or 50),
+            "ce_key": ce_key,
+            "pe_key": pe_key,
+        }
+    if not pending:
+        return
+
+    # Merge secondary fetches into a local overlay only — never mutate the shared
+    # quote dict mid-build. Adding keyed rows to the shared dict disables _flat
+    # fallback in _find_quote_row and can silently drop FUT OI / PCR.
+    overlay: dict[str, Any] = {}
+
+    missing = [
+        sym
+        for sym in pending
+        if _find_keyed_quote_row(quotes, sym) is None and _find_keyed_quote_row(overlay, sym) is None
+    ]
+    if missing:
+        overlay.update(await service._fetch_quote(missing))
+
+    option_symbols: list[str] = []
+    resolve_plan: list[tuple[str, str, str, str]] = []
+    for underlying, meta in pending.items():
+        spot_row = _find_keyed_quote_row(quotes, underlying) or _find_quote_row(overlay, underlying)
+        spot = _pick_float(spot_row or {}, "last_price", "ltp", "last")
+        if spot is None:
+            continue
+        atm = _round_strike(spot, int(meta["strike_step"]))
+        fut = _build_alt_fut_symbol(
+            config.nifty_fut_symbol,
+            str(meta["root"]),
+            str(meta["exchange"]),
+        )
+        if not fut:
+            continue
+        ce_sym = _derive_option_symbol(fut, atm, "CE")
+        pe_sym = _derive_option_symbol(fut, atm, "PE")
+        if not ce_sym or not pe_sym:
+            continue
+        option_symbols.extend([ce_sym, pe_sym])
+        resolve_plan.append((ce_sym, pe_sym, str(meta["ce_key"]), str(meta["pe_key"])))
+
+    if option_symbols:
+        overlay.update(await service._fetch_quote(list(dict.fromkeys(option_symbols))))
+
+    for ce_sym, pe_sym, ce_key, pe_key in resolve_plan:
+        ce_row = _find_quote_row(overlay, ce_sym) or _find_keyed_quote_row(quotes, ce_sym)
+        pe_row = _find_quote_row(overlay, pe_sym) or _find_keyed_quote_row(quotes, pe_sym)
+        ce_val = _pick_float(ce_row or {}, "last_price", "ltp", "last")
+        pe_val = _pick_float(pe_row or {}, "last_price", "ltp", "last")
+        if ce_val is not None:
+            feed[ce_key] = ce_val
+        if pe_val is not None:
+            feed[pe_key] = pe_val
 
 
 def _estimate_pcr(ce_row: dict[str, Any] | None, pe_row: dict[str, Any] | None) -> float | None:
@@ -484,10 +602,24 @@ def _enrich_derived_feed_fields(feed: dict[str, Any]) -> None:
     pe = feed.get("pe")
     if ce is not None and pe is not None:
         feed["straddle"] = round(float(ce) + float(pe), 2)
+    if feed.get("straddle_decay_pct") is None and feed.get("straddle") is not None:
+        open_straddle = feed.get("_straddle_session_open")
+        if open_straddle is not None and float(open_straddle) > 0:
+            decay = (float(open_straddle) - float(feed["straddle"])) / float(open_straddle) * 100
+            feed["straddle_decay_pct"] = round(decay, 3)
+    if (
+        feed.get("straddle_decay_calm_pct") is None
+        and feed.get("straddle_decay_pct") is not None
+        and feed.get("macro_events_next_7d") == 0
+    ):
+        feed["straddle_decay_calm_pct"] = feed["straddle_decay_pct"]
+    if feed.get("europe_session_max_abs_chg") is None:
+        europe = europe_session_max_abs_chg(feed)
+        if europe is not None:
+            feed["europe_session_max_abs_chg"] = europe
     if feed.get("gap_pct") is None and feed.get("spot_chg") is not None:
         feed["gap_pct"] = feed["spot_chg"]
     spot = feed.get("nifty_ltp")
-    open_key = "nifty_session_open"
     if spot is not None:
         if feed.get("nifty_points_move") is None:
             session_open = feed.get("_session_open_ltp")
@@ -498,6 +630,7 @@ def _enrich_derived_feed_fields(feed: dict[str, Any]) -> None:
         pass
     now = _ist_now()
     feed["ist_hour"] = round(now.hour + now.minute / 60.0, 3)
+    feed.update(contextual_desk_chart_feeds(feed))
 
 
 async def _merge_yahoo_slow_tier(
@@ -512,10 +645,18 @@ async def _merge_yahoo_slow_tier(
         return
     if mock:
         payload = mock_yahoo_changes(ALL_YAHOO_TICKERS)
-        payload.update(mock_yahoo_changes(TIMING_YAHOO_TICKERS))
+        crypto = mock_yahoo_changes(CRYPTO_YAHOO_TICKERS)
     else:
         payload = fetch_yahoo_changes(ALL_YAHOO_TICKERS)
-        payload.update(fetch_yahoo_changes(TIMING_YAHOO_TICKERS))
+        crypto = fetch_yahoo_changes(CRYPTO_YAHOO_TICKERS)
+    payload.update(crypto)
+    # Compute from the merged payload so BTC (from GLOBAL) is included.
+    max_crypto = crypto_max_abs_change(payload)
+    if max_crypto is not None:
+        payload["global_crypto_max_abs_chg"] = max_crypto
+    europe = europe_session_max_abs_chg(payload)
+    if europe is not None:
+        payload["europe_session_max_abs_chg"] = europe
     if payload:
         feed.update(payload)
         await _cache_set(tenant_id, "yahoo_global", "slow", payload)
@@ -591,7 +732,7 @@ async def _merge_levels_tier(
         if token <= 0:
             return
         now = _ist_now()
-        daily_from = (now - timedelta(days=12)).strftime("%Y-%m-%d")
+        daily_from = (now - timedelta(days=LEVELS_DAILY_HISTORY_DAYS)).strftime("%Y-%m-%d")
         daily_to = now.strftime("%Y-%m-%d")
         intra_from = now.replace(hour=9, minute=15, second=0, microsecond=0).strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -615,10 +756,45 @@ async def _merge_levels_tier(
                 "to_date": intra_to,
             },
         )
+        minute_hist = await service._invoke_broker_tool(
+            "get_historical_candles",
+            {
+                "instrument_token": token,
+                "interval": "minute",
+                "from_date": intra_from,
+                "to_date": intra_to,
+            },
+        )
+        hour_from = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+        hour_hist = await service._invoke_broker_tool(
+            "get_historical_candles",
+            {
+                "instrument_token": token,
+                "interval": "60minute",
+                "from_date": hour_from,
+                "to_date": daily_to,
+            },
+        )
+        daily_rows = _extract_candle_rows(daily_hist)
+        intra_rows = _extract_candle_rows(intra_hist)
+        minute_rows = _extract_candle_rows(minute_hist)
+        hour_rows = _extract_candle_rows(hour_hist)
         payload = levels_from_candles(
-            daily_candles=_extract_candle_rows(daily_hist),
-            intraday_5m=_extract_candle_rows(intra_hist),
+            daily_candles=daily_rows,
+            intraday_5m=intra_rows,
             spot=feed.get("nifty_ltp"),
+        )
+        payload.update(expiry_levels_from_daily(daily_rows, ref=now.date()))
+        payload.update(
+            intraday_indicators_from_candles(minute_rows, feed.get("nifty_ltp"))
+        )
+        payload.update(
+            chart_timeframe_snapshots(
+                minute_candles=minute_rows,
+                five_min_candles=intra_rows,
+                hour_candles=hour_rows,
+                daily_candles=daily_rows,
+            )
         )
         if not payload:
             return
@@ -648,6 +824,32 @@ def _refresh_level_spot_fields(
         apply_spot_derived_fields(feed, float(spot))
 
 
+async def _apply_straddle_decay(tenant_id: str, feed: dict[str, Any]) -> None:
+    straddle = feed.get("straddle")
+    if straddle is None:
+        return
+    session_key = _session_dated_key("straddle_session_open")
+    session_open = await cache.get_session_value(tenant_id, session_key)
+    if session_open is None:
+        await cache.set_session_value(tenant_id, session_key, float(straddle))
+        feed["_straddle_session_open"] = float(straddle)
+        return
+    feed["_straddle_session_open"] = float(session_open)
+    if float(session_open) > 0:
+        decay = (float(session_open) - float(straddle)) / float(session_open) * 100
+        feed["straddle_decay_pct"] = round(decay, 3)
+
+
+def _merge_chain_payload(feed: dict[str, Any], payload: dict[str, Any], config: SignalEngineConfig) -> None:
+    if config.pcr is None and payload.get("pcr") is not None and feed.get("pcr") is None:
+        feed["pcr"] = payload["pcr"]
+        feed["pcr_source"] = "chain_oi"
+    if config.max_pain is None and payload.get("max_pain") is not None and feed.get("max_pain") is None:
+        feed["max_pain"] = payload["max_pain"]
+    if payload.get("writer_grip_score") is not None:
+        feed["writer_grip_score"] = payload["writer_grip_score"]
+
+
 async def _merge_option_chain_tier(
     service: "SignalEngineService",
     tenant_id: str,
@@ -661,23 +863,23 @@ async def _merge_option_chain_tier(
         return
     need_pcr = config.pcr is None and feed.get("pcr") is None
     need_max_pain = config.max_pain is None and feed.get("max_pain") is None
-    if not need_pcr and not need_max_pain:
+    need_writer = feed.get("writer_grip_score") is None
+    if not need_pcr and not need_max_pain and not need_writer:
         return
     cached = await _cache_get(tenant_id, "option_chain")
     if isinstance(cached, dict):
-        if need_pcr and cached.get("pcr") is not None:
-            feed["pcr"] = cached["pcr"]
-            feed["pcr_source"] = "chain_oi"
-        if need_max_pain and cached.get("max_pain") is not None:
-            feed["max_pain"] = cached["max_pain"]
-        return
+        _merge_chain_payload(feed, cached, config)
+        if (not need_pcr or feed.get("pcr") is not None) and (
+            not need_max_pain or feed.get("max_pain") is not None
+        ):
+            return
     if mock:
-        payload = {"pcr": 1.25, "max_pain": float(atm_strike + 100)}
-        if need_pcr:
-            feed["pcr"] = payload["pcr"]
-            feed["pcr_source"] = "chain_oi"
-        if need_max_pain:
-            feed["max_pain"] = payload["max_pain"]
+        payload = {
+            "pcr": 1.25,
+            "max_pain": float(atm_strike + 100),
+            "writer_grip_score": 0.28,
+        }
+        _merge_chain_payload(feed, payload, config)
         await _cache_set(tenant_id, "option_chain", "medium", payload)
         return
     strikes, ce_syms, pe_syms = build_chain_symbols(
@@ -698,11 +900,7 @@ async def _merge_option_chain_tier(
     )
     if not payload:
         return
-    if need_pcr and payload.get("pcr") is not None:
-        feed["pcr"] = payload["pcr"]
-        feed["pcr_source"] = "chain_oi"
-    if need_max_pain and payload.get("max_pain") is not None:
-        feed["max_pain"] = payload["max_pain"]
+    _merge_chain_payload(feed, payload, config)
     await _cache_set(tenant_id, "option_chain", "medium", payload)
 
 
@@ -743,7 +941,18 @@ def _mock_feed(config: SignalEngineConfig) -> dict[str, Any]:
         "vix_chg": -0.4,
         "rsi": 52.0,
         "straddle": 180.0,
+        "_straddle_session_open": 185.0,
+        "straddle_decay_pct": 2.7,
+        "straddle_decay_calm_pct": 2.7,
+        "writer_grip_score": 0.31,
+        "global_bond_proxy_chg": -0.15,
+        "europe_session_max_abs_chg": 0.22,
         "atm_volume": 125000.0,
+        "sensex_ce": 118.0,
+        "sensex_pe": 118.4,
+        "banknifty_ce": 142.0,
+        "banknifty_pe": 141.6,
+        "global_crypto_max_abs_chg": 1.85,
         "usd_inr": 83.12,
         "gap_pct": 0.25,
         "index_nifty_chg": 0.25,
@@ -836,6 +1045,27 @@ def _find_quote_row(quotes: dict[str, Any], symbol: str) -> dict[str, Any] | Non
             return parsed
     if not keyed and "_flat" in quotes:
         return _quote_row_from_value(quotes["_flat"])
+    return None
+
+
+def _find_keyed_quote_row(quotes: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    """Keyed quote lookup only — never uses the shared ``_flat`` fallback."""
+    if not quotes or not symbol:
+        return None
+    key = symbol.strip()
+    norm = key.upper().replace(" ", "")
+    groww = _groww_symbol(key).upper()
+    direct = _quote_row_from_value(quotes.get(key))
+    if direct is not None:
+        return direct
+    for quote_key, row in quotes.items():
+        if quote_key == "_flat":
+            continue
+        if not _quote_keys_match(str(quote_key), norm=norm, groww=groww):
+            continue
+        parsed = _quote_row_from_value(row)
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -1382,6 +1612,8 @@ class SignalEngineService:
                 if pe_oi is not None:
                     feed["pe_oi"] = pe_oi
 
+        await _merge_secondary_ce_pe_quotes(self, config, feed, fast_quotes)
+
         ce_vol = _pick_float(ce_row or {}, "volume") if ce_row else None
         pe_vol = _pick_float(pe_row or {}, "volume") if pe_row else None
         if ce_vol is not None or pe_vol is not None:
@@ -1441,13 +1673,13 @@ class SignalEngineService:
         iv = feed.get("iv")
         if iv is not None:
             iv_f = float(iv)
-            stored_high = await cache.get_session_value(tenant_id, "iv_day_high")
+            stored_high = await cache.get_session_value(tenant_id, _session_dated_key("iv_day_high"))
             current_high = max(float(stored_high), iv_f) if stored_high is not None else iv_f
-            await cache.set_session_value(tenant_id, "iv_day_high", current_high)
+            await cache.set_session_value(tenant_id, _session_dated_key("iv_day_high"), current_high)
             feed["iv_day_high"] = current_high
-            session_open = await cache.get_session_value(tenant_id, "iv_session_open")
+            session_open = await cache.get_session_value(tenant_id, _session_dated_key("iv_session_open"))
             if session_open is None:
-                await cache.set_session_value(tenant_id, "iv_session_open", iv_f)
+                await cache.set_session_value(tenant_id, _session_dated_key("iv_session_open"), iv_f)
                 session_open = iv_f
             if config.iv_chg is None:
                 feed["iv_chg"] = iv_f - float(session_open)
@@ -1544,9 +1776,9 @@ class SignalEngineService:
                         await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
         if feed.get("india_vix") is not None and feed.get("vix_chg") is None:
             vix_ltp = float(feed["india_vix"])
-            session_vix = await cache.get_session_value(tenant_id, "vix_session_open")
+            session_vix = await cache.get_session_value(tenant_id, _session_dated_key("vix_session_open"))
             if session_vix is None:
-                await cache.set_session_value(tenant_id, "vix_session_open", vix_ltp)
+                await cache.set_session_value(tenant_id, _session_dated_key("vix_session_open"), vix_ltp)
                 session_vix = vix_ltp
             feed["vix_chg"] = round(vix_ltp - float(session_vix), 3)
 
@@ -1589,6 +1821,9 @@ class SignalEngineService:
                 await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
 
         await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
+        if feed.get("ce") is not None and feed.get("pe") is not None:
+            feed["straddle"] = round(float(feed["ce"]) + float(feed["pe"]), 2)
+        await _apply_straddle_decay(tenant_id, feed)
         _enrich_derived_feed_fields(feed)
 
         return feed
@@ -1645,18 +1880,23 @@ class SignalEngineService:
         payload["stream"] = True
         return payload
 
-    async def publish_entry(self, *, title: str | None = None) -> dict[str, Any]:
+    async def publish_entry(
+        self,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
         snapshot = await self.state()
         entry = snapshot.get("entry")
         if not entry:
             return {"ok": False, "error": "Entry conditions not met", "snapshot": snapshot}
 
         label = str(entry.get("label") or "New signal")
-        notify_title = title or "New trading signal"
-        notify_body = label
+        notify_title = (title or "New trading signal").strip() or "New trading signal"
+        notify_body = (body or label).strip() or label
 
         tenant_id = _tenant_key(self.context)
-        signature = json.dumps(entry, sort_keys=True)
+        signature = json.dumps({"entry": entry}, sort_keys=True)
         last_signature = await cache.get_session_value(tenant_id, "last_entry_signature")
         if last_signature == signature:
             return {
@@ -1745,8 +1985,6 @@ def _build_entry_preview(
 
 
 def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> dict[str, Any]:
-    ce = feed.get("ce")
-    pe = feed.get("pe")
     rows: list[dict[str, Any]] = []
     evaluable = 0
     passed = 0
@@ -1755,6 +1993,10 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
         rule = spec.get("rule", "info")
         target = float(spec.get("target") or 0)
         gates_entry = bool(spec.get("gates_entry", False))
+        ce_key = str(spec.get("ce_feed_key") or "ce")
+        pe_key = str(spec.get("pe_feed_key") or "pe")
+        metric_ce = feed.get(ce_key)
+        metric_pe = feed.get(pe_key)
         value = _metric_value(metric_id, feed, spec)
         if rule == "before_time":
             value = feed.get("ist_hour")
@@ -1769,8 +2011,8 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
             float(value) if value is not None else None,
             target,
             feed=feed,
-            ce=float(ce) if ce is not None else None,
-            pe=float(pe) if pe is not None else None,
+            ce=float(metric_ce) if metric_ce is not None else None,
+            pe=float(metric_pe) if metric_pe is not None else None,
             spec=spec,
         )
         display_passed = ok

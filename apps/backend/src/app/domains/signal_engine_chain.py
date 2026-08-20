@@ -73,7 +73,27 @@ def chain_metrics_from_quotes(
         out["max_pain"] = float(max_pain)
     out["chain_ce_oi"] = ce_oi
     out["chain_pe_oi"] = pe_oi
+    grip = writer_grip_score(strikes, ce_oi_by_strike, pe_oi_by_strike)
+    if grip is not None:
+        out["writer_grip_score"] = grip
     return out
+
+
+def writer_grip_score(
+    strikes: list[int],
+    ce_oi_by_strike: dict[int, float],
+    pe_oi_by_strike: dict[int, float],
+) -> float | None:
+    """Share of chain OI concentrated at the single highest-OI strike (ATM writer grip)."""
+    if not strikes:
+        return None
+    total = sum(ce_oi_by_strike.values()) + sum(pe_oi_by_strike.values())
+    if total <= 0:
+        return None
+    peak = 0.0
+    for strike in strikes:
+        peak = max(peak, ce_oi_by_strike.get(strike, 0.0) + pe_oi_by_strike.get(strike, 0.0))
+    return round(peak / total, 3)
 
 
 def _oi(row: dict[str, Any] | None) -> float:

@@ -7,7 +7,14 @@ from app.domains.signal_engine_chain import (
     chain_metrics_from_quotes,
     strike_ladder,
 )
-from app.domains.signal_engine_levels import levels_from_candles, mock_levels
+from app.domains.signal_engine_levels import (
+    chart_timeframe_snapshots,
+    contextual_desk_chart_feeds,
+    expiry_levels_from_daily,
+    intraday_indicators_from_candles,
+    levels_from_candles,
+    mock_levels,
+)
 from app.domains.signal_engine_nse import _parse_advance_decline, _parse_fii_dii, mock_nse_fields
 
 
@@ -49,6 +56,7 @@ def test_chain_metrics_pcr_and_max_pain() -> None:
     assert out["max_pain"] == 24300.0
     assert out["chain_ce_oi"] == 400
     assert out["chain_pe_oi"] == 600
+    assert "writer_grip_score" in out
 
 
 def test_levels_from_candles() -> None:
@@ -69,6 +77,59 @@ def test_levels_from_candles() -> None:
     assert out["day_low"] == 108
     assert out["inside_first_5m_range"] == 1.0
     assert "spot_vs_sma20_5m" not in out  # only 2 candles — SMA20 not computed
+
+
+def test_chart_timeframe_snapshots() -> None:
+    daily = [
+        ["2026-07-01", 100, 105, 98, 102],
+        ["2026-07-02", 102, 108, 101, 106],
+        ["2026-07-03", 106, 110, 104, 108],
+        ["2026-07-04", 108, 112, 107, 111],
+        ["2026-07-07", 111, 115, 110, 114],
+        ["2026-07-08", 114, 118, 113, 117],
+    ]
+    minute = [
+        ["2026-08-19 09:15", 110, 111, 109, 110.5],
+        ["2026-08-19 09:16", 110.5, 112, 110, 111.2],
+    ]
+    five_min = [
+        ["2026-08-19 09:15", 110, 115, 109, 114],
+        ["2026-08-19 09:20", 114, 118, 113, 116],
+    ]
+    hour = [
+        ["2026-08-19 09:00", 108, 112, 107, 110],
+        ["2026-08-19 10:00", 110, 114, 109, 113],
+    ]
+    out = chart_timeframe_snapshots(
+        minute_candles=minute,
+        five_min_candles=five_min,
+        hour_candles=hour,
+        daily_candles=daily,
+    )
+    assert out["chart_1m_bar_chg_pct"] == round((111.2 - 110.5) / 110.5 * 100, 3)
+    assert out["chart_5m_bar_chg_pct"] == round((116 - 114) / 114 * 100, 3)
+    assert out["chart_60m_bar_chg_pct"] == round((113 - 110) / 110 * 100, 3)
+    assert out["chart_1d_bar_chg_pct"] == round((117 - 114) / 114 * 100, 3)
+    assert "chart_1w_bar_chg_pct" in out
+    assert "chart_1mo_bar_chg_pct" not in out  # need 23 daily bars for 22-session lookback
+
+
+def test_contextual_desk_chart_feeds() -> None:
+    base = {
+        "nifty_points_move": 55.0,
+        "chart_1m_bar_chg_pct": 0.12,
+        "chart_5m_bar_chg_pct": -0.08,
+        "ist_hour": 15.1,
+    }
+    out = contextual_desk_chart_feeds(base)
+    assert out["chart_1m_post_big_move_pct"] == 0.12
+    assert out["chart_5m_3pm_window_pct"] == -0.08
+
+    quiet = contextual_desk_chart_feeds({**base, "nifty_points_move": 20.0})
+    assert "chart_1m_post_big_move_pct" not in quiet
+
+    early = contextual_desk_chart_feeds({**base, "ist_hour": 10.0})
+    assert "chart_5m_3pm_window_pct" not in early
 
 
 def test_mock_helpers() -> None:
@@ -112,3 +173,36 @@ def test_normalize_checklist_tickers() -> None:
     }
     apply_spot_derived_fields(cached, 116.0)
     assert cached["inside_first_5m_range"] == 0.0
+
+
+def test_expiry_levels_from_daily() -> None:
+    from datetime import date
+
+    daily = [
+        ["2026-07-30", 100, 110, 95, 105],
+        ["2026-07-31", 105, 112, 103, 108],
+        ["2026-08-01", 108, 118, 107, 115],
+        ["2026-08-13", 112, 120, 111, 118],
+        ["2026-08-20", 122, 128, 120, 126],
+    ]
+    out = expiry_levels_from_daily(daily, ref=date(2026, 8, 20))
+    assert out["running_month_high"] == 128
+    assert out["running_month_low"] == 107
+    assert out["last_expiry_high"] == 120
+    assert out["prev_month_expiry_high"] == 110
+
+
+def test_intraday_indicators_from_candles() -> None:
+    intra = [
+        ["2026-08-20 09:15", 100, 101, 99, 100.5, 1000],
+        ["2026-08-20 09:16", 100.5, 102, 100, 101.5, 1500],
+    ]
+    out = intraday_indicators_from_candles(intra, spot=101.5)
+    assert out["vwap_1m"] == 100.77
+    assert out["vwap_distance_pct"] == 0.728
+
+
+def test_crypto_max_abs_change() -> None:
+    from app.domains.signal_engine_yahoo import crypto_max_abs_change
+
+    assert crypto_max_abs_change({"global_bitcoin_chg": 1.2, "global_eth_chg": -2.4}) == 2.4

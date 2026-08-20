@@ -1,8 +1,10 @@
 import { Link } from "@/i18n/navigation";
 
+import { ORG_ADMIN_HREF } from "@/lib/auth/desk-admin";
+
 export function BrandMark({
   compact = false,
-  href = "/admin/agents",
+  href = ORG_ADMIN_HREF,
   subtitle = "Multi-tenant control",
 }: {
   compact?: boolean;

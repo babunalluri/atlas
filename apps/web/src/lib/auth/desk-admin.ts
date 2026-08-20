@@ -4,8 +4,8 @@
  * End users never see this control.
  */
 
-/** Existing admin shell home — sidebar includes Workflows, Agents, Configure. */
-export const ORG_ADMIN_HREF = "/admin/agents";
+/** Org admin shell home — teams list (Signals ops, desk teams, etc.). */
+export const ORG_ADMIN_HREF = "/admin/teams";
 
 export function canOpenOrgAdmin(workspace: {
   can_administer?: boolean;

@@ -57,10 +57,10 @@ Metrics on the admin desk map to the **Trade Desk Checklist** spreadsheet, group
 
 | Category | Checks | Primary source |
 |---|---|---|
-| Data & Charts Watch | 18 | Kite quotes + manual Sensibull fields |
-| Timing & No-Trade Rules | 24 | Clock/gap rules + manual news calendar |
-| Levels & Technicals | 18 | Kite candles + manual max pain |
-| Global Markets Watch | 24 | Yahoo slow tier |
+| Data & Charts Watch | 18 | Kite quotes; SENSEX/BANKNIFTY CE=PE auto-fetched alongside primary ATM |
+| Timing & No-Trade Rules | 24 | Clock/gap rules + NSE calendar/FOMC + straddle decay |
+| Levels & Technicals | 18 | Kite candles (CPR, pivots, expiry month H/L #57–#60) + manual max pain |
+| Global Markets Watch | 24 | Yahoo slow tier (crypto basket max move on #83) |
 | Stock Big-Move Watch | 8 | Kite quotes (RELIANCE, HDFCBANK, …) |
 | Trade Discipline Check | 23 | Manual operator confirm (`info` — does not gate BUY) |
 

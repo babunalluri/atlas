@@ -1,11 +1,14 @@
-"""NSE public endpoints — FII/DII and market breadth (slow tier)."""
+"""NSE public endpoints — FII/DII, market breadth, holidays, corp events (slow tier)."""
 
 from __future__ import annotations
 
 import logging
 import threading
 import time
+from datetime import date
 from typing import Any
+
+from app.domains.signal_engine_calendar import calendar_fields_from_nse
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +129,16 @@ def fetch_nse_slow_fields(*, force: bool = False) -> dict[str, float]:
         if adr is not None:
             payload["advance_decline_ratio"] = adr
 
+        holidays = _nse_get("/api/holiday-master?type=trading", session)
+        corp = _nse_get("/api/corporates-corporateActions?index=equities", session)
+        payload.update(
+            calendar_fields_from_nse(
+                holiday_body=holidays,
+                corp_body=corp,
+                ref=date.today(),
+            )
+        )
+
         if payload:
             _cache["payload"] = payload
             _cache["fetched_at"] = ts
@@ -137,7 +150,13 @@ def fetch_nse_slow_fields(*, force: bool = False) -> dict[str, float]:
 
 
 def mock_nse_fields() -> dict[str, float]:
-    return {"fii_net": 850.0, "advance_decline_ratio": 1.15}
+    from app.domains.signal_engine_calendar import mock_calendar_fields
+
+    return {
+        "fii_net": 850.0,
+        "advance_decline_ratio": 1.15,
+        **mock_calendar_fields(),
+    }
 
 
 def reset_nse_cache_for_tests() -> None:

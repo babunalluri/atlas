@@ -62,3 +62,15 @@ async def test_release_local_lock_when_redis_holds_no_token() -> None:
     await cache.release_compute_lock("tenant-a")
     assert await cache.try_compute_lock("tenant-a") is True
     await cache.release_compute_lock("tenant-a")
+
+
+def test_stale_dated_session_fields_filters_old_keys() -> None:
+    fields = [
+        "straddle_session_open:2026-08-01",
+        "straddle_session_open:2099-01-01",
+        "options_lab:portfolios",
+    ]
+    stale = cache._stale_dated_session_fields(fields, max_age_days=14)
+    assert "straddle_session_open:2026-08-01" in stale
+    assert "straddle_session_open:2099-01-01" not in stale
+    assert "options_lab:portfolios" not in stale

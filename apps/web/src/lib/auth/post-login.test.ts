@@ -219,6 +219,6 @@ describe("workspaceDeskHref / localePrefixedPath", () => {
   it("prefixes locale without doubling it", () => {
     expect(localePrefixedPath("en", "/t/acme/chat")).toBe("/en/t/acme/chat");
     expect(localePrefixedPath("en", "/en/admin")).toBe("/en/admin");
-    expect(localePrefixedPath("en", ORG_ADMIN_HREF)).toBe("/en/admin/agents");
+    expect(localePrefixedPath("en", ORG_ADMIN_HREF)).toBe("/en/admin/teams");
   });
 });

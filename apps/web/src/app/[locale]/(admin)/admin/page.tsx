@@ -6,5 +6,5 @@ export default async function AdminIndexPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
-  redirect({ href: "/admin/workflows", locale });
+  redirect({ href: "/admin/teams", locale });
 }

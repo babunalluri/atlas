@@ -21,6 +21,8 @@ import {
   UploadIcon,
 } from "@/components/ui/icons";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
+import { ORG_ADMIN_HREF } from "@/lib/auth/desk-admin";
+import { localePrefixedPath } from "@/lib/auth/post-login";
 import {
   enterPlatformTenant,
   importPlatformTenantResources,
@@ -191,7 +193,7 @@ export function PlatformTenantsPanel({
       await enterPlatformTenant(await getAccessToken(), tenant.id);
       document.cookie = `${PLATFORM_TENANT_COOKIE}=${tenant.id}; Path=/; SameSite=Lax`;
       document.cookie = `${PLATFORM_TENANT_NAME_COOKIE}=${encodeURIComponent(tenant.name)}; Path=/; SameSite=Lax`;
-      window.location.assign(`/${locale}/admin/agents`);
+      window.location.assign(localePrefixedPath(locale, ORG_ADMIN_HREF));
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : "Could not enter tenant workspace",

@@ -265,11 +265,19 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "check_no": 5,
         "category": "Data & Charts Watch",
         "label": "When two prices are equal Sensex ATM CE, PE, \u2026",
-        "rule": "info",
+        "rule": "ce_pe_balance",
         "target": 0,
         "tier": "fast",
         "gates_entry": False,
-        "hint": "Switch underlying to SENSEX for Sensex ATM CE=PE"
+        "hint": "SENSEX ATM CE=PE via Kite (BFO)",
+        "underlying_symbol": "BSE:SENSEX",
+        "option_root": "SENSEX",
+        "option_exchange": "BFO",
+        "strike_step": 100,
+        "ce_feed_key": "sensex_ce",
+        "pe_feed_key": "sensex_pe",
+        "feed_key": "sensex_ce",
+        "source": "kite",
     },
     {
         "id": "chk_006",
@@ -329,8 +337,8 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "fast",
         "gates_entry": False,
-        "hint": "Atm straddle decay",
-        "feed_key": "straddle"
+        "hint": "ATM straddle decay % vs session open",
+        "feed_key": "straddle_decay_pct"
     },
     {
         "id": "chk_011",
@@ -420,11 +428,19 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "check_no": 18,
         "category": "Data & Charts Watch",
         "label": "When two prices are equal Nifty Bank ATM CE, \u2026",
-        "rule": "info",
+        "rule": "ce_pe_balance",
         "target": 0,
         "tier": "fast",
         "gates_entry": False,
-        "hint": "Bank Nifty ATM CE=PE when underlying is BANKNIFTY"
+        "hint": "BANKNIFTY ATM CE=PE via Kite (NFO)",
+        "underlying_symbol": "NSE:BANKNIFTY",
+        "option_root": "BANKNIFTY",
+        "option_exchange": "NFO",
+        "strike_step": 100,
+        "ce_feed_key": "banknifty_ce",
+        "pe_feed_key": "banknifty_pe",
+        "feed_key": "banknifty_ce",
+        "source": "kite",
     },
     {
         "id": "no_trade_after_10",
@@ -435,6 +451,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 10,
         "tier": "fast",
         "gates_entry": True,
+        "feed_key": "ist_hour",
         "hint": "No trade after 10 AM"
     },
     {
@@ -446,7 +463,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "Nifty 1 minute chat after big move"
+        "hint": "NIFTY 1 minute chart after big move — 1m bar % when |move| ≥ 50 pts"
     },
     {
         "id": "chk_021",
@@ -468,7 +485,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "Before big news entry, no entry after big news because iv will collapse"
+        "hint": "Macro events in next 7 days (FOMC calendar proxy — not headlines)"
     },
     {
         "id": "chk_023",
@@ -594,7 +611,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "3'clock move"
+        "hint": "3 o'clock move — 5m bar % during 15:00–15:30 IST only"
     },
     {
         "id": "chk_034",
@@ -605,7 +622,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "Big move is over"
+        "hint": "Big move cooling — NIFTY points from session open (desk judges 'over')"
     },
     {
         "id": "chk_035",
@@ -794,7 +811,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "1 minutes chart"
+        "hint": "1 minutes chart — last bar % chg (Kite)"
     },
     {
         "id": "chk_052",
@@ -805,7 +822,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "5 minutes chart"
+        "hint": "5 minutes chart — last bar % chg (Kite)"
     },
     {
         "id": "chk_053",
@@ -816,7 +833,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "1 hour chart"
+        "hint": "1 hour chart — last bar % chg (Kite)"
     },
     {
         "id": "chk_054",
@@ -827,7 +844,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "1 day chart"
+        "hint": "1 day chart — last daily bar % chg (Kite)"
     },
     {
         "id": "chk_055",
@@ -838,7 +855,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "1 week chart"
+        "hint": "1 week chart — 5-session % chg (Kite daily)"
     },
     {
         "id": "chk_056",
@@ -849,7 +866,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "1 month chart"
+        "hint": "1 month chart — 22-session % chg (Kite daily)"
     },
     {
         "id": "chk_057",
@@ -1166,7 +1183,9 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "slow",
         "gates_entry": False,
-        "hint": "All crypto currency"
+        "hint": "Max abs % move across BTC/ETH/SOL/XRP/BNB/ADA/DOGE (Yahoo)",
+        "feed_key": "global_crypto_max_abs_chg",
+        "source": "yahoo",
     },
     {
         "id": "chk_084",
@@ -1504,7 +1523,7 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "target": 0,
         "tier": "medium",
         "gates_entry": False,
-        "hint": "Trading view - super tend - vwap- volume 1.2Lakh"
+        "hint": "SuperTrend dir (1=up, −1=down) from Kite 1m; VWAP dist on board; vol #7"
     },
     {
         "id": "chk_114",
@@ -1532,12 +1551,37 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
 
 CHECKLIST_FEED_PATCHES: dict[str, dict[str, Any]] = {
     "chk_011": {"feed_key": "advance_decline_ratio", "source": "nse"},
+    "chk_020": {"feed_key": "chart_1m_post_big_move_pct", "source": "kite_candles"},
+    "chk_022": {"feed_key": "macro_events_next_7d", "source": "nse"},
+    "chk_033": {"feed_key": "chart_5m_3pm_window_pct", "source": "kite_candles"},
+    "chk_034": {"feed_key": "nifty_points_move", "source": "kite"},
     "chk_045": {"feed_key": "cpr_bottom", "source": "kite_candles"},
     "chk_046": {"feed_key": "pivot_point", "source": "kite_candles"},
     "chk_047": {"feed_key": "prev_day_high", "source": "kite_candles"},
     "chk_048": {"feed_key": "inside_first_5m_range", "source": "kite_candles"},
     "chk_049": {"feed_key": "inside_day_range", "source": "kite_candles"},
     "chk_050": {"feed_key": "spot_vs_sma20_5m", "source": "kite_candles"},
+    "chk_051": {"feed_key": "chart_1m_bar_chg_pct", "source": "kite_candles"},
+    "chk_052": {"feed_key": "chart_5m_bar_chg_pct", "source": "kite_candles"},
+    "chk_053": {"feed_key": "chart_60m_bar_chg_pct", "source": "kite_candles"},
+    "chk_054": {"feed_key": "chart_1d_bar_chg_pct", "source": "kite_candles"},
+    "chk_055": {"feed_key": "chart_1w_bar_chg_pct", "source": "kite_candles"},
+    "chk_056": {"feed_key": "chart_1mo_bar_chg_pct", "source": "kite_candles"},
+    "chk_057": {"feed_key": "last_expiry_high", "source": "kite_candles"},
+    "chk_058": {"feed_key": "prev_month_expiry_high", "source": "kite_candles"},
+    "chk_059": {"feed_key": "expiry_boundary_high", "source": "kite_candles"},
+    "chk_060": {"feed_key": "running_month_high", "source": "kite_candles"},
+    "chk_023": {"feed_key": "straddle_decay_pct", "source": "kite"},
+    "chk_027": {"feed_key": "europe_session_max_abs_chg", "source": "yahoo"},
+    "chk_035": {"feed_key": "fed_meeting_proximity_days", "source": "nse"},
+    "chk_036": {"feed_key": "nse_corp_events_today", "source": "nse"},
+    "chk_037": {"feed_key": "macro_events_next_7d", "source": "nse"},
+    "chk_040": {"feed_key": "writer_grip_score", "source": "kite"},
+    "chk_042": {"feed_key": "straddle_decay_calm_pct", "source": "kite"},
+    "chk_043": {"feed_key": "market_holiday_any", "source": "nse"},
+    "chk_081": {"feed_key": "global_bond_proxy_chg", "source": "yahoo"},
+    "chk_084": {"feed_key": "macro_event_risk_score", "source": "nse"},
+    "chk_113": {"feed_key": "supertrend_dir", "source": "kite_candles"},
 }
 
 

@@ -34,6 +34,6 @@ describe("canOpenOrgAdmin", () => {
 
 describe("ORG_ADMIN_HREF", () => {
   it("opens the org admin app home", () => {
-    expect(ORG_ADMIN_HREF).toBe("/admin/agents");
+    expect(ORG_ADMIN_HREF).toBe("/admin/teams");
   });
 });

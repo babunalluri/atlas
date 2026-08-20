@@ -52,6 +52,16 @@ GLOBAL_YAHOO_TICKERS: dict[str, str] = {
     "global_bond_proxy_chg": "^TNX",
 }
 
+# Major alts for checklist #83 (max abs % move across basket).
+CRYPTO_YAHOO_TICKERS: dict[str, str] = {
+    "global_eth_chg": "ETH-USD",
+    "global_sol_chg": "SOL-USD",
+    "global_xrp_chg": "XRP-USD",
+    "global_bnb_chg": "BNB-USD",
+    "global_ada_chg": "ADA-USD",
+    "global_doge_chg": "DOGE-USD",
+}
+
 TIMING_YAHOO_TICKERS: dict[str, str] = {
     "us_futures_chg": "ES=F",
     "eu_futures_chg": "^STOXX50E",
@@ -82,6 +92,15 @@ ALL_YAHOO_TICKERS: dict[str, str] = {
     **TIMING_YAHOO_TICKERS,
 }
 
+
+def crypto_max_abs_change(changes: dict[str, float]) -> float | None:
+    """Largest absolute session % move across the crypto basket."""
+    keys = set(CRYPTO_YAHOO_TICKERS) | {"global_bitcoin_chg"}
+    vals = [abs(v) for key, v in changes.items() if key in keys and v is not None]
+    if not vals:
+        return None
+    return round(max(vals), 3)
+
 _fetch_lock = threading.Lock()
 
 
@@ -93,7 +112,15 @@ class _YahooCache:
     last_error: str | None = None
 
 
-_cache = _YahooCache()
+_caches: dict[str, _YahooCache] = {}
+
+
+def _ticker_cache_key(tickers: dict[str, str]) -> str:
+    return "|".join(f"{key}:{tickers[key]}" for key in sorted(tickers))
+
+
+def _cache_for(tickers: dict[str, str]) -> _YahooCache:
+    return _caches.setdefault(_ticker_cache_key(tickers), _YahooCache())
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -215,57 +242,69 @@ def fetch_yahoo_changes(
     """Cached session % changes. Safe for slow-tier polling (~1 h), not fast stream."""
     tickers = tickers or ALL_YAHOO_TICKERS
     ts = now if now is not None else time.monotonic()
+    bucket_key = _ticker_cache_key(tickers)
 
     with _fetch_lock:
-        if not force and _cache.cooldown_until > ts:
-            logger.debug("yahoo_cooldown_active until=%s", _cache.cooldown_until)
-            return dict(_cache.values)
+        cache = _cache_for(tickers)
+        if not force and cache.cooldown_until > ts:
+            logger.debug("yahoo_cooldown_active bucket=%s until=%s", bucket_key, cache.cooldown_until)
+            return dict(cache.values)
 
-        age = ts - _cache.fetched_at
+        age = ts - cache.fetched_at
         if (
             not force
-            and _cache.values
+            and cache.values
             and age < YAHOO_CACHE_TTL_SECONDS
             and age < YAHOO_MIN_FETCH_INTERVAL_SECONDS
         ):
-            return dict(_cache.values)
+            return dict(cache.values)
 
         try:
             fresh, _ = _fetch_raw_changes(tickers)
-            _cache.values = fresh
-            _cache.fetched_at = ts
-            _cache.cooldown_until = 0.0
-            _cache.last_error = None
+            cache.values = fresh
+            cache.fetched_at = ts
+            cache.cooldown_until = 0.0
+            cache.last_error = None
             return dict(fresh)
         except Exception as exc:
-            _cache.last_error = str(exc)
+            cache.last_error = str(exc)
             if _is_rate_limit_error(exc):
-                _cache.cooldown_until = ts + YAHOO_RATE_LIMIT_COOLDOWN_SECONDS
+                cache.cooldown_until = ts + YAHOO_RATE_LIMIT_COOLDOWN_SECONDS
                 logger.warning(
-                    "yahoo_rate_limited — serving stale cache for %ss",
+                    "yahoo_rate_limited bucket=%s — serving stale cache for %ss",
+                    bucket_key,
                     YAHOO_RATE_LIMIT_COOLDOWN_SECONDS,
                 )
             else:
-                logger.warning("yahoo_fetch_failed: %s", exc)
-            return dict(_cache.values)
+                logger.warning("yahoo_fetch_failed bucket=%s: %s", bucket_key, exc)
+            return dict(cache.values)
 
 
 def yahoo_cache_status() -> dict[str, Any]:
     """Expose cache age / cooldown for admin warnings."""
     ts = time.monotonic()
-    age = ts - _cache.fetched_at if _cache.fetched_at else None
+    entries: list[dict[str, Any]] = []
+    for bucket_key, cache in _caches.items():
+        age = ts - cache.fetched_at if cache.fetched_at else None
+        entries.append(
+            {
+                "bucket": bucket_key,
+                "cached_keys": len(cache.values),
+                "fetched_age_seconds": round(age, 1) if age is not None else None,
+                "cooldown_remaining_seconds": max(0.0, round(cache.cooldown_until - ts, 1)),
+                "last_error": cache.last_error,
+            }
+        )
     return {
-        "cached_keys": len(_cache.values),
-        "fetched_age_seconds": round(age, 1) if age is not None else None,
-        "cooldown_remaining_seconds": max(0.0, round(_cache.cooldown_until - ts, 1)),
-        "last_error": _cache.last_error,
+        "buckets": entries,
+        "bucket_count": len(_caches),
         "ttl_seconds": YAHOO_CACHE_TTL_SECONDS,
     }
 
 
 def reset_yahoo_cache_for_tests() -> None:
-    global _cache
-    _cache = _YahooCache()
+    global _caches
+    _caches = {}
 
 
 def mock_yahoo_changes(tickers: dict[str, str]) -> dict[str, float]:

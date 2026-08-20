@@ -3704,12 +3704,376 @@ export async function getSignalState(
 
 export async function publishSignalEntry(
   accessToken: string,
-  title?: string,
+  payload?: { title?: string; body?: string },
 ): Promise<SignalPublishResult> {
   return apiFetch<SignalPublishResult>("/admin/signals/publish", {
     accessToken,
     method: "POST",
-    body: title ? { title } : {},
+    body: payload && (payload.title || payload.body) ? payload : {},
+  });
+}
+
+export interface OptionsLabAdminConfig {
+  underlying_symbol: string;
+  underlying_label: string;
+  fut_symbol: string;
+  strike_step: number;
+  mock: boolean;
+}
+
+export interface OptionsLabConfigResponse {
+  ok: boolean;
+  error?: string;
+  config: OptionsLabAdminConfig;
+  presets: SignalUnderlyingPreset[];
+  tool_bound: boolean;
+  has_broker: boolean;
+  team_ready: boolean;
+}
+
+export async function getOptionsLabConfig(
+  accessToken: string,
+): Promise<OptionsLabConfigResponse> {
+  return apiFetch<OptionsLabConfigResponse>("/admin/options-lab/config", {
+    accessToken,
+  });
+}
+
+export async function patchOptionsLabConfig(
+  accessToken: string,
+  config: Partial<OptionsLabAdminConfig>,
+): Promise<OptionsLabConfigResponse> {
+  return apiFetch("/admin/options-lab/config", {
+    accessToken,
+    method: "PATCH",
+    body: config,
+  });
+}
+
+export interface OptionsChainLeg {
+  symbol: string;
+  ltp: number | null;
+  oi: number | null;
+  volume: number | null;
+  iv: number | null;
+  delta: number | null;
+}
+
+export interface OptionsChainRow {
+  strike: number;
+  is_atm: boolean;
+  ce: OptionsChainLeg;
+  pe: OptionsChainLeg;
+}
+
+export interface OptionsOiChartRow {
+  strike: number;
+  is_atm: boolean;
+  ce_oi: number | null;
+  pe_oi: number | null;
+  ce_oi_chg: number | null;
+  pe_oi_chg: number | null;
+}
+
+export interface OptionsStraddlePoint {
+  t: number;
+  ce: number;
+  pe: number;
+  combined: number;
+  atm?: number | null;
+}
+
+export interface OptionsIvPoint {
+  day: string;
+  iv: number;
+  t?: number;
+}
+
+export interface OptionsIvChart {
+  points: OptionsIvPoint[];
+  atm_iv: number | null;
+  ivp: number | null;
+  sample_days?: number;
+}
+
+export interface OptionsLabCharts {
+  oi: OptionsOiChartRow[];
+  oi_baseline_at?: number;
+  straddle: {
+    points: OptionsStraddlePoint[];
+    atm: number | null;
+  };
+  iv?: OptionsIvChart;
+}
+
+export interface OptionsChainSnapshot {
+  ok: boolean;
+  error?: string;
+  mock?: boolean;
+  spot: number | null;
+  atm: number | null;
+  underlying_symbol?: string;
+  underlying_label?: string;
+  fut_symbol?: string;
+  strike_step?: number;
+  wings?: number;
+  fetched_at?: number;
+  warnings?: string[];
+  summary?: {
+    pcr: number | null;
+    max_pain: number | null;
+    chain_ce_oi: number | null;
+    chain_pe_oi: number | null;
+    writer_grip_score: number | null;
+    atm_iv?: number | null;
+    ivp?: number | null;
+  };
+  rows?: OptionsChainRow[];
+  charts?: OptionsLabCharts;
+}
+
+export async function resetOptionsLabOiBaseline(
+  accessToken: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch("/admin/options-lab/reset-oi-baseline", {
+    accessToken,
+    method: "POST",
+  });
+}
+
+export async function getOptionsChain(
+  accessToken: string,
+  wings = 15,
+): Promise<OptionsChainSnapshot> {
+  const params = new URLSearchParams({ wings: String(wings) });
+  return apiFetch<OptionsChainSnapshot>(`/admin/options-lab/chain?${params}`, {
+    accessToken,
+  });
+}
+
+export interface OptionsScreenerRow {
+  underlying_symbol: string;
+  underlying_label: string;
+  fut_symbol: string;
+  spot: number | null;
+  atm: number | null;
+  atm_iv: number | null;
+  straddle: number | null;
+  pcr: number | null;
+  max_pain: number | null;
+  chain_ce_oi: number | null;
+  chain_pe_oi: number | null;
+  oi_pct_chg: number | null;
+  iv_chg: number | null;
+  ivp: number | null;
+  error: string | null;
+}
+
+export interface OptionsScreenerSnapshot {
+  ok: boolean;
+  error?: string;
+  mock?: boolean;
+  universe?: string;
+  fetched_at?: number;
+  warnings?: string[];
+  rows?: OptionsScreenerRow[];
+}
+
+export async function getOptionsScreener(
+  accessToken: string,
+  universe = "indices",
+): Promise<OptionsScreenerSnapshot> {
+  const params = new URLSearchParams({ universe });
+  return apiFetch<OptionsScreenerSnapshot>(`/admin/options-lab/screener?${params}`, {
+    accessToken,
+  });
+}
+
+export async function resetOptionsLabScreenerBaseline(
+  accessToken: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch("/admin/options-lab/reset-screener-baseline", {
+    accessToken,
+    method: "POST",
+  });
+}
+
+export async function resetOptionsLabIvHistory(
+  accessToken: string,
+): Promise<{ ok: boolean }> {
+  return apiFetch("/admin/options-lab/reset-iv-history", {
+    accessToken,
+    method: "POST",
+  });
+}
+
+export interface OptionsIvHistoryResponse {
+  ok: boolean;
+  error?: string;
+  symbol?: string;
+  mock?: boolean;
+  points?: OptionsIvPoint[];
+  atm_iv?: number | null;
+  ivp?: number | null;
+  sample_days?: number;
+}
+
+export async function getOptionsIvHistory(
+  accessToken: string,
+  symbol: string,
+): Promise<OptionsIvHistoryResponse> {
+  const params = new URLSearchParams({ symbol });
+  return apiFetch<OptionsIvHistoryResponse>(`/admin/options-lab/iv-history?${params}`, {
+    accessToken,
+  });
+}
+
+export interface OptionsPortfolioLeg {
+  id: string;
+  side: "buy" | "sell";
+  type: "CE" | "PE";
+  strike: number;
+  qty: number;
+  entry_premium: number;
+  symbol?: string;
+  current_premium?: number | null;
+  mtm?: number | null;
+  entry_cash?: number;
+}
+
+export interface OptionsPortfolio {
+  id: string;
+  name: string;
+  underlying_symbol: string;
+  underlying_label: string;
+  fut_symbol: string;
+  strike_step: number;
+  source: "manual" | "builder" | "kite_import";
+  created_at: number;
+  updated_at: number;
+  legs: OptionsPortfolioLeg[];
+}
+
+export interface OptionsPortfolioListResponse {
+  ok: boolean;
+  error?: string;
+  portfolios: OptionsPortfolio[];
+  count: number;
+}
+
+export interface OptionsPortfolioMarkSummary {
+  net_entry_cash: number;
+  net_current_value: number | null;
+  total_mtm: number;
+  missing_quotes: number;
+}
+
+export interface OptionsPortfolioMarkResponse {
+  ok: boolean;
+  error?: string;
+  portfolio_id?: string;
+  name?: string;
+  underlying_symbol?: string;
+  underlying_label?: string;
+  fut_symbol?: string;
+  mock?: boolean;
+  marked_at?: number;
+  legs?: OptionsPortfolioLeg[];
+  summary?: OptionsPortfolioMarkSummary;
+}
+
+export interface OptionsPortfolioCreateInput {
+  name: string;
+  underlying_symbol?: string;
+  underlying_label?: string;
+  fut_symbol?: string;
+  strike_step?: number;
+  source?: "manual" | "builder" | "kite_import";
+  legs: Array<{
+    id?: string;
+    side: "buy" | "sell";
+    type: "CE" | "PE";
+    strike: number;
+    qty?: number;
+    entry_premium: number;
+    symbol?: string;
+  }>;
+}
+
+export async function listOptionsPortfolios(
+  accessToken: string,
+): Promise<OptionsPortfolioListResponse> {
+  return apiFetch<OptionsPortfolioListResponse>("/admin/options-lab/portfolios", {
+    accessToken,
+  });
+}
+
+export async function createOptionsPortfolio(
+  accessToken: string,
+  payload: OptionsPortfolioCreateInput,
+): Promise<{ ok: boolean; error?: string; portfolio?: OptionsPortfolio }> {
+  return apiFetch("/admin/options-lab/portfolios", {
+    accessToken,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export interface OptionsPortfolioPatchInput {
+  name?: string;
+  underlying_symbol?: string;
+  underlying_label?: string;
+  fut_symbol?: string;
+  strike_step?: number;
+  legs?: OptionsPortfolioCreateInput["legs"];
+}
+
+export async function updateOptionsPortfolio(
+  accessToken: string,
+  portfolioId: string,
+  payload: OptionsPortfolioPatchInput,
+): Promise<{ ok: boolean; error?: string; portfolio?: OptionsPortfolio }> {
+  return apiFetch(`/admin/options-lab/portfolios/${encodeURIComponent(portfolioId)}`, {
+    accessToken,
+    method: "PATCH",
+    body: payload,
+  });
+}
+
+export async function deleteOptionsPortfolio(
+  accessToken: string,
+  portfolioId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return apiFetch(`/admin/options-lab/portfolios/${encodeURIComponent(portfolioId)}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
+export async function markOptionsPortfolio(
+  accessToken: string,
+  portfolioId: string,
+): Promise<OptionsPortfolioMarkResponse> {
+  return apiFetch<OptionsPortfolioMarkResponse>(
+    `/admin/options-lab/portfolios/${encodeURIComponent(portfolioId)}/mark`,
+    { accessToken },
+  );
+}
+
+export async function importOptionsPortfolioFromKite(
+  accessToken: string,
+  name?: string,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  portfolio?: OptionsPortfolio;
+  mark?: OptionsPortfolioMarkResponse;
+  warnings?: string[];
+}> {
+  return apiFetch("/admin/options-lab/portfolios/import-kite", {
+    accessToken,
+    method: "POST",
+    body: name ? { name } : {},
   });
 }
 

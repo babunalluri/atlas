@@ -14,6 +14,7 @@ import {
 } from "@/lib/api/admin";
 import type { WorkspaceDomain, WorkspaceDomainOption } from "@/lib/api/types";
 import { clearPlatformTenantSelection } from "@/lib/auth/access-context";
+import { ORG_ADMIN_HREF } from "@/lib/auth/desk-admin";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { slugifyName } from "@/lib/validation/agent-form";
 
@@ -50,7 +51,7 @@ export function OnboardingPanel() {
         const status = await getOnboardingStatus(token);
         if (cancelled) return;
         if (status.provisioned) {
-          router.replace("/admin/agents");
+          router.replace(ORG_ADMIN_HREF);
           return;
         }
         setOrgId(status.org_id);
@@ -91,7 +92,7 @@ export function OnboardingPanel() {
         domain,
       });
       clearPlatformTenantSelection();
-      router.replace("/admin/agents");
+      router.replace(ORG_ADMIN_HREF);
       router.refresh();
     } catch (reason) {
       setError(

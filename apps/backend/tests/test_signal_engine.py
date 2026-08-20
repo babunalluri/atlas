@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from app.domains.signal_engine import (
     DEFAULT_METRICS,
     SignalEngineConfig,
+    _build_alt_fut_symbol,
     _build_entry_preview,
     _compute_adx,
     _compute_rsi,
     _derive_option_symbol,
     _estimate_pcr,
     _evaluate_rule,
+    _find_keyed_quote_row,
     _find_quote_row,
     _fut_basis_pct,
     _merge_option_iv,
+    _merge_secondary_ce_pe_quotes,
+    _merge_yahoo_slow_tier,
     _mock_feed,
     _normalize_quote_payload,
     _parse_historical_candles,
@@ -48,6 +57,15 @@ def test_dow_jones_abs_lte_passes() -> None:
 def test_ce_pe_balance() -> None:
     assert _evaluate_rule("ce_pe_balance", None, 0, feed={}, ce=100.0, pe=100.2) is True
     assert _evaluate_rule("ce_pe_balance", None, 0, feed={}, ce=125.0, pe=55.0) is False
+
+
+def test_evaluate_secondary_ce_pe_metrics() -> None:
+    feed = _mock_feed(SignalEngineConfig())
+    state = evaluate_signal_state(SignalEngineConfig(), feed)
+    by_id = {row["id"]: row for row in state["metrics"]}
+    assert by_id["chk_005"]["passed"] is True
+    assert by_id["chk_018"]["passed"] is True
+    assert by_id["chk_083"]["value"] == 1.85
 
 
 def test_underlying_not_hardcoded() -> None:
@@ -214,6 +232,17 @@ def test_derive_option_symbol_from_fut() -> None:
     assert _derive_option_symbol("NFO:NIFTY26AUG24500CE", 24500, "CE") is None
 
 
+def test_build_alt_fut_symbol() -> None:
+    assert (
+        _build_alt_fut_symbol("NFO:NIFTY26MAR26FUT", "BANKNIFTY", "NFO")
+        == "NFO:BANKNIFTY26MAR26FUT"
+    )
+    assert (
+        _build_alt_fut_symbol("NFO:NIFTY26MAR26FUT", "SENSEX", "BFO")
+        == "BFO:SENSEX26MAR26FUT"
+    )
+
+
 def test_resolve_option_symbols_prefers_auto_atm() -> None:
     config = SignalEngineConfig(
         nifty_fut_symbol="NFO:NIFTY26AUGFUT",
@@ -325,3 +354,194 @@ def test_fii_net_skipped_when_unset() -> None:
     result = evaluate_signal_state(config, feed)
     fii = next(row for row in result["metrics"] if row["id"] == "fii_net")
     assert fii["passed"] is None
+
+
+@pytest.mark.asyncio
+async def test_merge_secondary_ce_pe_quotes_does_not_corrupt_shared_quotes() -> None:
+    """Regression: in-place quotes.update() disabled _flat fallback for FUT OI."""
+    fut = "NFO:NIFTY26AUGFUT"
+    fast_quotes: dict[str, object] = {
+        "_flat": {"last_price": 24310.0, "oi": 12345},
+    }
+    assert _find_quote_row(fast_quotes, fut) is not None
+    assert _find_keyed_quote_row(fast_quotes, "BSE:SENSEX") is None
+
+    config = SignalEngineConfig(
+        nifty_fut_symbol=fut,
+        metrics=[
+            {
+                "id": "chk_005",
+                "rule": "ce_pe_balance",
+                "underlying_symbol": "BSE:SENSEX",
+                "option_root": "SENSEX",
+                "option_exchange": "BFO",
+                "strike_step": 100,
+                "ce_feed_key": "sensex_ce",
+                "pe_feed_key": "sensex_pe",
+            }
+        ],
+    )
+
+    service = MagicMock()
+    fetch_calls: list[list[str]] = []
+
+    async def mock_fetch(symbols: list[str]) -> dict[str, object]:
+        fetch_calls.append(list(symbols))
+        if "BSE:SENSEX" in symbols:
+            return {"BSE:SENSEX": {"last_price": 81000.0}}
+        return {
+            "BFO:SENSEX26AUG81000CE": {"last_price": 118.0},
+            "BFO:SENSEX26AUG81000PE": {"last_price": 119.0},
+            "_flat": {"last_price": 118.0},
+        }
+
+    service._fetch_quote = AsyncMock(side_effect=mock_fetch)
+
+    feed: dict[str, object] = {}
+    await _merge_secondary_ce_pe_quotes(service, config, feed, fast_quotes)
+
+    fut_row = _find_quote_row(fast_quotes, fut)
+    assert fut_row is not None
+    assert fut_row.get("oi") == 12345
+    assert feed["sensex_ce"] == 118.0
+    assert feed["sensex_pe"] == 119.0
+    assert "_flat" in fast_quotes
+    assert "BFO:SENSEX26AUG81000CE" not in fast_quotes
+    assert fetch_calls[0] == ["BSE:SENSEX"]
+
+
+@pytest.mark.asyncio
+async def test_straddle_session_open_resets_per_ist_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.domains import signal_engine_cache as cache
+    from app.domains.signal_engine import _apply_straddle_decay
+
+    cache.reset_signal_cache_for_tests()
+    session_store: dict[str, dict[str, object]] = {}
+
+    async def fake_get(tenant_id: str, field: str) -> object | None:
+        return session_store.get(tenant_id, {}).get(field)
+
+    async def fake_set(tenant_id: str, field: str, value: object) -> None:
+        session_store.setdefault(tenant_id, {})[field] = value
+
+    monkeypatch.setattr(cache, "get_session_value", fake_get)
+    monkeypatch.setattr(cache, "set_session_value", fake_set)
+
+    tenant = "tenant-smoke"
+    ist_date = {"value": "2026-08-19"}
+    monkeypatch.setattr("app.domains.signal_engine._ist_session_date", lambda: ist_date["value"])
+
+    day1 = {"straddle": 200.0}
+    await _apply_straddle_decay(tenant, day1)
+    assert day1["_straddle_session_open"] == 200.0
+
+    day1_later = {"straddle": 150.0}
+    await _apply_straddle_decay(tenant, day1_later)
+    assert day1_later["straddle_decay_pct"] == 25.0
+
+    ist_date["value"] = "2026-08-20"
+    day2_open = {"straddle": 180.0}
+    await _apply_straddle_decay(tenant, day2_open)
+    assert day2_open["_straddle_session_open"] == 180.0
+    assert "straddle_decay_pct" not in day2_open
+
+
+@pytest.mark.asyncio
+async def test_option_chain_cache_hits_without_writer_grip(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.domains import signal_engine_cache as cache
+    from app.domains.signal_engine import (
+        SignalEngineConfig,
+        _merge_option_chain_tier,
+    )
+
+    cache.reset_signal_cache_for_tests()
+    tenant = "tenant-chain"
+    feed: dict[str, object] = {}
+    config = SignalEngineConfig(
+        nifty_fut_symbol="NFO:NIFTY26AUGFUT",
+        strike_step=50,
+    )
+    await cache.set_metric(
+        tenant,
+        "option_chain",
+        "medium",
+        {"pcr": 1.15, "max_pain": 24300.0},
+    )
+
+    fetch_calls = {"n": 0}
+
+    class FakeService:
+        async def _fetch_quote(self, *args, **kwargs):
+            fetch_calls["n"] += 1
+            return {}
+
+    await _merge_option_chain_tier(
+        FakeService(),
+        tenant,
+        feed,
+        config,
+        atm_strike=24300,
+        mock=False,
+    )
+
+    assert feed["pcr"] == 1.15
+    assert feed["max_pain"] == 24300.0
+    assert fetch_calls["n"] == 0
+
+
+def test_publish_entry_dedup_signature_is_entry_only() -> None:
+    entry = {"label": "BUY", "passed": 5, "evaluable": 5}
+    entry_sig = json.dumps({"entry": entry}, sort_keys=True)
+    with_body_sig = json.dumps(
+        {"entry": entry, "title": "New trading signal", "body": "4/5 rules passing"},
+        sort_keys=True,
+    )
+    assert entry_sig != with_body_sig
+    assert json.dumps({"entry": entry}, sort_keys=True) == entry_sig
+
+
+@pytest.mark.asyncio
+async def test_merge_yahoo_uses_merged_payload_for_crypto_max(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_cache_get(_tenant: str, _metric: str):
+        return None
+
+    async def fake_cache_set(_tenant: str, _metric: str, _tier: str, _value):
+        return None
+
+    def fake_fetch(tickers: dict[str, str]) -> dict[str, float]:
+        if "global_bitcoin_chg" in tickers:
+            return {"global_bitcoin_chg": -9.5}
+        if "global_eth_chg" in tickers:
+            return {"global_eth_chg": 1.0}
+        return {}
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine.fetch_yahoo_changes", fake_fetch)
+
+    feed: dict[str, float] = {}
+    await _merge_yahoo_slow_tier("tenant-x", feed, mock=False)
+    assert feed["global_bitcoin_chg"] == -9.5
+    assert feed["global_crypto_max_abs_chg"] == 9.5
+
+
+@pytest.mark.asyncio
+async def test_merge_yahoo_fetches_all_plus_crypto_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[frozenset[str]] = []
+
+    async def fake_cache_get(_tenant: str, _metric: str):
+        return None
+
+    async def fake_cache_set(_tenant: str, _metric: str, _tier: str, _value):
+        return None
+
+    def fake_fetch(tickers: dict[str, str]) -> dict[str, float]:
+        seen.append(frozenset(tickers.keys()))
+        return {}
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine.fetch_yahoo_changes", fake_fetch)
+
+    await _merge_yahoo_slow_tier("tenant-x", {}, mock=False)
+    assert len(seen) == 2

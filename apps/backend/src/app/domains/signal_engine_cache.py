@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Iterable
 
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis, invalidate_redis
@@ -27,6 +28,54 @@ _snapshots: dict[str, tuple[float, dict[str, Any]]] = {}
 _watchers: dict[str, float] = {}
 _local_compute_locks: dict[str, asyncio.Lock] = {}
 _redis_lock_tokens: dict[str, str] = {}
+_redis_session_prune_due_ms: dict[str, float] = {}
+SESSION_KEY_TTL_SECONDS = 14 * 24 * 60 * 60
+REDIS_SESSION_PRUNE_INTERVAL_MS = 60 * 60 * 1000
+_DATED_FIELD_RE = re.compile(r"^(?P<prefix>.+:)(?P<date>\d{4}-\d{2}-\d{2})$")
+
+
+def _stale_dated_session_fields(
+    fields: Iterable[str],
+    *,
+    max_age_days: int = 14,
+) -> list[str]:
+    now = time.time()
+    max_age = max_age_days * 24 * 60 * 60
+    stale: list[str] = []
+    for field in fields:
+        match = _DATED_FIELD_RE.match(field)
+        if not match:
+            continue
+        try:
+            ts = time.mktime(time.strptime(match.group("date"), "%Y-%m-%d"))
+        except ValueError:
+            continue
+        if now - ts > max_age:
+            stale.append(field)
+    return stale
+
+
+def _prune_local_session_bucket(bucket: dict[str, Any], *, max_age_days: int = 14) -> None:
+    stale = _stale_dated_session_fields(list(bucket), max_age_days=max_age_days)
+    for field in stale:
+        bucket.pop(field, None)
+
+
+def _should_prune_redis_session(tenant_id: str) -> bool:
+    now = _now_ms()
+    due = _redis_session_prune_due_ms.get(tenant_id, 0.0)
+    if now < due:
+        return False
+    _redis_session_prune_due_ms[tenant_id] = now + REDIS_SESSION_PRUNE_INTERVAL_MS
+    return True
+
+
+async def _prune_redis_session_hash(client: Any, tenant_id: str) -> None:
+    key = _session_key(tenant_id)
+    fields = await client.hkeys(key)
+    stale = _stale_dated_session_fields([str(field) for field in fields])
+    if stale:
+        await client.hdel(key, *stale)
 
 
 def _now_ms() -> float:
@@ -61,6 +110,7 @@ def reset_signal_cache_for_tests() -> None:
     _watchers.clear()
     _local_compute_locks.clear()
     _redis_lock_tokens.clear()
+    _redis_session_prune_due_ms.clear()
 
 
 async def get_metric(tenant_id: str, metric_id: str) -> Any | None:
@@ -107,6 +157,8 @@ async def get_session_value(tenant_id: str, field: str) -> Any | None:
     client = await get_redis()
     if client is not None:
         try:
+            if _should_prune_redis_session(tenant_id):
+                await _prune_redis_session_hash(client, tenant_id)
             raw = await client.hget(_session_key(tenant_id), field)
             if raw is None:
                 return None
@@ -115,24 +167,33 @@ async def get_session_value(tenant_id: str, field: str) -> Any | None:
             await invalidate_redis()
             logger.warning("signal_cache_session_get_failed", tenant_id=tenant_id, field=field)
 
-    return _session_store.get(tenant_id, {}).get(field)
+    bucket = _session_store.get(tenant_id, {})
+    if bucket:
+        _prune_local_session_bucket(bucket)
+    return bucket.get(field)
 
 
 async def set_session_value(tenant_id: str, field: str, value: Any) -> None:
     client = await get_redis()
     if client is not None:
         try:
+            key = _session_key(tenant_id)
+            if _should_prune_redis_session(tenant_id):
+                await _prune_redis_session_hash(client, tenant_id)
             await client.hset(
-                _session_key(tenant_id),
+                key,
                 field,
                 json.dumps(value, separators=(",", ":")),
             )
+            # Set TTL only when the hash has none; avoid resetting on every hot write.
+            await client.expire(key, SESSION_KEY_TTL_SECONDS, nx=True)
             return
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_session_set_failed", tenant_id=tenant_id, field=field)
 
     bucket = _session_store.setdefault(tenant_id, {})
+    _prune_local_session_bucket(bucket)
     bucket[field] = value
 
 

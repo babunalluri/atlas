@@ -219,8 +219,8 @@ function useLocalizedNav(isPlatformAdmin: boolean) {
       {
         label: t("groups.build"),
         items: [
-          item("/admin/workflows", "workflows", icons.workflows),
           item("/admin/teams", "teams", icons.teams),
+          item("/admin/workflows", "workflows", icons.workflows),
           item("/admin/agents", "agents", icons.agents),
           item("/admin/tools", "tools", icons.tools),
           item("/admin/integrations", "toolkitCatalog", icons.integrations),
@@ -553,7 +553,7 @@ export function AdminShell({
             >
               Menu
             </button>
-            <BrandMark href="/admin/agents" subtitle={tNav("brandSubtitle")} />
+            <BrandMark subtitle={tNav("brandSubtitle")} />
           </div>
           <div className="flex shrink-0 items-center gap-3">
             {workspaceHref && !onOnboardingRoute ? (

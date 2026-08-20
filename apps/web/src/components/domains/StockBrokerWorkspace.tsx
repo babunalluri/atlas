@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
+import { OptionsLabPanel } from "@/components/domains/OptionsLabPanel";
 import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
 import { Button } from "@/components/ui/Button";
@@ -13,6 +14,35 @@ import type { DomainDashboard } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
 const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
+const DESK_MAIN_TAB_KEY = "atlas-desk-main-tab";
+
+type DeskMainTab = "signals" | "options-lab";
+
+function useDeskMainTab() {
+  const [tab, setTabState] = useState<DeskMainTab>("signals");
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(DESK_MAIN_TAB_KEY);
+      if (stored === "options-lab" || stored === "signals") {
+        setTabState(stored);
+      }
+    } catch {
+      // private mode / blocked storage
+    }
+  }, []);
+
+  function setTab(next: DeskMainTab) {
+    setTabState(next);
+    try {
+      window.localStorage.setItem(DESK_MAIN_TAB_KEY, next);
+    } catch {
+      // private mode / blocked storage
+    }
+  }
+
+  return { tab, setTab };
+}
 
 function useDeskChatCollapsed() {
   const [collapsed, setCollapsedState] = useState(false);
@@ -53,6 +83,7 @@ export function StockBrokerWorkspace({
   const customer = variant === "customer";
   const { collapsed: chatCollapsed, setCollapsed: setChatCollapsed } =
     useDeskChatCollapsed();
+  const { tab: deskTab, setTab: setDeskTab } = useDeskMainTab();
   const hasChat = data.chat_targets.length > 0;
 
   return (
@@ -114,7 +145,7 @@ export function StockBrokerWorkspace({
             <p className="mt-1 max-w-xl text-sm text-slate-muted">
               {customer
                 ? "Research is for analysis; live orders stay on Live trading. Chat tabs match the teams assigned to you."
-                : "Research is for analysis; live orders stay on Live trading. Chat tabs match assigned teams. Signal config and metrics below."}
+                : "Research is for analysis; live orders stay on Live trading. Chat tabs match assigned teams. Signal engine and Options Lab below."}
             </p>
           </div>
         </header>
@@ -125,7 +156,43 @@ export function StockBrokerWorkspace({
           </div>
         ) : null}
 
-        {!customer ? <SignalMetricsPanel /> : null}
+        {!customer ? (
+          <div className="mt-5">
+            <div
+              role="tablist"
+              aria-label="Trading desk views"
+              className="inline-flex rounded-lg border border-line bg-canvas/60 p-1"
+            >
+              {(
+                [
+                  ["signals", "Signal Engine"],
+                  ["options-lab", "Options Lab"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={deskTab === id}
+                  onClick={() => setDeskTab(id)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-sm font-medium transition",
+                    deskTab === id
+                      ? "bg-raised text-ink shadow-sm"
+                      : "text-slate-muted hover:text-ink",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {deskTab === "signals" ? (
+              <SignalMetricsPanel />
+            ) : (
+              <OptionsLabPanel active />
+            )}
+          </div>
+        ) : null}
 
         <DeskBooksPanel
           snapshot={data.desk_snapshot}

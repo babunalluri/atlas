@@ -9,6 +9,7 @@ import {
   buildStrikeStepOptions,
   buildUnderlyingOptions,
 } from "@/components/domains/signal-setup-options";
+import { CommonInstrumentSetupBar } from "@/components/domains/CommonInstrumentSetupBar";
 import { Label } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import type { SignalEngineAdminConfig } from "@/lib/api/admin";
@@ -93,93 +94,69 @@ export function SignalSetupBar({
   }
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-      <div>
-        <Label htmlFor="signal-preset">Preset</Label>
-        <SearchableSelect
-          id="signal-preset"
-          value={presetKey}
-          onChange={onPresetChange}
-          options={presetOptions}
-          placeholder="Search preset…"
-        />
-      </div>
-      <div className="sm:col-span-2">
-        <Label htmlFor="signal-underlying">Underlying</Label>
-        <SearchableSelect
-          id="signal-underlying"
-          className="tnum"
-          value={config.underlying_symbol}
-          onChange={onUnderlyingChange}
-          options={underlyingOptions}
-          disabled={presetLocked}
-          allowCustom={!presetLocked}
-          placeholder="Search underlying…"
-          emptyMessage="Type symbol, e.g. NSE:NIFTY"
-        />
-      </div>
-      <div>
-        <Label htmlFor="signal-strike">Strike step</Label>
-        <SearchableSelect
-          id="signal-strike"
-          className="tnum"
-          value={String(config.strike_step ?? 50)}
-          onChange={(value) =>
-            patchConfig({ strike_step: Number(value) || 50 })
-          }
-          options={strikeOptions}
-          allowCustom
-          placeholder="Search step…"
-          emptyMessage="Type strike step"
-        />
-      </div>
-      <div className="sm:col-span-2">
-        <Label htmlFor="signal-fut">FUT (current expiry)</Label>
-        <SearchableSelect
-          id="signal-fut"
-          className="tnum"
-          value={config.fut_symbol ?? ""}
-          onChange={(value) => patchConfig({ fut_symbol: value })}
-          options={futOptions}
-          allowCustom
-          placeholder="Search or type FUT…"
-          emptyMessage="Type FUT symbol, e.g. NFO:NIFTY26AUGFUT"
-        />
-      </div>
-      <div>
-        <Label htmlFor="signal-ce">CE symbol</Label>
-        <SearchableSelect
-          id="signal-ce"
-          className="tnum"
-          value={config.ce_symbol ?? ""}
-          onChange={(value) => patchConfig({ ce_symbol: value })}
-          options={ceOptions}
-          allowCustom
-          placeholder="Search or type CE…"
-          emptyMessage={
-            atmHint != null
-              ? "Type CE symbol or pick ATM strike"
-              : "Set FUT and start engine for ATM suggestions"
-          }
-        />
-      </div>
-      <div>
-        <Label htmlFor="signal-pe">PE symbol</Label>
-        <SearchableSelect
-          id="signal-pe"
-          className="tnum"
-          value={config.pe_symbol ?? ""}
-          onChange={(value) => patchConfig({ pe_symbol: value })}
-          options={peOptions}
-          allowCustom
-          placeholder="Search or type PE…"
-          emptyMessage={
-            atmHint != null
-              ? "Type PE symbol or pick ATM strike"
-              : "Set FUT and start engine for ATM suggestions"
-          }
-        />
-      </div>
-    </div>
+    <CommonInstrumentSetupBar
+      loading={loading}
+      loadingLabel="Loading symbols…"
+      config={config}
+      presetKey={presetKey}
+      presetLocked={presetLocked}
+      onPresetChange={onPresetChange}
+      onUnderlyingChange={onUnderlyingChange}
+      onFutChange={(value) => patchConfig({ fut_symbol: value })}
+      onStrikeStepChange={(value) =>
+        patchConfig({ strike_step: Number(value) || 50 })
+      }
+      presetOptions={presetOptions}
+      underlyingOptions={underlyingOptions}
+      futOptions={futOptions}
+      strikeOptions={strikeOptions}
+      idPrefix="signal"
+      containerClassName="rounded-lg border border-line bg-canvas/40 p-3"
+      layoutClassName="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+      underlyingAllowCustom={!presetLocked}
+      underlyingPlaceholder="Search underlying…"
+      underlyingEmptyMessage="Type symbol, e.g. NSE:NIFTY"
+      strikeAllowCustom
+      futLabel="FUT (current expiry)"
+      atmHint={atmHint}
+      layoutExtras={
+        <>
+          <div>
+            <Label htmlFor="signal-ce">CE symbol</Label>
+            <SearchableSelect
+              id="signal-ce"
+              className="tnum"
+              value={config?.ce_symbol ?? ""}
+              onChange={(value) => patchConfig({ ce_symbol: value })}
+              options={ceOptions}
+              allowCustom
+              placeholder="Search or type CE…"
+              emptyMessage={
+                atmHint != null
+                  ? "Type CE symbol or pick ATM strike"
+                  : "Set FUT and start engine for ATM suggestions"
+              }
+            />
+          </div>
+          <div>
+            <Label htmlFor="signal-pe">PE symbol</Label>
+            <SearchableSelect
+              id="signal-pe"
+              className="tnum"
+              value={config?.pe_symbol ?? ""}
+              onChange={(value) => patchConfig({ pe_symbol: value })}
+              options={peOptions}
+              allowCustom
+              placeholder="Search or type PE…"
+              emptyMessage={
+                atmHint != null
+                  ? "Type PE symbol or pick ATM strike"
+                  : "Set FUT and start engine for ATM suggestions"
+              }
+            />
+          </div>
+        </>
+      }
+    />
   );
 }
