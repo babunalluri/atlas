@@ -198,6 +198,645 @@ function round4(n: number) {
   return Math.round(n * 10_000) / 10_000;
 }
 
+const MONTH_INDEX: Record<string, number> = {
+  JAN: 0,
+  FEB: 1,
+  MAR: 2,
+  APR: 3,
+  MAY: 4,
+  JUN: 5,
+  JUL: 6,
+  AUG: 7,
+  SEP: 8,
+  OCT: 9,
+  NOV: 10,
+  DEC: 11,
+};
+
+/** NSE weekly month codes for letter months: O=Oct, N=Nov, D=Dec.
+ *  Digits 1–9 are NOT included here — digit months live in YYMDD / YYMMDD codes.
+ *  Including 1–9 would swallow `251127` as weekly-alpha `25112` (12 Jan).
+ */
+const WEEKLY_MONTH_CODE: Record<string, number> = {
+  O: 9,
+  N: 10,
+  D: 11,
+};
+
+const INDEX_OPTION_ROOTS = ["MIDCPNIFTY", "BANKNIFTY", "FINNIFTY", "NIFTY", "SENSEX"] as const;
+
+/** Last Thursday of calendar month (historical NSE monthly F&O convention).
+ *  Product/year calendars differ — see docs/options-lab-market-profile.md.
+ *  Anchor 10:00 UTC ≈ 15:30 IST cash close for intraday DTE fractions.
+ */
+export function lastThursdayOfMonth(year: number, monthIndex: number): Date {
+  const end = new Date(Date.UTC(year, monthIndex + 1, 0, 10, 0, 0));
+  const day = end.getUTCDay(); // 0 Sun … 4 Thu
+  const offset = (day + 3) % 7; // days since Thursday
+  end.setUTCDate(end.getUTCDate() - offset);
+  return end;
+}
+
+function calendarDaysUntil(expiry: Date, now: Date): number | null {
+  const ms = expiry.getTime() - now.getTime();
+  // Past / unknown expiry → null so callers can fall back (FUT / default),
+  // instead of silently clamping to 0.5d and collapsing PoP.
+  if (ms <= 0) return null;
+  return ms / (24 * 60 * 60 * 1000);
+}
+
+/** Expiry instant at 10:00 UTC (15:30 IST close). */
+function utcDate(year: number, monthIndex: number, day: number): Date | null {
+  if (monthIndex < 0 || monthIndex > 11 || day < 1 || day > 31) return null;
+  const d = new Date(Date.UTC(year, monthIndex, day, 10, 0, 0));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== monthIndex || d.getUTCDate() !== day) {
+    return null;
+  }
+  return d;
+}
+
+/** IST hour bucket `YYYY-MM-DDTHH` so expiry-day DTE/PoP recompute intraday. */
+export function istSessionHourKey(now: Date = new Date()): string {
+  const istMs = now.getTime() + 5.5 * 60 * 60 * 1000;
+  return new Date(istMs).toISOString().slice(0, 13);
+}
+
+/** Floor DTE for σ√T numerics — ~30 minutes, not half a day. */
+export const MIN_DTE_DAYS = 1 / 48;
+
+export function yearsFromDte(daysToExpiry: number): number {
+  return Math.max(daysToExpiry, MIN_DTE_DAYS) / 365;
+}
+
+/** Parse monthly expiry token `26AUG` → last Thursday of that month. */
+export function expiryDateFromMonthlyCode(code: string): Date | null {
+  const match = code.toUpperCase().match(/^(\d{2})([A-Z]{3})$/);
+  if (!match) return null;
+  const year = 2000 + Number(match[1]);
+  const monthIndex = MONTH_INDEX[match[2]];
+  if (monthIndex == null || Number.isNaN(year)) return null;
+  return lastThursdayOfMonth(year, monthIndex);
+}
+
+/** Parse weekly alpha token `25N11` → 11 Nov 2025 (O/N/D months only). */
+export function expiryDateFromWeeklyAlphaCode(code: string): Date | null {
+  const match = code.toUpperCase().match(/^(\d{2})([OND])(\d{2})$/);
+  if (!match) return null;
+  const year = 2000 + Number(match[1]);
+  const monthIndex = WEEKLY_MONTH_CODE[match[2]];
+  const day = Number(match[3]);
+  if (monthIndex == null || Number.isNaN(year)) return null;
+  return utcDate(year, monthIndex, day);
+}
+
+/** Parse weekly digit token `25807` (YYMDD) or `250807` (YYMMDD). */
+export function expiryDateFromWeeklyDigitsCode(code: string): Date | null {
+  if (!/^\d+$/.test(code)) return null;
+  if (code.length === 5) {
+    const year = 2000 + Number(code.slice(0, 2));
+    const monthIndex = Number(code.slice(2, 3)) - 1;
+    const day = Number(code.slice(3, 5));
+    return utcDate(year, monthIndex, day);
+  }
+  if (code.length === 6) {
+    const year = 2000 + Number(code.slice(0, 2));
+    const monthIndex = Number(code.slice(2, 4)) - 1;
+    const day = Number(code.slice(4, 6));
+    return utcDate(year, monthIndex, day);
+  }
+  return null;
+}
+
+export function expiryDateFromExpiryCode(code: string): Date | null {
+  const raw = code.trim().toUpperCase();
+  if (!raw) return null;
+  return (
+    expiryDateFromMonthlyCode(raw) ??
+    expiryDateFromWeeklyAlphaCode(raw) ??
+    expiryDateFromWeeklyDigitsCode(raw)
+  );
+}
+
+/**
+ * Extract expiry code from NSE-style option symbols, e.g.
+ * `NFO:NIFTY26AUG24500CE`, `NIFTY25N1124500CE`, `NIFTY2580724500CE`.
+ */
+export function expiryCodeFromOptionSymbol(symbol: string): string | null {
+  let raw = symbol.trim().toUpperCase();
+  if (!raw) return null;
+  if (raw.includes(":")) raw = raw.split(":", 2)[1] ?? raw;
+  if (!raw.endsWith("CE") && !raw.endsWith("PE")) return null;
+  const body = raw.slice(0, -2);
+
+  const monthly = body.match(/^([A-Z]+)(\d{2}[A-Z]{3})(\d+)$/);
+  if (monthly) return monthly[2];
+
+  const weeklyAlpha = body.match(/^([A-Z]+)(\d{2}[OND]\d{2})(\d+)$/);
+  if (weeklyAlpha) return weeklyAlpha[2];
+
+  for (const root of INDEX_OPTION_ROOTS) {
+    if (!body.startsWith(root)) continue;
+    const tail = body.slice(root.length);
+    if (!/^\d+$/.test(tail)) continue;
+    for (const strikeLen of [5, 4, 6]) {
+      if (tail.length <= strikeLen + 4) continue;
+      const expiryPart = tail.slice(0, -strikeLen);
+      if (/^\d+$/.test(expiryPart) && expiryPart.length >= 5) return expiryPart;
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse `NFO:NIFTY26AUGFUT` / `NIFTY26AUGFUT` → calendar days to monthly expiry.
+ * Returns null when the symbol is not a monthly FUT code.
+ */
+export function daysToExpiryFromFutSymbol(
+  futSymbol: string | null | undefined,
+  now: Date = new Date(),
+): number | null {
+  const raw = String(futSymbol || "")
+    .trim()
+    .toUpperCase();
+  if (!raw) return null;
+  const body = raw.includes(":") ? raw.split(":", 2)[1] : raw;
+  const match = body.match(/(\d{2})([A-Z]{3})FUT$/);
+  if (!match) return null;
+  const expiry = expiryDateFromMonthlyCode(`${match[1]}${match[2]}`);
+  if (!expiry) return null;
+  return calendarDaysUntil(expiry, now);
+}
+
+export function daysToExpiryFromOptionSymbol(
+  symbol: string | null | undefined,
+  now: Date = new Date(),
+): number | null {
+  if (!symbol) return null;
+  const code = expiryCodeFromOptionSymbol(symbol);
+  if (!code) return null;
+  const expiry = expiryDateFromExpiryCode(code);
+  if (!expiry) return null;
+  return calendarDaysUntil(expiry, now);
+}
+
+/**
+ * Prefer option-leg expiries (nearest), then monthly FUT.
+ * If option symbols decode but are all past expiry, return null (do not
+ * silently jump to monthly FUT DTE — that wrecks same-day PoP).
+ */
+export function resolveDaysToExpiry(
+  {
+    futSymbol,
+    optionSymbols = [],
+  }: {
+    futSymbol?: string | null;
+    optionSymbols?: Array<string | null | undefined>;
+  },
+  now: Date = new Date(),
+): number | null {
+  const fromOptions: number[] = [];
+  let decodedOptionExpiry = false;
+  for (const symbol of optionSymbols) {
+    if (!symbol) continue;
+    const code = expiryCodeFromOptionSymbol(symbol);
+    if (!code) continue;
+    const expiry = expiryDateFromExpiryCode(code);
+    if (!expiry) continue;
+    decodedOptionExpiry = true;
+    const days = calendarDaysUntil(expiry, now);
+    if (days != null) fromOptions.push(days);
+  }
+  if (fromOptions.length > 0) return Math.min(...fromOptions);
+  if (decodedOptionExpiry) return null;
+  return daysToExpiryFromFutSymbol(futSymbol, now);
+}
+
+/** Standard normal CDF via erf approximation. */
+export function normCdf(x: number): number {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp((-x * x) / 2);
+  const p =
+    d *
+    t *
+    (0.3193815 +
+      t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x >= 0 ? 1 - p : p;
+}
+
+function lognormalCdf(spot: number, forward: number, sigma: number, years: number): number {
+  if (!(spot > 0) || !(forward > 0) || !(sigma > 0) || !(years > 0)) return 0;
+  const vol = sigma * Math.sqrt(years);
+  if (vol < 1e-12) return spot >= forward ? 1 : 0;
+  const z = (Math.log(spot / forward) + 0.5 * sigma * sigma * years) / vol;
+  return normCdf(z);
+}
+
+function findProfitableRanges(
+  legs: StrategyLeg[],
+  strikeStep: number,
+  forward: number,
+  {
+    ivPct = 20,
+    daysToExpiry = 7,
+  }: { ivPct?: number; daysToExpiry?: number } = {},
+): Array<{ lo: number; hi: number }> {
+  const step = Math.max(1, strikeStep);
+  const maxStrike = Math.max(forward, ...legs.map((leg) => leg.strike));
+  const years = yearsFromDte(daysToExpiry);
+  const sigma = Math.max(ivPct, 1) / 100;
+  // Cover ~5σ of the lognormal mass so far OTM profit regions aren't truncated.
+  const volWing = forward * sigma * Math.sqrt(years) * 5;
+  const hi =
+    Math.ceil(
+      Math.max(maxStrike + 80 * step, forward + volWing, forward * 1.4) / step,
+    ) * step;
+  const ranges: Array<{ lo: number; hi: number }> = [];
+  let inProfit = false;
+  let start = 0;
+  let prevSpot = 0;
+  let prevPnl = totalPayoffAtSpot(legs, 0);
+
+  for (let spot = 0; spot <= hi + 0.001; spot += step) {
+    const pnl = totalPayoffAtSpot(legs, spot);
+    const profitable = pnl > 1e-9;
+    if (profitable && !inProfit) {
+      if (spot > 0 && prevPnl <= 0) {
+        const ratio = prevPnl / (prevPnl - pnl);
+        start = prevSpot + ratio * (spot - prevSpot);
+      } else {
+        start = spot;
+      }
+      inProfit = true;
+    } else if (!profitable && inProfit) {
+      let end = spot;
+      if (prevPnl > 0) {
+        const ratio = prevPnl / (prevPnl - pnl);
+        end = prevSpot + ratio * (spot - prevSpot);
+      }
+      ranges.push({ lo: start, hi: end });
+      inProfit = false;
+    }
+    prevSpot = spot;
+    prevPnl = pnl;
+  }
+  if (inProfit) ranges.push({ lo: start, hi: Number.POSITIVE_INFINITY });
+  return ranges;
+}
+
+/**
+ * IV-implied Probability of Profit at expiry (0–100).
+ * Uses Black-76 style lognormal with forward ≈ futures/synthetic F and an effective IV %.
+ * Returns null when inputs are incomplete or invalid.
+ */
+export function estimateProbabilityOfProfit(
+  legs: StrategyLeg[],
+  {
+    forward,
+    ivPct,
+    daysToExpiry,
+    strikeStep,
+  }: {
+    forward: number;
+    ivPct: number;
+    daysToExpiry: number;
+    strikeStep: number;
+  },
+): number | null {
+  if (legs.length === 0) return null;
+  if (!(forward > 0) || !(ivPct > 0) || !(daysToExpiry > 0) || !(strikeStep > 0)) {
+    return null;
+  }
+
+  const years = yearsFromDte(daysToExpiry);
+  const sigma = ivPct / 100;
+  const ranges = findProfitableRanges(legs, strikeStep, forward, {
+    ivPct,
+    daysToExpiry,
+  });
+  if (ranges.length === 0) return 0;
+
+  let mass = 0;
+  for (const { lo, hi } of ranges) {
+    const pHi =
+      hi === Number.POSITIVE_INFINITY ? 1 : lognormalCdf(hi, forward, sigma, years);
+    const pLo = lo <= 0 ? 0 : lognormalCdf(lo, forward, sigma, years);
+    mass += Math.max(0, pHi - pLo);
+  }
+
+  const pct = Math.max(0, Math.min(100, mass * 100));
+  return Math.round(pct * 10) / 10;
+}
+
+/**
+ * Futures-style synthetic forward from ATM straddle: F ≈ K + (CE − PE).
+ * Guard band scales with DTE so short-dated PoP isn't moved by stale ATM prints.
+ */
+export function syntheticForwardFromChain(
+  rows: OptionsChainRow[],
+  atm: number | null | undefined,
+  spot: number | null | undefined,
+  daysToExpiry: number | null | undefined = 7,
+): number | null {
+  const k = atm ?? rows.find((row) => row.is_atm)?.strike ?? null;
+  if (k == null) return spot ?? null;
+  const row = rows.find((item) => item.strike === k) ?? rows.find((item) => item.is_atm);
+  const ce = row?.ce.ltp;
+  const pe = row?.pe.ltp;
+  if (ce != null && pe != null && ce > 0 && pe > 0) {
+    const forward = Math.round((k + (ce - pe)) * 100) / 100;
+    const anchor = spot != null && spot > 0 ? spot : k;
+    const dte = daysToExpiry != null && daysToExpiry > 0 ? daysToExpiry : 7;
+    // ~0.1% floor, ~1% at 30d, capped at old ±1.5% for quarterlies/LEAPS.
+    const band =
+      Math.min(0.015, Math.max(0.001, 0.12 * yearsFromDte(dte))) * anchor;
+    if (Math.abs(forward - anchor) <= band) {
+      return forward;
+    }
+  }
+  return spot ?? k;
+}
+
+export type LegIvSource = "chain" | "parity" | "interp" | "ltp" | "atm";
+
+export type ResolvedLegIv = {
+  iv: number;
+  source: LegIvSource;
+};
+
+export type BlendedStrategyIv = {
+  /** Effective IV % for PoP (average of resolved leg IVs). */
+  ivPct: number;
+  legs: number;
+  /** Legs that used raw own-side chain IV. */
+  chainLegs: number;
+  /** Legs that used same-strike opposite-side (parity) IV. */
+  parityLegs: number;
+  /** Legs filled by strike interpolation. */
+  interpLegs: number;
+  /** Legs filled by IV inverted from LTP. */
+  ltpLegs: number;
+  /** Legs that fell back to ATM IV. */
+  atmFallbackLegs: number;
+};
+
+export type ResolveLegIvOptions = {
+  atmIv?: number | null;
+  forward?: number | null;
+  daysToExpiry?: number | null;
+  /** Prefer this premium (edited builder premium) over chain LTP. */
+  premium?: number | null;
+};
+
+function chainSideQuote(
+  rows: OptionsChainRow[],
+  strike: number,
+  type: OptionSide,
+): { iv: number | null; ltp: number | null } {
+  const row = rows.find((item) => item.strike === strike);
+  if (!row) return { iv: null, ltp: null };
+  const leg = type === "CE" ? row.ce : row.pe;
+  const iv = leg.iv != null && leg.iv > 0 ? leg.iv : null;
+  const ltp = leg.ltp != null && leg.ltp > 0 ? leg.ltp : null;
+  return { iv, ltp };
+}
+
+/** True only for deep ITM (ill-conditioned for IV invert), not near-ATM ITM. */
+export function isDeepItmForIvInvert(
+  forward: number,
+  strike: number,
+  type: OptionSide,
+  {
+    premium,
+    daysToExpiry,
+    atmIv,
+  }: {
+    premium?: number | null;
+    daysToExpiry?: number | null;
+    atmIv?: number | null;
+  } = {},
+): boolean {
+  if (!(forward > 0) || !(strike > 0)) return false;
+  const intrinsic =
+    type === "CE" ? Math.max(0, forward - strike) : Math.max(0, strike - forward);
+  if (intrinsic <= 0) return false;
+
+  if (premium != null && premium > 0 && intrinsic / premium > 0.9) {
+    return true;
+  }
+
+  const years = yearsFromDte(daysToExpiry ?? 7);
+  const sigma = Math.max(atmIv ?? 20, 1) / 100;
+  const volMove = sigma * Math.sqrt(years);
+  if (volMove < 1e-8) return intrinsic > 0;
+  return Math.abs(Math.log(strike / forward)) > 1.5 * volMove;
+}
+
+function black76Price(
+  forward: number,
+  strike: number,
+  years: number,
+  sigma: number,
+  type: OptionSide,
+): number {
+  if (!(forward > 0) || !(strike > 0) || !(years > 0) || !(sigma > 0)) return 0;
+  const vol = sigma * Math.sqrt(years);
+  if (vol < 1e-12) {
+    return type === "CE" ? Math.max(0, forward - strike) : Math.max(0, strike - forward);
+  }
+  const d1 = (Math.log(forward / strike) + 0.5 * sigma * sigma * years) / vol;
+  const d2 = d1 - vol;
+  if (type === "CE") return forward * normCdf(d1) - strike * normCdf(d2);
+  return strike * normCdf(-d2) - forward * normCdf(-d1);
+}
+
+/**
+ * Invert Black-76 IV (%) from option LTP. Returns null if premium is outside
+ * arb bounds or search fails.
+ */
+export function impliedVolFromLtp({
+  premium,
+  forward,
+  strike,
+  type,
+  daysToExpiry,
+}: {
+  premium: number;
+  forward: number;
+  strike: number;
+  type: OptionSide;
+  daysToExpiry: number;
+}): number | null {
+  if (!(premium > 0) || !(forward > 0) || !(strike > 0) || !(daysToExpiry > 0)) {
+    return null;
+  }
+  const years = yearsFromDte(daysToExpiry);
+  const intrinsic = type === "CE" ? Math.max(0, forward - strike) : Math.max(0, strike - forward);
+  // Discounted forward measure with r=0 → premium should sit above intrinsic.
+  if (premium + 1e-8 < intrinsic) return null;
+  const maxPrice = type === "CE" ? forward : strike;
+  if (premium > maxPrice * 1.0001) return null;
+
+  let lo = 1e-4; // 0.01%
+  let hi = 5; // 500%
+  const target = premium;
+  const priceLo = black76Price(forward, strike, years, lo, type);
+  let priceHi = black76Price(forward, strike, years, hi, type);
+  if (target > priceHi + 1e-6) {
+    hi = 10; // 1000%
+    priceHi = black76Price(forward, strike, years, hi, type);
+  }
+  // Still outside the monotone price bracket → cannot invert reliably.
+  if (target < priceLo - 1e-6 || target > priceHi + 1e-6) return null;
+
+  let mid = lo;
+  for (let i = 0; i < 60; i += 1) {
+    mid = 0.5 * (lo + hi);
+    const price = black76Price(forward, strike, years, mid, type);
+    if (Math.abs(price - target) < 1e-4) break;
+    if (price > target) hi = mid;
+    else lo = mid;
+  }
+  const ivPct = mid * 100;
+  if (!(ivPct > 0) || ivPct > 1000) return null;
+  return Math.round(ivPct * 100) / 100;
+}
+
+/**
+ * Linear IV interpolation across strikes for one option side (CE or PE).
+ * Only interpolates strictly between known points — no wing clamp — so
+ * IV-from-LTP can run for strikes outside the observed smile.
+ */
+export function interpolateSideIv(
+  rows: OptionsChainRow[],
+  strike: number,
+  type: OptionSide,
+): number | null {
+  const points = rows
+    .map((row) => {
+      const iv = type === "CE" ? row.ce.iv : row.pe.iv;
+      return iv != null && iv > 0 ? { strike: row.strike, iv } : null;
+    })
+    .filter((item): item is { strike: number; iv: number } => item != null)
+    .sort((a, b) => a.strike - b.strike);
+
+  if (points.length === 0) return null;
+  if (points.length === 1) {
+    return points[0].strike === strike ? points[0].iv : null;
+  }
+
+  if (strike < points[0].strike || strike > points[points.length - 1].strike) {
+    return null;
+  }
+
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const left = points[i];
+    const right = points[i + 1];
+    if (strike === left.strike) return left.iv;
+    if (strike === right.strike) return right.iv;
+    if (strike > left.strike && strike < right.strike) {
+      const span = right.strike - left.strike;
+      if (span <= 0) return left.iv;
+      const t = (strike - left.strike) / span;
+      return left.iv + t * (right.iv - left.iv);
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve one leg's IV: own-side chain → same-strike parity → smile interp →
+ * IV-from-LTP (skip deep ITM) → ATM.
+ */
+export function resolveLegIv(
+  rows: OptionsChainRow[],
+  leg: Pick<StrategyLeg, "strike" | "type">,
+  opts: ResolveLegIvOptions = {},
+): ResolvedLegIv | null {
+  const quote = chainSideQuote(rows, leg.strike, leg.type);
+  if (quote.iv != null) return { iv: quote.iv, source: "chain" };
+
+  // Put-call parity: same-strike opposite IV is preferred over interp/LTP.
+  const oppositeType: OptionSide = leg.type === "CE" ? "PE" : "CE";
+  const opposite = chainSideQuote(rows, leg.strike, oppositeType);
+  if (opposite.iv != null) return { iv: opposite.iv, source: "parity" };
+
+  const interp = interpolateSideIv(rows, leg.strike, leg.type);
+  if (interp != null) return { iv: interp, source: "interp" };
+
+  const premium =
+    opts.premium != null && opts.premium > 0 ? opts.premium : quote.ltp;
+  const forward = opts.forward;
+  const daysToExpiry = opts.daysToExpiry;
+  const deepItm =
+    forward != null &&
+    forward > 0 &&
+    isDeepItmForIvInvert(forward, leg.strike, leg.type, {
+      premium,
+      daysToExpiry,
+      atmIv: opts.atmIv,
+    });
+
+  if (
+    !deepItm &&
+    premium != null &&
+    premium > 0 &&
+    forward != null &&
+    forward > 0 &&
+    daysToExpiry != null &&
+    daysToExpiry > 0
+  ) {
+    const fromLtp = impliedVolFromLtp({
+      premium,
+      forward,
+      strike: leg.strike,
+      type: leg.type,
+      daysToExpiry,
+    });
+    if (fromLtp != null) return { iv: fromLtp, source: "ltp" };
+  }
+
+  if (opts.atmIv != null && opts.atmIv > 0) return { iv: opts.atmIv, source: "atm" };
+  return null;
+}
+
+/** Average resolved leg IVs into one effective σ* for PoP. */
+export function blendStrategyIv(
+  legs: StrategyLeg[],
+  rows: OptionsChainRow[],
+  atmIv: number | null | undefined,
+  opts?: {
+    forward?: number | null;
+    daysToExpiry?: number | null;
+  },
+): BlendedStrategyIv | null {
+  if (legs.length === 0) return null;
+
+  const resolved: ResolvedLegIv[] = [];
+  for (const leg of legs) {
+    const item = resolveLegIv(rows, leg, {
+      atmIv,
+      forward: opts?.forward,
+      daysToExpiry: opts?.daysToExpiry,
+      premium: leg.quoteMissing ? null : leg.premium,
+    });
+    if (!item) return null;
+    resolved.push(item);
+  }
+
+  const ivPct =
+    resolved.reduce((sum, item) => sum + item.iv, 0) / resolved.length;
+
+  return {
+    ivPct: Math.round(ivPct * 100) / 100,
+    legs: resolved.length,
+    chainLegs: resolved.filter((item) => item.source === "chain").length,
+    parityLegs: resolved.filter((item) => item.source === "parity").length,
+    interpLegs: resolved.filter((item) => item.source === "interp").length,
+    ltpLegs: resolved.filter((item) => item.source === "ltp").length,
+    atmFallbackLegs: resolved.filter((item) => item.source === "atm").length,
+  };
+}
+
 export function chainLegPremium(
   rows: OptionsChainRow[],
   strike: number,

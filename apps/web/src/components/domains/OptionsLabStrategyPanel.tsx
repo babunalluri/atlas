@@ -5,10 +5,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { OptionsLabPayoffChart } from "@/components/domains/OptionsLabPayoffChart";
 import {
   STRATEGY_TEMPLATES,
+  blendStrategyIv,
   buildPayoffCurve,
   buildStrategyFromTemplate,
   chainLegPremium,
+  estimateProbabilityOfProfit,
+  istSessionHourKey,
+  resolveDaysToExpiry,
   summarizeStrategy,
+  syntheticForwardFromChain,
   type StrategyLeg,
   type StrategyTemplateId,
 } from "@/components/domains/options-lab-strategy";
@@ -47,6 +52,11 @@ function formatNum(value: number | null | undefined, digits = 2) {
 function formatExtreme(value: number | null | undefined) {
   if (value === null || value === undefined) return "Unlimited";
   return formatNum(value);
+}
+
+function formatPop(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return `${value.toFixed(1)}%`;
 }
 
 export function OptionsLabStrategyPanel({
@@ -185,10 +195,90 @@ export function OptionsLabStrategyPanel({
     [legs, payoffPoints],
   );
 
+  const atmIv = snapshot?.summary?.atm_iv ?? snapshot?.charts?.iv?.atm_iv ?? null;
+  const optionSymbolsKey = useMemo(
+    () =>
+      legs
+        .map((leg) => {
+          const row = rows.find((item) => item.strike === leg.strike);
+          if (!row) return "";
+          return leg.type === "CE" ? row.ce.symbol : row.pe.symbol;
+        })
+        .join("|"),
+    [legs, rows],
+  );
+  const [sessionHourBucket, setSessionHourBucket] = useState(() => istSessionHourKey());
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setSessionHourBucket((prev) => {
+        const next = istSessionHourKey();
+        return prev === next ? prev : next;
+      });
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Clock pinned to IST hour bucket so DTE/PoP recompute intraday without render thrash.
+  const now = useMemo(() => {
+    // sessionHourBucket is the intentional invalidation key (YYYY-MM-DDTHH).
+    return sessionHourBucket ? new Date() : new Date();
+  }, [sessionHourBucket]);
+
+  // Memoize DTE against symbol/FUT + IST hour — expiry-day fractions stay honest.
+  const daysToExpiry = useMemo(() => {
+    const symbols = optionSymbolsKey
+      ? optionSymbolsKey.split("|").filter((symbol) => symbol.length > 0)
+      : [];
+    const resolved = resolveDaysToExpiry(
+      {
+        futSymbol: snapshot?.fut_symbol,
+        optionSymbols: symbols,
+      },
+      now,
+    );
+    if (resolved != null) return resolved;
+    // Decoded-but-expired options → null (PoP —). Demo with no expiry meta → 7d.
+    if (symbols.length > 0) return null;
+    return 7;
+  }, [now, optionSymbolsKey, snapshot?.fut_symbol]);
+
+  // Forward after DTE so the ATM basis guard can tighten near expiry (no cycle).
+  const forward = useMemo(
+    () => syntheticForwardFromChain(rows, atm, spot, daysToExpiry),
+    [atm, daysToExpiry, rows, spot],
+  );
+
+  const blendedIv = useMemo(() => {
+    if (legs.length === 0 || daysToExpiry == null) return null;
+    return blendStrategyIv(legs, rows, atmIv, {
+      forward,
+      daysToExpiry,
+    });
+  }, [atmIv, daysToExpiry, forward, legs, rows]);
+
+  const pop = useMemo(() => {
+    if (forward == null || blendedIv == null || daysToExpiry == null || legs.length === 0) {
+      return null;
+    }
+    return estimateProbabilityOfProfit(legs, {
+      forward,
+      ivPct: blendedIv.ivPct,
+      daysToExpiry,
+      strikeStep,
+    });
+  }, [blendedIv, daysToExpiry, forward, legs, strikeStep]);
+
   const missingQuotes = legs.some((leg) => leg.quoteMissing);
   const summaryForDisplay = missingQuotes
-    ? { ...summary, netPremium: null, breakevens: [], maxProfit: null, maxLoss: null }
-    : summary;
+    ? {
+        ...summary,
+        netPremium: null,
+        breakevens: [],
+        maxProfit: null,
+        maxLoss: null,
+        pop: null as number | null,
+      }
+    : { ...summary, pop };
 
   function updateLegPremium(id: string, premium: number) {
     if (Number.isNaN(premium)) return;
@@ -273,6 +363,7 @@ export function OptionsLabStrategyPanel({
               ["Net Δ", formatNum(summaryForDisplay.netDelta, 3)],
               ["Max profit†", formatExtreme(summaryForDisplay.maxProfit)],
               ["Max loss†", formatExtreme(summaryForDisplay.maxLoss)],
+              ["PoP‡", formatPop(summaryForDisplay.pop)],
             ].map(([label, value]) => (
               <div key={label} className="rounded-md border border-line/70 bg-raised/40 px-2 py-1.5">
                 <div className="text-[10px] uppercase tracking-wide text-slate-muted">{label}</div>
@@ -294,11 +385,32 @@ export function OptionsLabStrategyPanel({
           <p className="text-[10px] text-slate-muted">
             † Max profit/loss at expiry; unlimited risk or reward shown as Unlimited.
           </p>
+          <p className="text-[10px] text-slate-muted">
+            ‡ PoP is an IV-implied estimate at expiry
+            {blendedIv
+              ? ` (σ* ${blendedIv.ivPct.toFixed(1)}% from ${blendedIv.chainLegs}/${blendedIv.legs} leg IV`
+              : ""}
+            {blendedIv && blendedIv.parityLegs > 0
+              ? `, ${blendedIv.parityLegs} parity`
+              : ""}
+            {blendedIv && blendedIv.interpLegs > 0
+              ? `, ${blendedIv.interpLegs} interp`
+              : ""}
+            {blendedIv && blendedIv.ltpLegs > 0
+              ? `, ${blendedIv.ltpLegs} from LTP`
+              : ""}
+            {blendedIv && blendedIv.atmFallbackLegs > 0
+              ? `, ${blendedIv.atmFallbackLegs} ATM fallback`
+              : ""}
+            {blendedIv ? ")" : ""}
+            {`, ~${daysToExpiry != null ? Math.round(daysToExpiry) : "—"}d`} — not a
+            guarantee.
+          </p>
 
           {missingQuotes ? (
             <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-800 dark:text-amber-200">
               Some legs have no chain quote at that strike — premiums are 0 until you edit them or
-              load matching strikes. Max profit/loss stays hidden until all legs are quoted.
+              load matching strikes. Max profit/loss and PoP stay hidden until all legs are quoted.
             </p>
           ) : null}
 
