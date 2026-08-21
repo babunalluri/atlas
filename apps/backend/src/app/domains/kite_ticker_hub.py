@@ -63,10 +63,14 @@ def reset_kite_ticker_hub_for_tests() -> None:
 
 
 def _price_divisor(instrument_token: int) -> float:
-    # CDS / BCD currency segments use 1e7; everything else uses paise (/100).
+    # Kite binary prices are scaled ints. Segment = token & 0xFF.
+    # CDS (3) → 1e7; BCD (6) → 1e4; everything else → paise (/100).
+    # Matches kiteconnectjs ticker.js (BCD is NOT the same divisor as CDS).
     segment = instrument_token & 0xFF
-    if segment in {3, 6}:  # cds, bcd
+    if segment == 3:  # cds
         return 10_000_000.0
+    if segment == 6:  # bcd
+        return 10_000.0
     return 100.0
 
 
@@ -277,6 +281,13 @@ class KiteTickerHub:
         self._enabled = True
         if self._supervisor is None or self._supervisor.done():
             self._supervisor = asyncio.create_task(self._supervise())
+            # Kite allows ~3 concurrent WS connections per api_key. Each process
+            # that starts this hub opens its own sockets — keep a single API
+            # worker (or one dedicated ticker process) per key in production.
+            logger.info(
+                "kite_ticker_hub_started",
+                note="one_hub_per_process_respect_kite_ws_connection_cap",
+            )
 
     async def stop(self) -> None:
         self._enabled = False
@@ -363,11 +374,25 @@ class KiteTickerHub:
                 await feed.task
 
     async def _supervise(self) -> None:
+        """Restart crashed tenant feed tasks (WS ping handles half-open sockets)."""
         while not self._stop.is_set():
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=2.0)
             except TimeoutError:
                 pass
+            if self._stop.is_set():
+                break
+            for tenant_id, feed in list(self._tenants.items()):
+                if feed.stop.is_set() or not feed.desired_tokens:
+                    continue
+                if feed.task is None or feed.task.done():
+                    feed.stop = asyncio.Event()
+                    feed.dirty.set()
+                    feed.task = asyncio.create_task(self._run_tenant(tenant_id, feed))
+                    logger.warning(
+                        "kite_ticker_feed_restarted",
+                        tenant_id=tenant_id,
+                    )
 
     async def _run_tenant(self, tenant_id: str, feed: _TenantFeed) -> None:
         backoff = 1.0
@@ -398,54 +423,61 @@ class KiteTickerHub:
 
         query = urlencode({"api_key": feed.api_key, "access_token": feed.access_token})
         url = f"{KITE_WS_URL}?{query}"
-        async with websockets.connect(url, ping_interval=None, max_size=2**22) as ws:
-            feed.connected = True
-            feed.last_tick_at = 0.0
-            await self._apply_subscriptions(ws, feed)
-            while not feed.stop.is_set():
-                recv = asyncio.create_task(ws.recv())
-                dirty = asyncio.create_task(feed.dirty.wait())
-                stop = asyncio.create_task(feed.stop.wait())
-                done, pending = await asyncio.wait(
-                    {recv, dirty, stop},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-                if stop in done:
-                    break
-                # Handle dirty first, but do not drop a concurrent recv frame.
-                if dirty in done:
-                    feed.dirty.clear()
-                    await self._apply_subscriptions(ws, feed)
-                if recv in done:
-                    try:
-                        message = recv.result()
-                    except Exception:
-                        # Closed/failed socket must exit _session so _run_tenant
-                        # can back off and reconnect (do not busy-loop).
-                        feed.connected = False
-                        raise
-                    if isinstance(message, bytes):
-                        ticks = parse_binary_ticks(message)
-                        if not ticks:
-                            continue
-                        rows: dict[str, dict[str, Any]] = {}
-                        for tick in ticks:
-                            token = int(tick.get("instrument_token") or 0)
-                            symbol = feed.token_to_symbol.get(token)
-                            if not symbol:
+        try:
+            async with websockets.connect(
+                url,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=5,
+                max_size=2**22,
+            ) as ws:
+                feed.connected = True
+                feed.last_tick_at = 0.0
+                await self._apply_subscriptions(ws, feed)
+                while not feed.stop.is_set():
+                    recv = asyncio.create_task(ws.recv())
+                    dirty = asyncio.create_task(feed.dirty.wait())
+                    stop = asyncio.create_task(feed.stop.wait())
+                    done, pending = await asyncio.wait(
+                        {recv, dirty, stop},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                    if stop in done:
+                        break
+                    # Handle dirty first, but do not drop a concurrent recv frame.
+                    if dirty in done:
+                        feed.dirty.clear()
+                        await self._apply_subscriptions(ws, feed)
+                    if recv in done:
+                        try:
+                            message = recv.result()
+                        except Exception:
+                            # Closed/failed socket must exit _session so _run_tenant
+                            # can back off and reconnect (do not busy-loop).
+                            raise
+                        if isinstance(message, bytes):
+                            ticks = parse_binary_ticks(message)
+                            if not ticks:
                                 continue
-                            row = dict(tick)
-                            row["symbol"] = symbol
-                            rows[symbol] = row
-                        if rows:
-                            feed.last_tick_at = time.monotonic()
-                            await write_ticker_rows(tenant_id, rows)
-
-        feed.connected = False
+                            rows: dict[str, dict[str, Any]] = {}
+                            for tick in ticks:
+                                token = int(tick.get("instrument_token") or 0)
+                                symbol = feed.token_to_symbol.get(token)
+                                if not symbol:
+                                    continue
+                                row = dict(tick)
+                                row["symbol"] = symbol
+                                rows[symbol] = row
+                            if rows:
+                                feed.last_tick_at = time.monotonic()
+                                await write_ticker_rows(tenant_id, rows)
+        finally:
+            # Always clear even on CancelledError from sync_tenant / clear_tenant.
+            feed.connected = False
 
     async def _apply_subscriptions(self, ws: Any, feed: _TenantFeed) -> None:
         if feed.pending_unsubscribe:

@@ -133,6 +133,24 @@ async def _form(
     return _unwrap(body, label)
 
 
+async def get_instruments(ctx, exchange: str = "NFO") -> Any:
+    """GET /instruments or /instruments/{exchange} — CSV dump (string in data.csv)."""
+    exch = str(exchange or "").strip().upper()
+    path = f"/instruments/{exch}" if exch else "/instruments"
+    url = f"{_base_url(ctx)}{path}"
+    body = await ctx.http.get(url, headers=_auth_headers(ctx))
+    if isinstance(body, (bytes, bytearray)):
+        text = body.decode("utf-8", errors="replace")
+    elif isinstance(body, str):
+        text = body
+    elif isinstance(body, dict):
+        # Some proxies wrap CSV; prefer explicit fields, else stringify.
+        text = str(body.get("data") or body.get("csv") or body)
+    else:
+        text = str(body)
+    return {"ok": True, "data": {"exchange": exch or "ALL", "csv": text, "bytes": len(text)}}
+
+
 # --- Auth / session ---
 
 

@@ -31,5 +31,6 @@ RUN uv pip install . "mcp>=1.28.1,<2" \
   && adduser --system --ingroup app app
 USER app
 EXPOSE 7777
-ENV WEB_CONCURRENCY=2
-CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-2} -b 0.0.0.0:7777 app.main:app"]
+ENV WEB_CONCURRENCY=1
+# Keep WEB_CONCURRENCY=1 when KITE_TICKER_ENABLED=true (one hub process per API key).
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w ${WEB_CONCURRENCY:-1} -b 0.0.0.0:7777 app.main:app"]

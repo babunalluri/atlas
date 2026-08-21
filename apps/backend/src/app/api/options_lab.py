@@ -196,6 +196,40 @@ class OptionsLabPortfolioImportIn(BaseModel):
     name: str | None = None
 
 
+class OptionsLabStrategyLegIn(BaseModel):
+    id: str | None = None
+    side: str
+    type: str | None = None
+    strike: int | float | None = None
+    qty: float = 1
+    entry_premium: float | None = None
+    premium: float | None = None
+    symbol: str | None = None
+
+
+class OptionsLabMarginsIn(BaseModel):
+    legs: list[OptionsLabStrategyLegIn]
+    lot_size: int | None = None
+    product: str = "NRML"
+    underlying_symbol: str | None = None
+    heuristic: dict[str, Any] | None = None
+    mock: bool | None = None
+
+
+class OptionsLabOrdersIn(BaseModel):
+    legs: list[OptionsLabStrategyLegIn]
+    confirm: bool = False
+    live: bool = False
+    lot_size: int | None = None
+    product: str = "NRML"
+    order_type: str = "LIMIT"
+    name: str | None = None
+    underlying_symbol: str | None = None
+    save_draft: bool = True
+    mock: bool | None = None
+    tag: str | None = None
+
+
 @router.get("/portfolios")
 async def list_options_portfolios(
     context: AdminContext,
@@ -255,3 +289,27 @@ async def import_options_portfolio_from_kite(
 ) -> dict[str, Any]:
     """Import open F&O option positions from Kite into a draft portfolio."""
     return await OptionsLabService(session, context).import_kite_portfolio(name=body.name)
+
+
+@router.post("/margins")
+async def options_lab_strategy_margins(
+    body: OptionsLabMarginsIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Broker order-margin + available funds for a builder strategy (fallback heuristic)."""
+    return await OptionsLabService(session, context).strategy_margins(
+        body.model_dump(exclude_none=True)
+    )
+
+
+@router.post("/orders")
+async def options_lab_place_strategy_orders(
+    body: OptionsLabOrdersIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Place multi-leg orders via bound Live/Paper place_order (requires confirm=true)."""
+    return await OptionsLabService(session, context).place_strategy_orders(
+        body.model_dump(exclude_none=True)
+    )

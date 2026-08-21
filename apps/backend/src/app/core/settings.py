@@ -296,14 +296,21 @@ class Settings(BaseSettings):
         description="Pre-compute signal snapshots for watched admin desks (~8 Hz when active).",
     )
     options_lab_ticker_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias="OPTIONS_LAB_TICKER_ENABLED",
-        description="Pre-compute Options Lab chain snapshots for watched desks (~8 Hz when active).",
+        description=(
+            "Pre-compute Options Lab chain snapshots for watched desks (~8 Hz when active). "
+            "Default off; enable in desk Compose / env."
+        ),
     )
     kite_ticker_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias="KITE_TICKER_ENABLED",
-        description="Shared asyncio Kite WebSocket quote hub for Options Lab + Signal Engine.",
+        description=(
+            "Shared asyncio Kite WebSocket quote hub for Options Lab + Signal Engine. "
+            "Default off; enable in desk Compose / env. One hub process per API key "
+            "(Kite allows ~3 WS connections per key)."
+        ),
     )
     scheduler_run_timeout_seconds: int = Field(
         default=900,

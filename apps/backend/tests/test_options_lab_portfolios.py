@@ -35,6 +35,30 @@ def test_parse_option_symbol() -> None:
     assert parse_option_symbol("NFO:NIFTY26AUGFUT") is None
 
 
+def test_parse_option_symbol_shared_fixture() -> None:
+    """Pin Python parse against the shared repo fixture (also used by web)."""
+    import json
+    from pathlib import Path
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "testdata"
+        / "option_symbol_parse_cases.json"
+    )
+    cases = json.loads(fixture.read_text())["cases"]
+    assert cases, "shared fixture must not be empty"
+    for case in cases:
+        symbol = case["symbol"]
+        parsed = parse_option_symbol(symbol)
+        if case["expiry"] is None:
+            assert parsed is None, symbol
+            continue
+        assert parsed is not None, symbol
+        assert parsed["expiry"] == case["expiry"], symbol
+        assert parsed["strike"] == case["strike"], symbol
+        assert parsed["type"] == case["side"], symbol
+
+
 def test_parse_weekly_option_symbol() -> None:
     parsed = parse_option_symbol("NIFTY2580724500CE")
     assert parsed is not None
@@ -42,6 +66,14 @@ def test_parse_weekly_option_symbol() -> None:
     assert parsed["type"] == "CE"
     assert parsed["expiry"] == "25807"
     assert canonical_broker_option_symbol("NIFTY2580724500CE") == "NFO:NIFTY2580724500CE"
+
+
+def test_parse_weekly_prefers_six_digit_strike() -> None:
+    """6-digit strike must win over false 5-digit split (strike 0)."""
+    parsed = parse_option_symbol("NIFTY25807100000CE")
+    assert parsed is not None
+    assert parsed["expiry"] == "25807"
+    assert parsed["strike"] == 100000
 
 
 def test_parse_weekly_alpha_option_symbol() -> None:

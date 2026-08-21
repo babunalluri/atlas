@@ -56,6 +56,14 @@ async def test_compute_lock_excludes_concurrent_local_holder() -> None:
 
 
 @pytest.mark.asyncio
+async def test_extend_compute_lock_while_held() -> None:
+    assert await cache.try_compute_lock("tenant-a") is True
+    assert await cache.extend_compute_lock("tenant-a") is True
+    await cache.release_compute_lock("tenant-a")
+    assert await cache.extend_compute_lock("tenant-a") is False
+
+
+@pytest.mark.asyncio
 async def test_release_local_lock_when_redis_holds_no_token() -> None:
     """Local lock must release even when a Redis client is available."""
     assert await cache.try_compute_lock("tenant-a") is True

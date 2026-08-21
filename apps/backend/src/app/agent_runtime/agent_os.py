@@ -96,9 +96,6 @@ from app.db.session import SessionFactory
 from app.observability.repository import TraceRepository
 from app.observability.tracing import redact
 from app.scheduler.service import SchedulerWorker
-from app.domains.kite_ticker_hub import get_kite_ticker_hub
-from app.domains.options_lab_worker import OptionsLabWorker
-from app.domains.signal_engine_worker import SignalEngineWorker
 from app.tenancy.context import current_tenant, set_tenant_context
 
 logger = get_logger(__name__)
@@ -579,23 +576,15 @@ def create_app() -> FastAPI:
         await get_redis()
         await _configure_redis_run_cancellation()
         worker = SchedulerWorker()
-        signal_worker = SignalEngineWorker()
-        options_lab_worker = OptionsLabWorker()
-        kite_hub = get_kite_ticker_hub()
+        from app.domains.runtime import start_domain_services, stop_domain_services
+
         if settings.scheduler_enabled and settings.environment.lower() != "test":
             worker.start()
-        if settings.signal_engine_ticker_enabled and settings.environment.lower() != "test":
-            signal_worker.start()
-        if settings.options_lab_ticker_enabled and settings.environment.lower() != "test":
-            options_lab_worker.start()
-        if settings.kite_ticker_enabled and settings.environment.lower() != "test":
-            kite_hub.start()
+        start_domain_services(settings)
         try:
             yield
         finally:
-            await kite_hub.stop()
-            await options_lab_worker.stop()
-            await signal_worker.stop()
+            await stop_domain_services()
             await worker.stop()
             await close_redis()
 

@@ -22,6 +22,10 @@ from app.domains.signal_engine_constants import (
 
 logger = get_logger(__name__)
 
+# Chain snapshots can exceed the short Signal lock TTL; Options Lab does not
+# heartbeat yet, so keep a longer floor until a dedicated OL heartbeat lands.
+OPTIONS_LAB_LOCK_TTL_MS = max(LOCK_TTL_MS, 60_000)
+
 _snapshots: dict[str, tuple[float, dict[str, Any]]] = {}
 _watchers: dict[str, tuple[float, dict[str, Any]]] = {}
 _local_compute_locks: dict[str, asyncio.Lock] = {}
@@ -206,7 +210,7 @@ async def try_compute_lock(tenant_id: str, *, wings: int, fingerprint: str) -> b
                 _lock_key(tenant_id, wings=wings, fingerprint=fingerprint),
                 token,
                 nx=True,
-                px=LOCK_TTL_MS,
+                px=OPTIONS_LAB_LOCK_TTL_MS,
             )
             if acquired:
                 _redis_lock_tokens[lock_id] = token

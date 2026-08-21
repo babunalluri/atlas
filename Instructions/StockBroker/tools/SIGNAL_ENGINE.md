@@ -54,12 +54,12 @@ When `REDIS_URL` points at a real Redis instance, signal-engine caches are **sha
 
 | Key pattern | Purpose | TTL |
 |---|---|---|
-| `atlas:signals:{tenant}:snapshot` | Full metrics payload for SSE | ~250ms |
+| `atlas:signals:{tenant}:snapshot` | Full metrics payload for SSE | 15s TTL; stale after 2s |
 | `atlas:signals:{tenant}:m:*` | Tiered feed/quote/setup entries | tier-based |
 | `atlas:signals:{tenant}:sess` | OI baseline, IV session, publish dedup | session |
 | `atlas:signals:watch:{tenant}` | Active admin desk (SSE) | 2s, renewed each frame |
 
-A background ticker (`SIGNAL_ENGINE_TICKER_ENABLED`, default **off**) pre-computes snapshots for watched tenants when enabled. With no admin desk open, the ticker idle-polls every 2s instead of 8 Hz.
+A background ticker (`SIGNAL_ENGINE_TICKER_ENABLED`, default **off**) pre-computes snapshots for watched tenants when enabled. Desk Compose also enables `OPTIONS_LAB_TICKER_ENABLED` and `KITE_TICKER_ENABLED` (both default **off** in settings so non-desk deploys do not open Kite WS or 8 Hz loops by accident). Starting the engine touches the watcher; the config API schedules a post-commit snapshot warm so SSE can serve Redis instead of blocking on the first cold `state()` fan-out. The worker also keeps the shared Kite WebSocket hub subscribed to Signal symbols so LTP/OI overlay stays hot (REST `get_quote` still runs for IV/greeks). Snapshots carry `computed_at_ms` / `data_age_ms` (desk badge uses age for Stale vs Running). Compute locks use a **10s TTL** with a **3s heartbeat** so a killed worker self-heals quickly without stampeding while alive. `KITE_TICKER_ENABLED` refuses to start when `WEB_CONCURRENCY > 1` (production image defaults to 1 worker). With no admin desk open, the ticker idle-polls every 2s instead of 8 Hz.
 
 With `REDIS_URL=memory://` (local/test), caches fall back to in-process dicts — fine for single-worker dev.
 

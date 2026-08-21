@@ -7,6 +7,7 @@ UI pushes at ~8×/sec (SSE); broker quotes refresh ~2×/sec; slow sources cache 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import time
@@ -30,6 +31,8 @@ from app.domains.desk_snapshot import (
 from app.domains import signal_engine_cache as cache
 from app.domains.signal_engine_constants import (
     BROKER_QUOTE_TTL_MS,
+    SNAPSHOT_FRESH_MS,
+    STREAM_COMPUTE_WAIT_MS,
     STREAM_INTERVAL_MS,
     TIER_TTL_MS,
     Tier,
@@ -102,6 +105,28 @@ def _apply_engine_stopped_overlay(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _annotate_snapshot_freshness(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach age + server-side stale flag. Unknown age stays null (not 'fresh')."""
+    now_ms = int(time.time() * 1000)
+    out = dict(payload)
+    out["snapshot_fresh_ms"] = SNAPSHOT_FRESH_MS
+    computed = out.get("computed_at_ms")
+    if computed is None:
+        out["data_age_ms"] = None
+        out["snapshot_stale"] = None
+        return out
+    try:
+        computed_ms = int(computed)
+    except (TypeError, ValueError):
+        out["data_age_ms"] = None
+        out["snapshot_stale"] = None
+        return out
+    age = max(0, now_ms - computed_ms)
+    out["data_age_ms"] = age
+    out["snapshot_stale"] = age > SNAPSHOT_FRESH_MS
+    return out
+
+
 async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
     """Coalesce concurrent stream/poll readers to one engine tick per tenant."""
     tenant_id = _tenant_key(service.context)
@@ -111,36 +136,51 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
     if snapshot is not None:
         if not config.engine_enabled:
             return _apply_engine_stopped_overlay(snapshot)
-        return snapshot
+        return _annotate_snapshot_freshness(snapshot)
 
     if await cache.try_compute_lock(tenant_id):
+        heartbeat = cache.start_compute_lock_heartbeat(tenant_id)
         try:
             snapshot = await cache.get_snapshot(tenant_id)
             if snapshot is not None:
                 if not config.engine_enabled:
                     return _apply_engine_stopped_overlay(snapshot)
-                return snapshot
+                return _annotate_snapshot_freshness(snapshot)
             payload = await service.state()
             if not config.engine_enabled:
                 payload = _apply_engine_stopped_overlay(payload)
+            else:
+                payload = {
+                    **payload,
+                    "computed_at_ms": int(time.time() * 1000),
+                }
             await cache.set_snapshot(tenant_id, payload)
-            return payload
+            return _annotate_snapshot_freshness(payload)
         finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
             await cache.release_compute_lock(tenant_id)
 
-    for _ in range(8):
-        await asyncio.sleep(STREAM_INTERVAL_MS / 1000 / 4)
+    # Another reader/worker holds the compute lock — wait for their snapshot
+    # instead of immediately starting a duplicate cold state().
+    slice_ms = max(STREAM_INTERVAL_MS / 4, 25)
+    wait_slices = max(8, int(STREAM_COMPUTE_WAIT_MS / slice_ms))
+    for _ in range(wait_slices):
+        await asyncio.sleep(slice_ms / 1000)
         snapshot = await cache.get_snapshot(tenant_id)
         if snapshot is not None:
             if not config.engine_enabled:
                 return _apply_engine_stopped_overlay(snapshot)
-            return snapshot
+            return _annotate_snapshot_freshness(snapshot)
 
     payload = await service.state()
     if not config.engine_enabled:
         payload = _apply_engine_stopped_overlay(payload)
+    else:
+        payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
     await cache.set_snapshot(tenant_id, payload)
-    return payload
+    return _annotate_snapshot_freshness(payload)
 
 # Admin-selectable underlyings (not hard-coded to NIFTY).
 UNDERLYING_PRESETS: list[dict[str, Any]] = [
@@ -148,6 +188,7 @@ UNDERLYING_PRESETS: list[dict[str, Any]] = [
     {"label": "NIFTY", "symbol": "NSE:NIFTY", "strike_step": 50},
     {"label": "BANKNIFTY", "symbol": "NSE:BANKNIFTY", "strike_step": 100},
     {"label": "FINNIFTY", "symbol": "NSE:FINNIFTY", "strike_step": 50},
+    {"label": "NIFTYNXT50", "symbol": "NSE:NIFTYNXT50", "strike_step": 100},
     {"label": "SENSEX", "symbol": "BSE:SENSEX", "strike_step": 100},
     {"label": "MIDCPNIFTY", "symbol": "NSE:MIDCPNIFTY", "strike_step": 25},
 ]
@@ -1411,6 +1452,13 @@ class SignalEngineService:
         if patch.get("engine_enabled") is False:
             stopped = _apply_engine_stopped_overlay(await self.state())
             await cache.set_snapshot(tenant_id, stopped)
+        elif patch.get("engine_enabled") is True:
+            # Start desk watching immediately. Snapshot warm is scheduled from the
+            # API via BackgroundTasks after the request transaction commits — a
+            # create_task here can race and cache a stopped snapshot.
+            # Cache was already invalidated above so a prior stopped overlay cannot
+            # linger for SNAPSHOT_TTL_MS.
+            await cache.touch_watcher(tenant_id)
         return {"ok": True, **await self.get_admin_config()}
 
     async def _write_tool_settings(self, definition: Any, settings: dict[str, Any]) -> None:
@@ -1490,6 +1538,7 @@ class SignalEngineService:
             return hit
 
         # Live ticker book overlays REST so LTP/OI stay hot without dropping IV.
+        ticker_partial: dict[str, Any] = {}
         try:
             from app.domains.kite_ticker_hub import (
                 assemble_quotes_from_book,
@@ -1503,7 +1552,8 @@ class SignalEngineService:
         except Exception:
             ticker_partial = {}
 
-        # Ticker-only is fine for LTP-style callers; get_quote needs REST for IV/greeks.
+        # Ticker-only is fine for LTP-style callers. get_quote always hits REST so
+        # Options Lab / chain IV-greeks stay intact; ticker then overlays LTP/OI.
         if (
             prefer != "get_quote"
             and ticker_partial

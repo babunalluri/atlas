@@ -7,6 +7,7 @@ import {
   buildPresetOptions,
   buildStrikeStepOptions,
   buildUnderlyingOptions,
+  suggestFutSymbol,
 } from "@/components/domains/signal-setup-options";
 import { CommonInstrumentSetupBar } from "@/components/domains/CommonInstrumentSetupBar";
 import type { OptionsLabAdminConfig } from "@/lib/api/admin";
@@ -22,7 +23,12 @@ export function OptionsLabSetupBar({
   atmHint = null,
 }: {
   config: OptionsLabAdminConfig | null;
-  presets: Array<{ label: string; symbol: string; strike_step: number }>;
+      presets: Array<{
+        label: string;
+        symbol: string;
+        strike_step: number;
+        fut_symbol?: string;
+      }>;
   presetKey: string;
   presetLocked: boolean;
   onPresetChange: (value: string) => void;
@@ -62,9 +68,13 @@ export function OptionsLabSetupBar({
       onPresetChange={onPresetChange}
       onUnderlyingChange={(symbol) => {
         const preset = presets.find((p) => p.symbol === symbol);
+        const fut =
+          preset?.fut_symbol?.trim() || suggestFutSymbol(symbol) || "";
         patchConfig({
           underlying_symbol: symbol,
           underlying_label: preset?.label ?? symbol,
+          ...(preset?.strike_step != null ? { strike_step: preset.strike_step } : {}),
+          ...(fut ? { fut_symbol: fut } : { fut_symbol: "" }),
         });
       }}
       onFutChange={(value) => patchConfig({ fut_symbol: value })}

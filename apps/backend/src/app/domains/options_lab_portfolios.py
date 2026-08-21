@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 from app.domains.desk_snapshot import normalize_positions, unwrap_records
@@ -22,7 +23,16 @@ OPTION_SYMBOL_WEEKLY_ALPHA_RE = re.compile(
     re.IGNORECASE,
 )
 SENSEX_ROOTS = {"SENSEX"}
-INDEX_OPTION_ROOTS = ("MIDCPNIFTY", "BANKNIFTY", "FINNIFTY", "NIFTY", "SENSEX")
+INDEX_OPTION_ROOTS = ("MIDCPNIFTY", "BANKNIFTY", "FINNIFTY", "NIFTYNXT50", "NIFTY", "SENSEX")
+# Generous ATM±OTM bands — disambiguate Jan weekly E5+S5 vs false YYMMDD+S4.
+_ROOT_STRIKE_BANDS: dict[str, tuple[int, int]] = {
+    "NIFTY": (5_000, 50_000),
+    "BANKNIFTY": (25_000, 80_000),
+    "FINNIFTY": (10_000, 50_000),
+    "NIFTYNXT50": (1_000, 120_000),
+    "MIDCPNIFTY": (5_000, 25_000),
+    "SENSEX": (40_000, 120_000),
+}
 
 
 def _now_ts() -> int:
@@ -53,7 +63,11 @@ def _parsed_option_match(symbol: str, raw: str, match: re.Match[str]) -> dict[st
 
 
 def _parse_weekly_digits_option(symbol: str, raw: str) -> dict[str, Any] | None:
-    """Weekly index options: NIFTY2580724500CE (expiry code + strike, no month letters)."""
+    """Weekly index options: NIFTY2580724500CE (expiry code + strike, no month letters).
+
+    Strike width is ambiguous (4–6 digits). Score candidates so YYMMDD+5-digit
+    strikes win over false 6-digit splits, while real 6-digit strikes still parse.
+    """
     if not raw.endswith(("CE", "PE")):
         return None
     side = raw[-2:].upper()
@@ -64,20 +78,108 @@ def _parse_weekly_digits_option(symbol: str, raw: str) -> dict[str, Any] | None:
         tail = body[len(root) :]
         if not tail.isdigit():
             continue
-        for strike_len in (5, 4, 6):
+        best: tuple[int, dict[str, Any]] | None = None
+        for strike_len in (4, 5, 6):
             if len(tail) <= strike_len + 4:
                 continue
             strike_part = tail[-strike_len:]
             expiry_part = tail[:-strike_len]
-            if expiry_part.isdigit() and len(expiry_part) >= 5:
-                return {
-                    "symbol": symbol.strip(),
-                    "root": root,
-                    "expiry": expiry_part,
-                    "strike": int(strike_part),
-                    "type": side,
-                }
+            if not (expiry_part.isdigit() and len(expiry_part) >= 5):
+                continue
+            strike = int(strike_part)
+            score = _weekly_digits_parse_score(root, expiry_part, strike_len, strike)
+            if score <= 0:
+                continue
+            candidate = {
+                "symbol": symbol.strip(),
+                "root": root,
+                "expiry": expiry_part,
+                "strike": strike,
+                "type": side,
+            }
+            if best is None or score > best[0]:
+                best = (score, candidate)
+        if best is not None:
+            return best[1]
     return None
+
+
+def _parse_weekly_digits_date(code: str) -> datetime | None:
+    """Calendar decode for YYMDD / YYMMDD — no weekday policy here."""
+    if not code.isdigit():
+        return None
+    try:
+        if len(code) == 5:
+            year = 2000 + int(code[0:2])
+            month = int(code[2:3])
+            day = int(code[3:5])
+            if month < 1 or month > 9:
+                return None
+            return datetime(year, month, day)
+        if len(code) == 6:
+            year = 2000 + int(code[0:2])
+            month = int(code[2:4])
+            day = int(code[4:6])
+            return datetime(year, month, day)
+    except ValueError:
+        return None
+    return None
+
+
+def _weekly_weekdays_for_root(root: str) -> set[int]:
+    """Python weekday: Mon=0 … Sun=6. Per-root NSE weekly conventions."""
+    key = root.upper()
+    if key == "MIDCPNIFTY":
+        return {0, 1, 3}  # Mon (legacy), Tue, Thu
+    if key == "SENSEX":
+        return {3, 4}  # Thu, Fri
+    # NIFTY / BANKNIFTY / FINNIFTY / NIFTYNXT50 — Mon rejected (25120≠251204 rival).
+    return {1, 2, 3}  # Tue, Wed, Thu
+
+
+def _looks_yymmdd_expiry(code: str) -> bool:
+    return len(code) == 6 and _parse_weekly_digits_date(code) is not None
+
+
+def _looks_yymdd_expiry(code: str) -> bool:
+    return len(code) == 5 and _parse_weekly_digits_date(code) is not None
+
+
+def _strike_in_root_band(root: str, strike: int) -> bool:
+    band = _ROOT_STRIKE_BANDS.get(root.upper())
+    if band is None:
+        return True
+    lo, hi = band
+    return lo <= strike <= hi
+
+
+def _weekly_digits_parse_score(
+    root: str, expiry_part: str, strike_len: int, strike: int
+) -> int:
+    if len(expiry_part) not in (5, 6):
+        return 0
+    dt = _parse_weekly_digits_date(expiry_part)
+    if dt is None:
+        return 0
+    if dt.weekday() not in _weekly_weekdays_for_root(root):
+        return 0
+    in_band = _strike_in_root_band(root, strike)
+    if _looks_yymmdd_expiry(expiry_part) and strike_len == 5:
+        return 100 if in_band else 25
+    # In-band E5+S5 outranks YYMMDD+S4 — NIFTY 25500 truncates to in-band 5500.
+    if len(expiry_part) == 5 and strike_len == 5 and 1_000 <= strike <= 99_999:
+        return 95 if in_band else 20
+    # YYMMDD+S4 when longer 5-digit strike is out of band, or E5 fails weekday gate.
+    if _looks_yymmdd_expiry(expiry_part) and strike_len == 4 and 1_000 <= strike <= 9_999:
+        return 90 if in_band else 15
+    if len(expiry_part) == 5 and strike_len == 6 and strike >= 100_000:
+        # 6-digit strikes are rare edge cases; do not apply ATM band.
+        return 70
+    if len(expiry_part) == 5 and strike_len == 4:
+        return 40 if in_band else 12
+    if _looks_yymmdd_expiry(expiry_part) and strike_len != 5:
+        return 10
+    return 20
 
 
 def parse_option_symbol(symbol: str) -> dict[str, Any] | None:

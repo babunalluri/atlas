@@ -159,14 +159,17 @@ class OptionsLabWorker:
         self._idle_clear_ticks = 0
 
     def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._loop())
+        if self._task is not None and not self._task.done():
+            return
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
         self._stop.set()
         if self._task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+            self._task = None
 
     async def _loop(self) -> None:
         active_interval = STREAM_INTERVAL_MS / 1000
@@ -187,13 +190,19 @@ class OptionsLabWorker:
         signal_synced = await _sync_signal_engine_watchers()
 
         if not watched:
+            if signal_synced:
+                # Signal desk still owns hub subscriptions — do not accumulate
+                # toward a clear, and never wipe feeds on a transient sync miss.
+                self._idle_clear_ticks = 0
+                return True
             self._idle_clear_ticks += 1
-            if self._idle_clear_ticks >= 3 and not signal_synced:
-                # Drop idle WS feeds after a few empty polls.
+            if self._idle_clear_ticks >= 3:
+                # Drop idle WS feeds after a few empty polls with no Signal watchers.
                 hub = get_kite_ticker_hub()
                 for tenant_id in list(hub._tenants.keys()):
                     await hub.clear_tenant(tenant_id)
-            return signal_synced
+                self._idle_clear_ticks = 0
+            return False
 
         self._idle_clear_ticks = 0
         org_by_tenant: dict[str, str] = {}
@@ -236,15 +245,7 @@ class OptionsLabWorker:
 
 async def _sync_signal_engine_watchers() -> bool:
     from app.domains import signal_engine_cache as signal_cache
-    from app.domains.signal_engine import SignalEngineService
-
-    try:
-        from app.core.settings import get_settings
-
-        if not get_settings().kite_ticker_enabled:
-            return False
-    except Exception:
-        return False
+    from app.domains.signal_engine_worker import sync_kite_for_signal_tenant
 
     tenant_ids = await signal_cache.list_watched_tenant_ids()
     if not tenant_ids:
@@ -274,51 +275,6 @@ async def _sync_signal_engine_watchers() -> bool:
             tid = uuid.UUID(tenant_id)
         except ValueError:
             continue
-        context = TenantContext(
-            tenant_id=tid,
-            user_id="kite-ticker-sync",
-            role=Role.tenant_admin,
-            auth_org_id=auth_org_id,
-            principal_type="scheduler",
-        )
-        try:
-            async with SessionFactory() as session:
-                async with session.begin():
-                    await apply_tenant_guc(session, tid)
-                    engine = SignalEngineService(session, context)
-                    config = await engine._load_config()
-                    symbols = [
-                        s
-                        for s in [
-                            config.underlying_symbol,
-                            config.nifty_fut_symbol,
-                            config.ce_symbol,
-                            config.pe_symbol,
-                            config.india_vix_symbol,
-                        ]
-                        if s
-                    ]
-                    if not symbols:
-                        continue
-                    creds = await resolve_kite_credentials(session, context)
-                    if creds is None:
-                        continue
-                    quotes = await engine._fetch_quote(symbols, prefer="get_quote")
-                    token_map = token_map_from_quotes(quotes)
-                    if not token_map:
-                        continue
-                    api_key, access_token = creds
-                    await get_kite_ticker_hub().sync_tenant(
-                        tenant_id,
-                        api_key=api_key,
-                        access_token=access_token,
-                        token_to_symbol=token_map,
-                    )
-                    synced_any = True
-        except Exception as exc:
-            logger.warning(
-                "kite_ticker_signal_sync_failed",
-                tenant_id=tenant_id,
-                error=str(exc),
-            )
+        if await sync_kite_for_signal_tenant(tid, auth_org_id=auth_org_id):
+            synced_any = True
     return synced_any

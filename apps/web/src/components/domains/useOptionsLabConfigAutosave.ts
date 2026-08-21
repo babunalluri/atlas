@@ -141,14 +141,9 @@ export function useOptionsLabConfigAutosave(
     setConfig((prev) => {
       if (!prev) return prev;
       const next = { ...prev, ...patch };
-      if (
-        !patch.fut_symbol &&
-        (patch.underlying_symbol || patch.underlying_label) &&
-        !next.fut_symbol?.trim() &&
-        next.underlying_symbol?.trim()
-      ) {
-        const suggested = suggestFutSymbol(next.underlying_symbol);
-        if (suggested) next.fut_symbol = suggested;
+      // Underlying change must refresh FUT — keep stale NIFTY FUT off RELIANCE etc.
+      if (patch.underlying_symbol && patch.fut_symbol === undefined) {
+        next.fut_symbol = suggestFutSymbol(next.underlying_symbol) || "";
       }
       return next;
     });

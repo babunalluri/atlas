@@ -1,27 +1,42 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
   black76Greeks,
   blendStrategyIv,
+  bookedStrategyPnl,
+  bookedStrategyPnlRupees,
+  buildLegIvMap,
   buildPayoffCurve,
+  buildPnlTable,
   buildStrategyFromTemplate,
   daysToExpiryFromFutSymbol,
   daysToExpiryFromOptionSymbol,
+  estimateFundsAndMargins,
+  estimateLotSize,
+  estimatePayoffDistributionStats,
   estimateProbabilityOfProfit,
+  estimateStrategyCharges,
   estimateStrategyGreeks,
+  estimateTargetDateProbabilityOfProfit,
   expiryCodeFromOptionSymbol,
   formatOptionContractName,
   impliedVolFromLtp,
   interpolateSideIv,
   lastThursdayOfMonth,
+  legMarkPnlAtSpot,
   legPayoffAtSpot,
   normCdf,
+  parseOptionSymbolParts,
   payoffExtremes,
   resolveDaysToExpiry,
   resolveLegIv,
   summarizeStrategy,
   syntheticForwardFromChain,
   totalPayoffAtSpot,
+  volatilitySpotBands,
   type StrategyLeg,
 } from "@/components/domains/options-lab-strategy";
 
@@ -494,15 +509,36 @@ describe("options lab strategy", () => {
     expect(blend?.ivPct).toBeGreaterThan(0);
   });
 
-  it("parses weekly and monthly option expiries for DTE", () => {
-    expect(expiryCodeFromOptionSymbol("NFO:NIFTY26AUG24500CE")).toBe("26AUG");
-    expect(expiryCodeFromOptionSymbol("NIFTY25N1124500CE")).toBe("25N11");
-    expect(expiryCodeFromOptionSymbol("NIFTY2580724500CE")).toBe("25807");
-    // YYMMDD must not be swallowed by weekly-alpha (Oct/Nov/Dec digit months).
-    expect(expiryCodeFromOptionSymbol("NIFTY25112724500CE")).toBe("251127");
-    expect(expiryCodeFromOptionSymbol("NIFTY25100724500CE")).toBe("251007");
-    expect(expiryCodeFromOptionSymbol("NIFTY25123024500CE")).toBe("251230");
+  it("matches shared option_symbol_parse_cases fixture", () => {
+    const fixturePath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../../testdata/option_symbol_parse_cases.json",
+    );
+    const { cases } = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      cases: Array<{
+        symbol: string;
+        expiry: string | null;
+        strike: number | null;
+        side: "CE" | "PE" | null;
+      }>;
+    };
+    expect(cases.length).toBeGreaterThan(0);
+    for (const c of cases) {
+      const parsed = parseOptionSymbolParts(c.symbol);
+      if (c.expiry == null) {
+        expect(parsed).toBeNull();
+        expect(expiryCodeFromOptionSymbol(c.symbol)).toBeNull();
+        continue;
+      }
+      expect(parsed).not.toBeNull();
+      expect(parsed!.expiry).toBe(c.expiry);
+      expect(parsed!.strike).toBe(c.strike);
+      expect(parsed!.side).toBe(c.side);
+      expect(expiryCodeFromOptionSymbol(c.symbol)).toBe(c.expiry);
+    }
+  });
 
+  it("parses weekly and monthly option expiries for DTE", () => {
     const monthlyExpiry = lastThursdayOfMonth(2026, 7);
     const now = new Date(monthlyExpiry.getTime() - 10 * 24 * 60 * 60 * 1000);
     expect(daysToExpiryFromOptionSymbol("NFO:NIFTY26AUG24500CE", now)).toBeCloseTo(10, 0);
@@ -663,5 +699,242 @@ describe("options lab strategy", () => {
     expect(summary.netGamma!).toBeLessThan(0);
     expect(summary.netVega!).toBeLessThan(0);
     expect(summary.netTheta!).toBeGreaterThan(0);
+  });
+
+  it("marks pre-expiry P&L between intrinsic and full premium loss", () => {
+    const leg: StrategyLeg = {
+      id: "1",
+      side: "buy",
+      type: "CE",
+      strike: 24300,
+      premium: 100,
+      qty: 1,
+      delta: 0.5,
+    };
+    const atExpiry = legPayoffAtSpot(leg, 24300);
+    const marked = legMarkPnlAtSpot(leg, 24300, {
+      remainingDaysToExpiry: 5,
+      ivPct: 12,
+    });
+    expect(atExpiry).toBe(-100);
+    // ATM call still has time value → mark PnL > expiry intrinsic (−premium).
+    expect(marked).toBeGreaterThan(atExpiry);
+    expect(Number.isFinite(marked)).toBe(true);
+  });
+
+  it("builds target-date curve and P&L table", () => {
+    const legs = buildStrategyFromTemplate("long_straddle", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+    });
+    const expiry = buildPayoffCurve(legs, { strikeStep: 50 });
+    const target = buildPayoffCurve(legs, {
+      strikeStep: 50,
+      remainingDaysToExpiry: 4,
+      ivPct: 12,
+    });
+    expect(expiry.length).toBeGreaterThan(0);
+    expect(target.length).toBe(expiry.length);
+    const mid = Math.floor(expiry.length / 2);
+    expect(target[mid].pnl).not.toBe(expiry[mid].pnl);
+
+    const table = buildPnlTable(legs, {
+      strikeStep: 50,
+      remainingDtes: [7, 3, 0],
+      ivPct: 12,
+      wings: 4,
+    });
+    expect(table.spots.length).toBeGreaterThan(0);
+    expect(table.cells[0]).toHaveLength(3);
+  });
+
+  it("estimates funds, charges, booked P&L, and distribution stats", () => {
+    const legs = buildStrategyFromTemplate("long_straddle", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+    });
+    expect(estimateLotSize("NIFTY 50")).toBe(75);
+    const funds = estimateFundsAndMargins(legs, { spot: 24300, lotSize: 75 });
+    expect(funds).not.toBeNull();
+    expect(funds!.fundsNeeded).toBeGreaterThan(0);
+    const charges = estimateStrategyCharges(legs, 75);
+    expect(charges!.total).toBeGreaterThan(0);
+
+    const bookedFlat = bookedStrategyPnl(legs, rows);
+    expect(bookedFlat).toBe(0);
+    const bookedUp = bookedStrategyPnl(
+      legs.map((leg) => ({ ...leg, premium: leg.premium - 10 })),
+      rows,
+    );
+    expect(bookedUp).toBeGreaterThan(0);
+    expect(bookedStrategyPnlRupees(
+      legs.map((leg) => ({ ...leg, premium: leg.premium - 10 })),
+      rows,
+      75,
+    )).toBe(bookedUp! * 75);
+
+    const bands = volatilitySpotBands(24300, 12, 7);
+    expect(bands).not.toBeNull();
+    expect(bands!.sd1[0]).toBeLessThan(24300);
+
+    const dist = estimatePayoffDistributionStats(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToExpiry: 7,
+      strikeStep: 50,
+      maxProfit: null,
+    });
+    expect(dist).not.toBeNull();
+    expect(dist!.pop).toBeGreaterThan(0);
+    expect(dist!.pMaxProfit).toBeNull();
+  });
+
+  it("target-date PoP uses mark PnL, not expiry intrinsic with shorter DTE", () => {
+    const legs = buildStrategyFromTemplate("long_straddle", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+    });
+    const expiryPop = estimateProbabilityOfProfit(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToExpiry: 7,
+      strikeStep: 50,
+    });
+    const wrongReuse = estimateProbabilityOfProfit(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToExpiry: 4,
+      strikeStep: 50,
+    });
+    const targetPop = estimateTargetDateProbabilityOfProfit(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToTarget: 3,
+      remainingDaysToExpiry: 4,
+      strikeStep: 50,
+    });
+    expect(expiryPop).not.toBeNull();
+    expect(targetPop).not.toBeNull();
+    // Shorter-DTE expiry PoP is the wrong stand-in for target-date mark PoP.
+    expect(targetPop).not.toBe(wrongReuse);
+    // At target=now, PoP collapses to whether forward mark is profitable.
+    const nowPop = estimateTargetDateProbabilityOfProfit(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToTarget: 0,
+      remainingDaysToExpiry: 7,
+      strikeStep: 50,
+    });
+    expect(nowPop === 0 || nowPop === 100).toBe(true);
+
+    // Slider ceil overshoot must not inflate expiry density beyond true DTE.
+    const atExpiryPop = estimateTargetDateProbabilityOfProfit(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToTarget: 7.2,
+      remainingDaysToExpiry: 0,
+      strikeStep: 50,
+    });
+    const direct = estimateProbabilityOfProfit(legs, {
+      forward: 24300,
+      ivPct: 12,
+      daysToExpiry: 7.2,
+      strikeStep: 50,
+    });
+    expect(atExpiryPop).toBe(direct);
+  });
+
+  it("uses per-leg IV for target marks when smile differs by strike", () => {
+    const legs = buildStrategyFromTemplate("bull_call_spread", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+      widthSteps: 1,
+    });
+    const map = buildLegIvMap(legs, rows, {
+      atmIv: 11,
+      forward: 24300,
+      daysToExpiry: 7,
+    });
+    expect(map).not.toBeNull();
+    const blended = buildPayoffCurve(legs, {
+      strikeStep: 50,
+      remainingDaysToExpiry: 5,
+      ivPct: 11,
+    });
+    const perLeg = buildPayoffCurve(legs, {
+      strikeStep: 50,
+      remainingDaysToExpiry: 5,
+      ivPct: 11,
+      legIvById: map,
+    });
+    expect(perLeg.length).toBe(blended.length);
+    // At least one point should differ when leg IVs are not identical.
+    const ivs = Object.values(map!);
+    if (new Set(ivs.map((v) => v.toFixed(2))).size > 1) {
+      expect(perLeg.some((p, i) => Math.abs(p.pnl - blended[i].pnl) > 1e-6)).toBe(true);
+    }
+  });
+
+  it("default buildPayoffCurve stays expiry-intrinsic (regression)", () => {
+    const leg: StrategyLeg = {
+      id: "1",
+      side: "buy",
+      type: "CE",
+      strike: 24300,
+      premium: 100,
+      qty: 1,
+      delta: 0.5,
+    };
+    const curve = buildPayoffCurve([leg], { strikeStep: 50, wings: 2 });
+    const atStrike = curve.find((p) => p.spot === 24300);
+    expect(atStrike?.pnl).toBe(-100);
+  });
+
+  it("E[PnL] uses vol domain so ATM short straddle stays negative", () => {
+    const legs = buildStrategyFromTemplate("short_straddle", {
+      atm: 25900,
+      strikeStep: 50,
+      rows: [
+        {
+          strike: 25900,
+          is_atm: true,
+          ce: { ltp: 180, iv: 15, oi: 1, symbol: "NIFTY25900CE" },
+          pe: { ltp: 180, iv: 15, oi: 1, symbol: "NIFTY25900PE" },
+        },
+      ] as never,
+    });
+    const dist = estimatePayoffDistributionStats(legs, {
+      forward: 25900,
+      ivPct: 15,
+      daysToExpiry: 30,
+      strikeStep: 50,
+      maxProfit: null,
+    });
+    expect(dist).not.toBeNull();
+    // Truncating to strike wings alone flips the sign; vol domain must not.
+    expect(dist!.expectedPnl).toBeLessThan(0);
+  });
+
+  it("buildPayoffCurve widens domain to include spot", () => {
+    const leg: StrategyLeg = {
+      id: "1",
+      side: "buy",
+      type: "CE",
+      strike: 24000,
+      premium: 100,
+      qty: 1,
+      delta: 0.5,
+    };
+    const curve = buildPayoffCurve([leg], {
+      spot: 26000,
+      strikeStep: 50,
+      wings: 2,
+    });
+    expect(curve[0].spot).toBeLessThanOrEqual(24000);
+    expect(curve[curve.length - 1].spot).toBeGreaterThanOrEqual(26000);
   });
 });

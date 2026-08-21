@@ -61,6 +61,13 @@ function legSign(side: TradeSide) {
   return side === "buy" ? 1 : -1;
 }
 
+/** Floor DTE for σ√T numerics — ~30 minutes, not half a day. */
+export const MIN_DTE_DAYS = 1 / 48;
+
+export function yearsFromDte(daysToExpiry: number): number {
+  return Math.max(daysToExpiry, MIN_DTE_DAYS) / 365;
+}
+
 export function legPayoffAtSpot(leg: StrategyLeg, spot: number): number {
   const intrinsic =
     leg.type === "CE"
@@ -74,29 +81,448 @@ export function totalPayoffAtSpot(legs: StrategyLeg[], spot: number): number {
   return legs.reduce((sum, leg) => sum + legPayoffAtSpot(leg, spot), 0);
 }
 
+/** True when remaining life is effectively expiry (use intrinsic payoff). */
+export function isExpiryHorizon(remainingDaysToExpiry: number): boolean {
+  return !(remainingDaysToExpiry > MIN_DTE_DAYS * 2);
+}
+
+/**
+ * Mark-to-model P&L at a future spot before expiry (Black-76, r=0, F≈spot).
+ * At/near expiry falls back to intrinsic payoff.
+ */
+export function legMarkPnlAtSpot(
+  leg: StrategyLeg,
+  spot: number,
+  {
+    remainingDaysToExpiry,
+    ivPct,
+  }: {
+    remainingDaysToExpiry: number;
+    ivPct: number;
+  },
+): number {
+  if (!(spot > 0) || usableIvPct(ivPct) == null || isExpiryHorizon(remainingDaysToExpiry)) {
+    return legPayoffAtSpot(leg, spot);
+  }
+  const mark = black76Price(
+    spot,
+    leg.strike,
+    yearsFromDte(remainingDaysToExpiry),
+    ivPct / 100,
+    leg.type,
+  );
+  return legSign(leg.side) * (mark - leg.premium) * leg.qty;
+}
+
+/** Per-leg IV map (leg id → IV %). */
+export type LegIvMap = Record<string, number>;
+
+export function buildLegIvMap(
+  legs: StrategyLeg[],
+  rows: OptionsChainRow[],
+  {
+    atmIv,
+    forward,
+    daysToExpiry,
+    ivShockPts = 0,
+  }: {
+    atmIv?: number | null;
+    forward?: number | null;
+    daysToExpiry?: number | null;
+    /** Applied to every resolved leg IV (scenario slider). */
+    ivShockPts?: number;
+  } = {},
+): LegIvMap | null {
+  if (legs.length === 0) return null;
+  const out: LegIvMap = {};
+  for (const leg of legs) {
+    const resolved = resolveLegIv(rows, leg, {
+      atmIv,
+      forward,
+      daysToExpiry,
+      premium: leg.quoteMissing ? null : leg.premium,
+    });
+    const base = usableIvPct(resolved?.iv);
+    if (base == null) return null;
+    out[leg.id] = Math.max(MIN_USABLE_IV_PCT, base + ivShockPts);
+  }
+  return out;
+}
+
+export function totalMarkPnlAtSpot(
+  legs: StrategyLeg[],
+  spot: number,
+  opts: {
+    remainingDaysToExpiry: number;
+    /** Fallback when a leg is missing from legIvById. */
+    ivPct: number;
+    legIvById?: LegIvMap | null;
+  },
+): number {
+  return legs.reduce((sum, leg) => {
+    const iv = opts.legIvById?.[leg.id] ?? opts.ivPct;
+    return sum + legMarkPnlAtSpot(leg, spot, {
+      remainingDaysToExpiry: opts.remainingDaysToExpiry,
+      ivPct: iv,
+    });
+  }, 0);
+}
+
+export function payoffGridBounds(
+  legs: StrategyLeg[],
+  strikeStep: number,
+  wings = 18,
+): { gridLo: number; gridHi: number; step: number } {
+  const step = Math.max(1, strikeStep);
+  if (legs.length === 0) return { gridLo: 0, gridHi: 0, step };
+  const legStrikes = legs.map((leg) => leg.strike);
+  const minLeg = Math.min(...legStrikes);
+  const maxLeg = Math.max(...legStrikes);
+  return {
+    step,
+    gridLo: Math.floor((minLeg - wings * step) / step) * step,
+    gridHi: Math.ceil((maxLeg + wings * step) / step) * step,
+  };
+}
+
 export function buildPayoffCurve(
   legs: StrategyLeg[],
   {
+    spot,
     strikeStep,
     wings = 18,
+    remainingDaysToExpiry = 0,
+    ivPct,
+    legIvById,
+    extraSpots,
   }: {
     spot?: number;
     strikeStep: number;
     wings?: number;
+    /** Days from target date to expiry. 0 ⇒ expiry intrinsic curve. */
+    remainingDaysToExpiry?: number;
+    /** Required for pre-expiry marks; ignored at expiry horizon. */
+    ivPct?: number | null;
+    /** Per-leg IV overrides blended σ*. */
+    legIvById?: LegIvMap | null;
+    /** Extra x values that must fall inside the plotted domain (σ edges, etc.). */
+    extraSpots?: number[];
   },
 ): PayoffPoint[] {
   if (legs.length === 0) return [];
-  const step = Math.max(1, strikeStep);
-  const legStrikes = legs.map((leg) => leg.strike);
-  const minLeg = Math.min(...legStrikes);
-  const maxLeg = Math.max(...legStrikes);
-  const gridLo = Math.floor((minLeg - wings * step) / step) * step;
-  const gridHi = Math.ceil((maxLeg + wings * step) / step) * step;
+  let { gridLo, gridHi, step } = payoffGridBounds(legs, strikeStep, wings);
+  const anchors = [
+    ...(spot != null && Number.isFinite(spot) && spot > 0 ? [spot] : []),
+    ...(extraSpots ?? []).filter((v) => Number.isFinite(v) && v > 0),
+  ];
+  for (const anchor of anchors) {
+    gridLo = Math.min(gridLo, Math.floor(anchor / step) * step);
+    gridHi = Math.max(gridHi, Math.ceil(anchor / step) * step);
+  }
+  const useMark =
+    !isExpiryHorizon(remainingDaysToExpiry) &&
+    ((legIvById != null && Object.keys(legIvById).length > 0) ||
+      (ivPct != null && usableIvPct(ivPct) != null));
+  // When useMark is true, either legIvById or a usable ivPct is present — never invent 20%.
+  const markIv = usableIvPct(ivPct) ?? 0;
   const points: PayoffPoint[] = [];
   for (let s = gridLo; s <= gridHi + 0.001; s += step) {
-    points.push({ spot: s, pnl: totalPayoffAtSpot(legs, s) });
+    const pnl = useMark
+      ? totalMarkPnlAtSpot(legs, s, {
+          remainingDaysToExpiry,
+          ivPct: markIv,
+          legIvById,
+        })
+      : totalPayoffAtSpot(legs, s);
+    points.push({ spot: s, pnl });
   }
   return points;
+}
+
+/** ±1σ / ±2σ spot bands under lognormal (move ≈ F·σ·√T). */
+export function volatilitySpotBands(
+  forward: number,
+  ivPct: number,
+  daysToHorizon: number,
+): { sd1: [number, number]; sd2: [number, number]; move1: number } | null {
+  if (!(forward > 0) || usableIvPct(ivPct) == null || !(daysToHorizon > 0)) {
+    return null;
+  }
+  const move1 = forward * (ivPct / 100) * Math.sqrt(yearsFromDte(daysToHorizon));
+  if (!(move1 > 0)) return null;
+  return {
+    move1,
+    sd1: [forward - move1, forward + move1],
+    sd2: [forward - 2 * move1, forward + 2 * move1],
+  };
+}
+
+export type PnlTable = {
+  spots: number[];
+  /** Remaining DTE columns (days from target → expiry). */
+  remainingDtes: number[];
+  /** cells[rowSpot][colDte] */
+  cells: number[][];
+};
+
+/** Spot × remaining-DTE P&L matrix (Sensibull-style payoff table). */
+export function buildPnlTable(
+  legs: StrategyLeg[],
+  {
+    strikeStep,
+    remainingDtes,
+    ivPct,
+    legIvById,
+    wings = 10,
+    spotStepMultiplier = 1,
+  }: {
+    strikeStep: number;
+    remainingDtes: number[];
+    ivPct: number | null | undefined;
+    legIvById?: LegIvMap | null;
+    wings?: number;
+    spotStepMultiplier?: number;
+  },
+): PnlTable {
+  if (legs.length === 0 || remainingDtes.length === 0) {
+    return { spots: [], remainingDtes: [], cells: [] };
+  }
+  const { gridLo, gridHi, step } = payoffGridBounds(legs, strikeStep, wings);
+  const spotStep = step * Math.max(1, spotStepMultiplier);
+  const spots: number[] = [];
+  for (let s = gridLo; s <= gridHi + 0.001; s += spotStep) spots.push(s);
+  const hasIv =
+    (legIvById != null && Object.keys(legIvById).length > 0) ||
+    (ivPct != null && usableIvPct(ivPct) != null);
+  const markIv = usableIvPct(ivPct) ?? 0;
+  const cells = spots.map((spot) =>
+    remainingDtes.map((remaining) => {
+      if (isExpiryHorizon(remaining) || !hasIv) {
+        return round2(totalPayoffAtSpot(legs, spot));
+      }
+      return round2(
+        totalMarkPnlAtSpot(legs, spot, {
+          remainingDaysToExpiry: remaining,
+          ivPct: markIv,
+          legIvById,
+        }),
+      );
+    }),
+  );
+  return { spots, remainingDtes, cells };
+}
+
+/** Infer NSE lot size from underlying label/symbol when API omits it. */
+export function estimateLotSize(underlying?: string | null): number {
+  const u = String(underlying || "").toUpperCase();
+  // Longer roots first so BANKNIFTY / MIDCPNIFTY are not matched as NIFTY.
+  if (u.includes("BANKNIFTY") || u.includes("BANK NIFTY")) return 15;
+  if (u.includes("FINNIFTY") || u.includes("FIN NIFTY")) return 25;
+  if (u.includes("NIFTYNXT50") || u.includes("NIFTY NEXT")) return 25;
+  if (u.includes("MIDCPNIFTY") || u.includes("MIDCP")) return 50;
+  if (u.includes("SENSEX")) return 10;
+  return 75;
+}
+
+export type FundsMarginsEstimate = {
+  fundsNeeded: number;
+  marginNeeded: number;
+  premiumDebit: number;
+  premiumCredit: number;
+  shortSpanProxy: number;
+  lotSize: number;
+  /** Heuristic only — not broker SPAN/ELM. */
+  estimated: true;
+};
+
+/**
+ * Desk-side funds/margin proxy (not exchange SPAN).
+ * Long premium debit + crude short SPAN (~12% of spot × lots).
+ */
+export function estimateFundsAndMargins(
+  legs: StrategyLeg[],
+  {
+    spot,
+    lotSize,
+  }: {
+    spot: number;
+    lotSize: number;
+  },
+): FundsMarginsEstimate | null {
+  if (legs.length === 0 || !(spot > 0) || !(lotSize > 0)) return null;
+  let premiumDebit = 0;
+  let premiumCredit = 0;
+  let shortSpanProxy = 0;
+  for (const leg of legs) {
+    const premiumCash = leg.premium * leg.qty * lotSize;
+    if (leg.side === "buy") {
+      premiumDebit += premiumCash;
+    } else {
+      premiumCredit += premiumCash;
+      shortSpanProxy += 0.12 * spot * leg.qty * lotSize + premiumCash;
+    }
+  }
+  const netDebit = Math.max(0, premiumDebit - premiumCredit);
+  const marginNeeded = round2(netDebit + shortSpanProxy);
+  return {
+    fundsNeeded: marginNeeded,
+    marginNeeded,
+    premiumDebit: round2(premiumDebit),
+    premiumCredit: round2(premiumCredit),
+    shortSpanProxy: round2(shortSpanProxy),
+    lotSize,
+    estimated: true,
+  };
+}
+
+export type ChargesEstimate = {
+  brokerage: number;
+  stt: number;
+  exchangeTxn: number;
+  gst: number;
+  total: number;
+  turnover: number;
+  estimated: true;
+};
+
+/** Rough NSE F&O option charges (educational estimate, not broker invoice). */
+export function estimateStrategyCharges(
+  legs: StrategyLeg[],
+  lotSize: number,
+): ChargesEstimate | null {
+  if (legs.length === 0 || !(lotSize > 0)) return null;
+  let turnover = 0;
+  let sellPremium = 0;
+  for (const leg of legs) {
+    const cash = leg.premium * leg.qty * lotSize;
+    turnover += cash;
+    if (leg.side === "sell") sellPremium += cash;
+  }
+  const brokerage = legs.length * 20;
+  const stt = sellPremium * 0.001;
+  const exchangeTxn = turnover * 0.00053;
+  const gst = (brokerage + exchangeTxn) * 0.18;
+  const total = round2(brokerage + stt + exchangeTxn + gst);
+  return {
+    brokerage: round2(brokerage),
+    stt: round2(stt),
+    exchangeTxn: round2(exchangeTxn),
+    gst: round2(gst),
+    total,
+    turnover: round2(turnover),
+    estimated: true,
+  };
+}
+
+/** Live MTM vs builder premiums (per lot unit). Multiply by lot size for rupee P&L. */
+export function bookedStrategyPnl(
+  legs: StrategyLeg[],
+  rows: OptionsChainRow[],
+): number | null {
+  if (legs.length === 0) return null;
+  let total = 0;
+  for (const leg of legs) {
+    const quote = chainLegPremium(rows, leg.strike, leg.type);
+    if (quote.premium == null) return null;
+    total += legSign(leg.side) * (quote.premium - leg.premium) * leg.qty;
+  }
+  return round2(total);
+}
+
+/** Rupee booked P&L = per-unit booked × lot size. */
+export function bookedStrategyPnlRupees(
+  legs: StrategyLeg[],
+  rows: OptionsChainRow[],
+  lotSize: number,
+): number | null {
+  const perUnit = bookedStrategyPnl(legs, rows);
+  if (perUnit == null || !(lotSize > 0)) return null;
+  return round2(perUnit * lotSize);
+}
+
+export type PayoffDistributionStats = {
+  pop: number;
+  expectedPnl: number;
+  /** Mass where PnL ≥ 95% of finite max profit (null if max unlimited). */
+  pMaxProfit: number | null;
+};
+
+/**
+ * Richer expiry stats: PoP, E[PnL], P(near max profit) via lognormal density.
+ * Integrate on a vol-aware domain (±6σ ∪ strike wings), then renormalize by
+ * captured mass so truncation cannot flip the sign of E[PnL].
+ */
+export function estimatePayoffDistributionStats(
+  legs: StrategyLeg[],
+  {
+    forward,
+    ivPct,
+    daysToExpiry,
+    strikeStep,
+    maxProfit,
+  }: {
+    forward: number;
+    ivPct: number;
+    daysToExpiry: number;
+    strikeStep: number;
+    maxProfit: number | null;
+  },
+): PayoffDistributionStats | null {
+  if (legs.length === 0) return null;
+  if (!(forward > 0) || !(ivPct > 0) || !(daysToExpiry > 0) || !(strikeStep > 0)) {
+    return null;
+  }
+  const pop = estimateProbabilityOfProfit(legs, {
+    forward,
+    ivPct,
+    daysToExpiry,
+    strikeStep,
+  });
+  if (pop == null) return null;
+
+  const years = yearsFromDte(daysToExpiry);
+  const sigma = ivPct / 100;
+  const step = Math.max(1, strikeStep);
+  const strikeBounds = payoffGridBounds(legs, strikeStep, 24);
+  const volWing = forward * sigma * Math.sqrt(years) * 6;
+  const gridLo = Math.max(
+    0,
+    Math.floor(Math.min(strikeBounds.gridLo, forward - volWing) / step) * step,
+  );
+  const gridHi =
+    Math.ceil(
+      Math.max(strikeBounds.gridHi, forward + volWing, forward * 1.4, forward + 1) /
+        step,
+    ) * step;
+
+  let expected = 0;
+  let mass = 0;
+  let massMax = 0;
+  const threshold =
+    maxProfit != null && Number.isFinite(maxProfit) ? maxProfit * 0.95 : null;
+
+  for (let s = gridLo; s <= gridHi + 0.001; s += step) {
+    const lo = Math.max(0, s - step / 2);
+    const hi = s + step / 2;
+    const p =
+      lognormalCdf(hi, forward, sigma, years) - lognormalCdf(lo, forward, sigma, years);
+    if (p <= 0) continue;
+    const pnl = totalPayoffAtSpot(legs, s);
+    expected += pnl * p;
+    mass += p;
+    if (threshold != null && pnl >= threshold) massMax += p;
+  }
+
+  if (mass > 1e-12) {
+    expected /= mass;
+    if (threshold != null) massMax /= mass;
+  }
+
+  return {
+    pop,
+    expectedPnl: round2(expected),
+    pMaxProfit: threshold == null ? null : round2(massMax * 1000) / 10,
+  };
 }
 
 /** Expiry payoff extremes from leg geometry (not sampled window edges). */
@@ -223,7 +649,24 @@ const WEEKLY_MONTH_CODE: Record<string, number> = {
   D: 11,
 };
 
-const INDEX_OPTION_ROOTS = ["MIDCPNIFTY", "BANKNIFTY", "FINNIFTY", "NIFTY", "SENSEX"] as const;
+const INDEX_OPTION_ROOTS = [
+  "MIDCPNIFTY",
+  "BANKNIFTY",
+  "FINNIFTY",
+  "NIFTYNXT50",
+  "NIFTY",
+  "SENSEX",
+] as const;
+
+/** Generous ATM±OTM bands — disambiguate Jan weekly E5+S5 vs false YYMMDD+S4. */
+const ROOT_STRIKE_BANDS: Record<(typeof INDEX_OPTION_ROOTS)[number], [number, number]> = {
+  NIFTY: [5_000, 50_000],
+  BANKNIFTY: [25_000, 80_000],
+  FINNIFTY: [10_000, 50_000],
+  NIFTYNXT50: [1_000, 120_000],
+  MIDCPNIFTY: [5_000, 25_000],
+  SENSEX: [40_000, 120_000],
+};
 
 /** Last Thursday of calendar month (historical NSE monthly F&O convention).
  *  Product/year calendars differ — see docs/options-lab-market-profile.md.
@@ -261,13 +704,6 @@ export function istSessionHourKey(now: Date = new Date()): string {
   return new Date(istMs).toISOString().slice(0, 13);
 }
 
-/** Floor DTE for σ√T numerics — ~30 minutes, not half a day. */
-export const MIN_DTE_DAYS = 1 / 48;
-
-export function yearsFromDte(daysToExpiry: number): number {
-  return Math.max(daysToExpiry, MIN_DTE_DAYS) / 365;
-}
-
 /** Parse monthly expiry token `26AUG` → last Thursday of that month. */
 export function expiryDateFromMonthlyCode(code: string): Date | null {
   const match = code.toUpperCase().match(/^(\d{2})([A-Z]{3})$/);
@@ -289,8 +725,8 @@ export function expiryDateFromWeeklyAlphaCode(code: string): Date | null {
   return utcDate(year, monthIndex, day);
 }
 
-/** Parse weekly digit token `25807` (YYMDD) or `250807` (YYMMDD). */
-export function expiryDateFromWeeklyDigitsCode(code: string): Date | null {
+/** Calendar decode for YYMDD / YYMMDD — weekday policy lives in the scorer. */
+function parseWeeklyDigitsDate(code: string): Date | null {
   if (!/^\d+$/.test(code)) return null;
   if (code.length === 5) {
     const year = 2000 + Number(code.slice(0, 2));
@@ -307,6 +743,19 @@ export function expiryDateFromWeeklyDigitsCode(code: string): Date | null {
   return null;
 }
 
+/** UTC day-of-week sets per root (0=Sun … 6=Sat). */
+function weeklyUtcDaysForRoot(root: string): Set<number> {
+  const key = root.toUpperCase();
+  if (key === "MIDCPNIFTY") return new Set([1, 2, 4]); // Mon, Tue, Thu
+  if (key === "SENSEX") return new Set([4, 5]); // Thu, Fri
+  return new Set([2, 3, 4]); // NIFTY / BANKNIFTY / FINNIFTY / NIFTYNXT50: Tue, Wed, Thu
+}
+
+/** Parse weekly digit token `25807` (YYMDD) or `250807` (YYMMDD). */
+export function expiryDateFromWeeklyDigitsCode(code: string): Date | null {
+  return parseWeeklyDigitsDate(code);
+}
+
 export function expiryDateFromExpiryCode(code: string): Date | null {
   const raw = code.trim().toUpperCase();
   if (!raw) return null;
@@ -317,34 +766,139 @@ export function expiryDateFromExpiryCode(code: string): Date | null {
   );
 }
 
+function looksYymmddExpiry(code: string): boolean {
+  return code.length === 6 && parseWeeklyDigitsDate(code) != null;
+}
+
+function strikeInRootBand(root: string, strike: number): boolean {
+  const band = ROOT_STRIKE_BANDS[root as keyof typeof ROOT_STRIKE_BANDS];
+  if (!band) return true;
+  return strike >= band[0] && strike <= band[1];
+}
+
+/**
+ * Score weekly digit splits — in-band E5+S5 outranks YYMMDD+S4 (NIFTY 25500 vs 5500).
+ * Per-root weekday gate rejects false rivals (e.g. NIFTY Mon 25120 vs Thu 251204).
+ */
+function weeklyDigitsParseScore(
+  root: string,
+  expiryPart: string,
+  strikeLen: number,
+  strike: number,
+): number {
+  if (expiryPart.length !== 5 && expiryPart.length !== 6) return 0;
+  const d = parseWeeklyDigitsDate(expiryPart);
+  if (d == null) return 0;
+  if (!weeklyUtcDaysForRoot(root).has(d.getUTCDay())) return 0;
+  const inBand = strikeInRootBand(root, strike);
+  if (looksYymmddExpiry(expiryPart) && strikeLen === 5) return inBand ? 100 : 25;
+  // In-band E5+S5 outranks YYMMDD+S4 — NIFTY 25500 truncates to in-band 5500.
+  if (expiryPart.length === 5 && strikeLen === 5 && strike >= 1000 && strike <= 99999) {
+    return inBand ? 95 : 20;
+  }
+  // YYMMDD+S4 when longer 5-digit strike is out of band, or E5 fails weekday gate.
+  if (
+    looksYymmddExpiry(expiryPart) &&
+    strikeLen === 4 &&
+    strike >= 1000 &&
+    strike <= 9999
+  ) {
+    return inBand ? 90 : 15;
+  }
+  if (expiryPart.length === 5 && strikeLen === 6 && strike >= 100000) {
+    // 6-digit strikes are rare edge cases; do not apply ATM band.
+    return 70;
+  }
+  if (expiryPart.length === 5 && strikeLen === 4) return inBand ? 40 : 12;
+  if (looksYymmddExpiry(expiryPart) && strikeLen !== 5) return 10;
+  return 20;
+}
+
+function parseWeeklyDigitsExpiryAndStrike(
+  root: string,
+  tail: string,
+): { expiryCode: string; strike: string } | null {
+  let best: { score: number; expiryCode: string; strike: string } | null = null;
+  for (const strikeLen of [4, 5, 6]) {
+    if (tail.length <= strikeLen + 4) continue;
+    const expiryPart = tail.slice(0, -strikeLen);
+    const strikePart = tail.slice(-strikeLen);
+    if (!/^\d+$/.test(expiryPart) || expiryPart.length < 5) continue;
+    const strike = Number(strikePart);
+    const score = weeklyDigitsParseScore(root, expiryPart, strikeLen, strike);
+    if (score <= 0) continue;
+    if (!best || score > best.score) {
+      best = { score, expiryCode: expiryPart, strike: String(strike) };
+    }
+  }
+  return best ? { expiryCode: best.expiryCode, strike: best.strike } : null;
+}
+
 /**
  * Extract expiry code from NSE-style option symbols, e.g.
  * `NFO:NIFTY26AUG24500CE`, `NIFTY25N1124500CE`, `NIFTY2580724500CE`.
  */
 export function expiryCodeFromOptionSymbol(symbol: string): string | null {
+  return parseOptionSymbolParts(symbol)?.expiry ?? null;
+}
+
+export type ParsedOptionSymbolParts = {
+  underlier: string;
+  expiry: string;
+  strike: number;
+  side: "CE" | "PE";
+  monthlyToken: boolean;
+};
+
+/** Structured parse shared by labels, DTE, and cross-language fixture tests. */
+export function parseOptionSymbolParts(
+  symbol: string | null | undefined,
+): ParsedOptionSymbolParts | null {
+  if (!symbol) return null;
   let raw = symbol.trim().toUpperCase();
   if (!raw) return null;
   if (raw.includes(":")) raw = raw.split(":", 2)[1] ?? raw;
   if (!raw.endsWith("CE") && !raw.endsWith("PE")) return null;
+  const side = raw.slice(-2) as "CE" | "PE";
   const body = raw.slice(0, -2);
 
+  let underlier: string | null = null;
+  let expiry: string | null = null;
+  let strikeRaw: string | null = null;
+  let monthlyToken = false;
+
   const monthly = body.match(/^([A-Z]+)(\d{2}[A-Z]{3})(\d+)$/);
-  if (monthly) return monthly[2];
-
-  const weeklyAlpha = body.match(/^([A-Z]+)(\d{2}[OND]\d{2})(\d+)$/);
-  if (weeklyAlpha) return weeklyAlpha[2];
-
-  for (const root of INDEX_OPTION_ROOTS) {
-    if (!body.startsWith(root)) continue;
-    const tail = body.slice(root.length);
-    if (!/^\d+$/.test(tail)) continue;
-    for (const strikeLen of [5, 4, 6]) {
-      if (tail.length <= strikeLen + 4) continue;
-      const expiryPart = tail.slice(0, -strikeLen);
-      if (/^\d+$/.test(expiryPart) && expiryPart.length >= 5) return expiryPart;
+  if (monthly) {
+    underlier = monthly[1];
+    expiry = monthly[2];
+    strikeRaw = monthly[3];
+    monthlyToken = true;
+  } else {
+    const weeklyAlpha = body.match(/^([A-Z]+)(\d{2}[OND]\d{2})(\d+)$/);
+    if (weeklyAlpha) {
+      underlier = weeklyAlpha[1];
+      expiry = weeklyAlpha[2];
+      strikeRaw = weeklyAlpha[3];
+    } else {
+      for (const root of INDEX_OPTION_ROOTS) {
+        if (!body.startsWith(root)) continue;
+        const tail = body.slice(root.length);
+        if (!/^\d+$/.test(tail)) continue;
+        const parsed = parseWeeklyDigitsExpiryAndStrike(root, tail);
+        if (parsed) {
+          underlier = root;
+          expiry = parsed.expiryCode;
+          strikeRaw = parsed.strike;
+          break;
+        }
+      }
     }
   }
-  return null;
+
+  if (!underlier || !expiry || !strikeRaw) return null;
+  const strike = Number(strikeRaw);
+  if (!Number.isFinite(strike)) return null;
+  return { underlier, expiry, strike, side, monthlyToken };
 }
 
 /**
@@ -476,57 +1030,18 @@ export function formatOptionContractName(symbol: string | null | undefined): str
   if (!raw) return null;
   if (raw.includes(":")) raw = raw.split(":", 2)[1] ?? raw;
   if (!raw.endsWith("CE") && !raw.endsWith("PE")) return raw;
-  const side = raw.slice(-2) as "CE" | "PE";
-  const body = raw.slice(0, -2);
 
-  let underlier: string | null = null;
-  let expiryCode: string | null = null;
-  let strike: string | null = null;
-  let monthlyToken = false;
-
-  const monthly = body.match(/^([A-Z]+)(\d{2}[A-Z]{3})(\d+)$/);
-  if (monthly) {
-    underlier = monthly[1];
-    expiryCode = monthly[2];
-    strike = monthly[3];
-    monthlyToken = true;
-  } else {
-    const weeklyAlpha = body.match(/^([A-Z]+)(\d{2}[OND]\d{2})(\d+)$/);
-    if (weeklyAlpha) {
-      underlier = weeklyAlpha[1];
-      expiryCode = weeklyAlpha[2];
-      strike = weeklyAlpha[3];
-    } else {
-      for (const root of INDEX_OPTION_ROOTS) {
-        if (!body.startsWith(root)) continue;
-        const tail = body.slice(root.length);
-        if (!/^\d+$/.test(tail)) continue;
-        for (const strikeLen of [5, 4, 6]) {
-          if (tail.length <= strikeLen + 4) continue;
-          const expiryPart = tail.slice(0, -strikeLen);
-          const strikePart = tail.slice(-strikeLen);
-          if (/^\d+$/.test(expiryPart) && expiryPart.length >= 5) {
-            underlier = root;
-            expiryCode = expiryPart;
-            strike = String(Number(strikePart));
-            break;
-          }
-        }
-        if (underlier) break;
-      }
-    }
-  }
-
-  if (!underlier || !expiryCode || !strike) return raw;
+  const parts = parseOptionSymbolParts(symbol);
+  if (!parts) return raw;
 
   let expiryLabel: string;
-  if (monthlyToken) {
-    expiryLabel = formatMonthlyCodeLabel(expiryCode) ?? expiryCode;
+  if (parts.monthlyToken) {
+    expiryLabel = formatMonthlyCodeLabel(parts.expiry) ?? parts.expiry;
   } else {
-    const expiry = expiryDateFromExpiryCode(expiryCode);
-    expiryLabel = expiry ? formatExpiryDayLabel(expiry) : expiryCode;
+    const expiry = expiryDateFromExpiryCode(parts.expiry);
+    expiryLabel = expiry ? formatExpiryDayLabel(expiry) : parts.expiry;
   }
-  return `${underlier} ${expiryLabel} ${strike} ${side}`;
+  return `${parts.underlier} ${expiryLabel} ${parts.strike} ${parts.side}`;
 }
 
 function lognormalCdf(spot: number, forward: number, sigma: number, years: number): number {
@@ -627,6 +1142,112 @@ export function estimateProbabilityOfProfit(
       hi === Number.POSITIVE_INFINITY ? 1 : lognormalCdf(hi, forward, sigma, years);
     const pLo = lo <= 0 ? 0 : lognormalCdf(lo, forward, sigma, years);
     mass += Math.max(0, pHi - pLo);
+  }
+
+  const pct = Math.max(0, Math.min(100, mass * 100));
+  return Math.round(pct * 10) / 10;
+}
+
+/**
+ * P(mark-to-model PnL > 0) at a target date before expiry.
+ * Spot diffuses for `daysToTarget`; marks use `remainingDaysToExpiry` of option life.
+ * Do not reuse expiry-PoP with a shorter DTE — that still scores intrinsic payoff.
+ */
+export function estimateTargetDateProbabilityOfProfit(
+  legs: StrategyLeg[],
+  {
+    forward,
+    ivPct,
+    daysToTarget,
+    remainingDaysToExpiry,
+    strikeStep,
+    legIvById,
+  }: {
+    forward: number;
+    ivPct: number;
+    daysToTarget: number;
+    remainingDaysToExpiry: number;
+    strikeStep: number;
+    legIvById?: LegIvMap | null;
+  },
+): number | null {
+  if (legs.length === 0) return null;
+  if (!(forward > 0) || !(ivPct > 0) || !(strikeStep > 0)) return null;
+  if (usableIvPct(ivPct) == null) return null;
+
+  if (isExpiryHorizon(remainingDaysToExpiry)) {
+    const totalDte = Math.max(daysToTarget + remainingDaysToExpiry, MIN_DTE_DAYS);
+    return estimateProbabilityOfProfit(legs, {
+      forward,
+      ivPct,
+      daysToExpiry: totalDte,
+      strikeStep,
+    });
+  }
+
+  const markOpts = {
+    remainingDaysToExpiry,
+    ivPct,
+    legIvById,
+  };
+
+  // Near "now": point-mass at forward.
+  if (!(daysToTarget > MIN_DTE_DAYS * 2)) {
+    const pnl = totalMarkPnlAtSpot(legs, forward, markOpts);
+    return pnl > 1e-9 ? 100 : 0;
+  }
+
+  const step = Math.max(1, strikeStep);
+  const yearsMove = yearsFromDte(daysToTarget);
+  const sigma = ivPct / 100;
+  const volWing = forward * sigma * Math.sqrt(yearsMove) * 5;
+  const maxStrike = Math.max(forward, ...legs.map((leg) => leg.strike));
+  const hi =
+    Math.ceil(
+      Math.max(maxStrike + 80 * step, forward + volWing, forward * 1.4) / step,
+    ) * step;
+
+  let mass = 0;
+  let inProfit = false;
+  let start = 0;
+  let prevSpot = 0;
+  // Match expiry PoP: include the left tail (short puts are profitable near 0).
+  let prevPnl = totalMarkPnlAtSpot(legs, 0, markOpts);
+
+  for (let spot = 0; spot <= hi + 0.001; spot += step) {
+    const pnl = totalMarkPnlAtSpot(legs, spot, markOpts);
+    const profitable = pnl > 1e-9;
+    if (profitable && !inProfit) {
+      if (spot > 0 && prevPnl <= 0) {
+        const denom = prevPnl - pnl;
+        start =
+          Math.abs(denom) < 1e-12
+            ? spot
+            : prevSpot + (prevPnl / denom) * (spot - prevSpot);
+      } else {
+        start = spot;
+      }
+      inProfit = true;
+    } else if (!profitable && inProfit) {
+      let end = spot;
+      if (prevPnl > 0) {
+        const denom = prevPnl - pnl;
+        end =
+          Math.abs(denom) < 1e-12
+            ? spot
+            : prevSpot + (prevPnl / denom) * (spot - prevSpot);
+      }
+      const pHi = lognormalCdf(end, forward, sigma, yearsMove);
+      const pLo = start <= 0 ? 0 : lognormalCdf(start, forward, sigma, yearsMove);
+      mass += Math.max(0, pHi - pLo);
+      inProfit = false;
+    }
+    prevSpot = spot;
+    prevPnl = pnl;
+  }
+  if (inProfit) {
+    const pLo = start <= 0 ? 0 : lognormalCdf(start, forward, sigma, yearsMove);
+    mass += Math.max(0, 1 - pLo);
   }
 
   const pct = Math.max(0, Math.min(100, mass * 100));

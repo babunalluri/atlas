@@ -43,6 +43,7 @@ Requires sandbox image/backend that supports **form-urlencoded** HttpProxy (`for
 | `place_order` / `modify_order` / `cancel_order` | **yes** | Orders |
 | `list_orders` / `get_order_history` / `list_trades` / `get_order_trades` | no | Order book |
 | `get_order_margins` | no | Pre-trade margin (JSON) |
+| `get_instruments` | no | CSV dump (`exchange=NFO`) for F&O underlyings |
 | `get_quote` / `get_ltp` / `get_ohlc` | no | Market data |
 | `get_historical_candles` | no | ADX / trend (15m candles) |
 

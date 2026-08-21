@@ -795,8 +795,12 @@ export function SignalMetricsPanel() {
 
   const engineEnabled =
     config?.engine_enabled ?? state?.engine_enabled ?? false;
-  const engineRunning =
-    engineEnabled && Boolean(state?.engine_active);
+  const snapshotStale = state?.snapshot_stale;
+  const engineActive = engineEnabled && Boolean(state?.engine_active);
+  // Prefer server snapshot_stale; unknown age is not "Running" / not live.
+  const engineStale = engineActive && snapshotStale === true;
+  const engineRunning = engineActive && snapshotStale === false;
+  const engineLive = engineRunning;
 
   const metrics = useMemo(() => state?.metrics ?? [], [state?.metrics]);
   const failingRules = useMemo(
@@ -966,17 +970,21 @@ export function SignalMetricsPanel() {
                 tone={
                   !engineEnabled
                     ? "neutral"
-                    : engineRunning
-                      ? "success"
-                      : "warning"
+                    : engineStale
+                      ? "warning"
+                      : engineRunning
+                        ? "success"
+                        : "warning"
                 }
-                live={engineRunning}
+                live={engineLive}
               >
                 {!engineEnabled
                   ? "Stopped"
-                  : engineRunning
-                    ? "Running"
-                    : "Reconnecting"}
+                  : engineStale
+                    ? "Stale"
+                    : engineRunning
+                      ? "Running"
+                      : "Reconnecting"}
               </Badge>
               {engineEnabled ? (
                 <Badge tone={streaming ? "success" : "warning"} dot={false}>

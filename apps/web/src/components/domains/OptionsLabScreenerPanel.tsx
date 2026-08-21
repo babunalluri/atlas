@@ -62,6 +62,8 @@ function sortRows(rows: OptionsScreenerRow[], key: SortKey, desc: boolean) {
 export function OptionsLabScreenerPanel({
   snapshot,
   loading,
+  universe,
+  onUniverseChange,
   onRefresh,
   onResetBaseline,
   resetting,
@@ -69,6 +71,8 @@ export function OptionsLabScreenerPanel({
 }: {
   snapshot: OptionsScreenerSnapshot | null;
   loading?: boolean;
+  universe: "indices" | "equities" | "all";
+  onUniverseChange: (universe: "indices" | "equities" | "all") => void;
   onRefresh: () => void;
   onResetBaseline: () => void;
   resetting?: boolean;
@@ -129,8 +133,36 @@ export function OptionsLabScreenerPanel({
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-sm text-slate-muted">
-            Index F&O screener · ATM ±5 chain scan · refreshed {fetchedLabel ?? "…"}
+            {universe === "equities"
+              ? "Equity F&O screener"
+              : universe === "all"
+                ? "Index + equity F&O screener"
+                : "Index F&O screener"}{" "}
+            · ATM ±5 chain scan · refreshed {fetchedLabel ?? "…"}
           </p>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {(
+              [
+                ["indices", "Indices"],
+                ["equities", "Equities"],
+                ["all", "All"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => onUniverseChange(id)}
+                className={cn(
+                  "rounded-md border px-2 py-1 text-xs",
+                  universe === id
+                    ? "border-ink bg-ink text-canvas"
+                    : "border-line bg-canvas text-slate-muted hover:text-ink",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button

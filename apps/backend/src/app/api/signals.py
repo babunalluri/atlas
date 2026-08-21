@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from app.domains.signal_engine import (
     SignalEngineService,
     state_for_stream,
 )
+from app.domains.signal_engine_worker import refresh_tenant_snapshot
 from app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/admin/signals", tags=["admin-signals"])
@@ -88,11 +89,20 @@ async def patch_signal_config(
     body: SignalConfigPatchIn,
     context: AdminContext,
     session: TenantSession,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     patch = body.model_dump(exclude_unset=True)
     result = await SignalEngineService(session, context).update_admin_config(patch)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Update failed"))
+    # After the request transaction commits: warm Redis so SSE can avoid a cold
+    # state() on the critical path. Must not run mid-request (uncommitted config).
+    if patch.get("engine_enabled") is True:
+        background_tasks.add_task(
+            refresh_tenant_snapshot,
+            context.tenant_id,
+            auth_org_id=context.auth_org_id,
+        )
     return result
 
 

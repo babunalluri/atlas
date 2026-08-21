@@ -310,6 +310,50 @@ async def try_compute_lock(tenant_id: str) -> bool:
     return True
 
 
+async def extend_compute_lock(tenant_id: str) -> bool:
+    """Refresh Redis lock TTL while a long state() is in flight.
+
+    Local locks do not expire; returns True so heartbeats are no-ops in-memory.
+    """
+    token = _redis_lock_tokens.get(tenant_id)
+    if token is None:
+        return tenant_id in _local_compute_locks and _local_compute_locks[tenant_id].locked()
+
+    client = await get_redis()
+    if client is None:
+        return False
+    try:
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+        extended = await client.eval(
+            script, 1, _lock_key(tenant_id), token, str(LOCK_TTL_MS)
+        )
+        return bool(extended)
+    except Exception:
+        await invalidate_redis()
+        logger.warning("signal_cache_lock_extend_failed", tenant_id=tenant_id)
+        return False
+
+
+def start_compute_lock_heartbeat(tenant_id: str) -> asyncio.Task[None]:
+    """Extend the Redis compute lock until cancelled (no-op for in-memory locks)."""
+    from app.domains.signal_engine_constants import LOCK_HEARTBEAT_SECONDS
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(LOCK_HEARTBEAT_SECONDS)
+            if not await extend_compute_lock(tenant_id):
+                return
+
+    return asyncio.create_task(
+        _heartbeat(), name=f"signal-lock-hb-{tenant_id}"
+    )
+
+
 async def release_compute_lock(tenant_id: str) -> None:
     token = _redis_lock_tokens.pop(tenant_id, None)
     client = await get_redis()

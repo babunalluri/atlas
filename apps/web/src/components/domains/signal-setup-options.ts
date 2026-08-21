@@ -28,6 +28,7 @@ const FUT_ROOT_BY_UNDERLYING: Record<string, { exchange: string; root: string }>
     "NSE:NIFTY": { exchange: "NFO", root: "NIFTY" },
     "NSE:BANKNIFTY": { exchange: "NFO", root: "BANKNIFTY" },
     "NSE:FINNIFTY": { exchange: "NFO", root: "FINNIFTY" },
+    "NSE:NIFTYNXT50": { exchange: "NFO", root: "NIFTYNXT50" },
     "NSE:MIDCPNIFTY": { exchange: "NFO", root: "MIDCPNIFTY" },
     "BSE:SENSEX": { exchange: "BFO", root: "SENSEX" },
   };
@@ -72,17 +73,32 @@ function activeFutMonth(when: Date): { year: number; month: number } {
   return { year, month };
 }
 
-/** Monthly FUT symbol for NSE/BFO index underlyings (e.g. NFO:NIFTY26AUGFUT). */
+/** Monthly FUT symbol for NSE/BFO index or equity underlyings (e.g. NFO:RELIANCE26AUGFUT). */
 export function suggestFutSymbol(
   underlyingSymbol: string,
   when: Date = new Date(),
 ): string {
   const meta = FUT_ROOT_BY_UNDERLYING[underlyingSymbol.trim()];
-  if (!meta) return "";
   const { year, month } = activeFutMonth(when);
   const yy = String(year).slice(-2);
   const mon = MONTH_CODES[month - 1];
-  return `${meta.exchange}:${meta.root}${yy}${mon}FUT`;
+  if (meta) {
+    return `${meta.exchange}:${meta.root}${yy}${mon}FUT`;
+  }
+  let root = underlyingSymbol.trim().toUpperCase();
+  if (root.includes(":")) root = root.split(":", 2)[1]?.trim() ?? "";
+  root = root.replace(/\s+/g, "");
+  if (root === "NIFTY50") root = "NIFTY";
+  const indexRoots = new Set([
+    "NIFTY",
+    "BANKNIFTY",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "SENSEX",
+    "NIFTYNXT50",
+  ]);
+  if (!root || indexRoots.has(root)) return "";
+  return `NFO:${root}${yy}${mon}FUT`;
 }
 
 export function deriveOptionSymbol(

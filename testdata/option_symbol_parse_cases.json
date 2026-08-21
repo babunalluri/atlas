@@ -1,0 +1,208 @@
+{
+  "description": "Shared Options Lab option-symbol parse contract (Python + TypeScript). Prefer real Tue–Thu expiry codes — synthetic Sun/Mon dates are rejected by the weekday gate.",
+  "cases": [
+    {
+      "symbol": "NFO:NIFTY26AUG24300CE",
+      "expiry": "26AUG",
+      "strike": 24300,
+      "side": "CE"
+    },
+    {
+      "symbol": "NFO:NIFTY26AUG24500CE",
+      "expiry": "26AUG",
+      "strike": 24500,
+      "side": "CE"
+    },
+    {
+      "symbol": "NIFTY2580724500CE",
+      "expiry": "25807",
+      "strike": 24500,
+      "side": "CE",
+      "note": "Aug 7 2025 Thursday weekly"
+    },
+    {
+      "symbol": "NIFTY25807100000CE",
+      "expiry": "25807",
+      "strike": 100000,
+      "side": "CE",
+      "note": "6-digit strike must win over false 5-digit split (strike 0)"
+    },
+    {
+      "symbol": "NIFTY25N1124500CE",
+      "expiry": "25N11",
+      "strike": 24500,
+      "side": "CE"
+    },
+    {
+      "symbol": "NIFTY25N1124500PE",
+      "expiry": "25N11",
+      "strike": 24500,
+      "side": "PE"
+    },
+    {
+      "symbol": "NIFTY25112724500CE",
+      "expiry": "251127",
+      "strike": 24500,
+      "side": "CE",
+      "note": "YYMMDD must beat false 6-digit strike split (Thu 27 Nov 2025)"
+    },
+    {
+      "symbol": "NIFTY25100724500CE",
+      "expiry": "251007",
+      "strike": 24500,
+      "side": "CE",
+      "note": "Tue 7 Oct 2025"
+    },
+    {
+      "symbol": "NIFTY25123024500CE",
+      "expiry": "251230",
+      "strike": 24500,
+      "side": "CE",
+      "note": "Tue 30 Dec 2025"
+    },
+    {
+      "symbol": "NIFTY2511278000CE",
+      "expiry": "251127",
+      "strike": 8000,
+      "side": "CE",
+      "note": "YYMMDD+4-digit strike must beat bogus 5+5 (25112/78000)"
+    },
+    {
+      "symbol": "MIDCPNIFTY2511279500CE",
+      "expiry": "251127",
+      "strike": 9500,
+      "side": "CE",
+      "note": "MIDCPNIFTY deep OTM 4-digit strike with YYMMDD expiry"
+    },
+    {
+      "symbol": "NIFTY2511624500CE",
+      "expiry": "25116",
+      "strike": 24500,
+      "side": "CE",
+      "note": "Jan 16 2025 Thursday weekly — not false YYMMDD+4"
+    },
+    {
+      "symbol": "NIFTY2510224500CE",
+      "expiry": "25102",
+      "strike": 24500,
+      "side": "CE",
+      "note": "Jan 2 2025 Thursday weekly vs false YYMMDD 251022/4500 (OTM)"
+    },
+    {
+      "symbol": "BANKNIFTY2511654500CE",
+      "expiry": "25116",
+      "strike": 54500,
+      "side": "CE",
+      "note": "BANKNIFTY January Thursday weekly E5+S5"
+    },
+    {
+      "symbol": "NIFTY2511625500CE",
+      "expiry": "25116",
+      "strike": 25500,
+      "side": "CE",
+      "note": "In-band E5+S5 must beat invalid/false YYMMDD+S4"
+    },
+    {
+      "symbol": "NIFTY2511625000CE",
+      "expiry": "25116",
+      "strike": 25000,
+      "side": "CE"
+    },
+    {
+      "symbol": "NIFTY2511626000CE",
+      "expiry": "25116",
+      "strike": 26000,
+      "side": "CE"
+    },
+    {
+      "symbol": "MIDCPNIFTY2511619500CE",
+      "expiry": "25116",
+      "strike": 19500,
+      "side": "CE",
+      "note": "MIDCP Thursday weekly E5+S5"
+    },
+    {
+      "symbol": "MIDCPNIFTY2511209500CE",
+      "expiry": "251120",
+      "strike": 9500,
+      "side": "CE",
+      "note": "True YYMMDD Thu 20 Nov 2025 — E5 25112 is Sunday and must lose"
+    },
+    {
+      "symbol": "MIDCPNIFTY24100712000CE",
+      "expiry": "241007",
+      "strike": 12000,
+      "side": "CE",
+      "note": "MIDCP Monday weekly (legacy) — NIFTY would reject Mon"
+    },
+    {
+      "symbol": "SENSEX25111480000CE",
+      "expiry": "251114",
+      "strike": 80000,
+      "side": "CE",
+      "note": "SENSEX Friday weekly"
+    },
+    {
+      "symbol": "NIFTY2511138000CE",
+      "expiry": "251113",
+      "strike": 8000,
+      "side": "CE",
+      "note": "Thu 13 Nov — not E5 25111 (Saturday) / 38000"
+    },
+    {
+      "symbol": "NIFTY2511208000CE",
+      "expiry": "251120",
+      "strike": 8000,
+      "side": "CE",
+      "note": "Thu 20 Nov — not E5 25112 (Sunday) / 08000"
+    },
+    {
+      "symbol": "NIFTY2512048000CE",
+      "expiry": "251204",
+      "strike": 8000,
+      "side": "CE",
+      "note": "Thu 4 Dec — not E5 25120 (Monday) / 48000"
+    },
+    {
+      "symbol": "NIFTY2510225500CE",
+      "expiry": "25102",
+      "strike": 25500,
+      "side": "CE",
+      "note": "Ambiguous 10-digit tail: in-band E5+S5 (Jan 2 / 25500) beats YYMMDD+S4 (251022 / 5500)"
+    },
+    {
+      "symbol": "NIFTY25102225500CE",
+      "expiry": "251022",
+      "strike": 25500,
+      "side": "CE",
+      "note": "True YYMMDD+5 (Wed 22 Oct / 25500) — 11-digit strike tail"
+    },
+    {
+      "symbol": "NIFTY25112718000CE",
+      "expiry": "251127",
+      "strike": 18000,
+      "side": "CE",
+      "note": "True YYMMDD+5 still wins at tier 100"
+    },
+    {
+      "symbol": "NIFTYNXT502511131500CE",
+      "expiry": "251113",
+      "strike": 1500,
+      "side": "CE",
+      "note": "NIFTYNXT50 must match before NIFTY prefix; Thu 13 Nov weekly"
+    },
+    {
+      "symbol": "NIFTYNXT5025111361500CE",
+      "expiry": "251113",
+      "strike": 61500,
+      "side": "CE",
+      "note": "NIFTYNXT50 ATM-ish 5-digit strike"
+    },
+    {
+      "symbol": "NFO:NIFTY26AUGFUT",
+      "expiry": null,
+      "strike": null,
+      "side": null
+    }
+  ]
+}

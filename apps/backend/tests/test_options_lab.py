@@ -224,12 +224,27 @@ def test_suggest_fut_symbol_rolls_after_monthly_expiry() -> None:
     assert suggest_fut_symbol("NSE:NIFTY 50", after_expiry) == "NFO:NIFTY26SEPFUT"
 
 
-def test_screener_presets_dedupes_nifty_symbols() -> None:
-    presets = screener_presets("indices")
-    symbols = [row["symbol"] for row in presets]
+def test_screener_presets_equities_and_all() -> None:
+    equities = screener_presets("equities")
+    assert any(row["symbol"] == "NSE:RELIANCE" for row in equities)
+    assert not any("NIFTY" in row["symbol"] for row in equities)
+    all_rows = screener_presets("all")
+    symbols = [row["symbol"] for row in all_rows]
     assert "NSE:NIFTY 50" in symbols
-    assert "NSE:BANKNIFTY" in symbols
-    assert len(symbols) == len(set(symbols))
+    assert "NSE:RELIANCE" in symbols
+
+
+def test_suggest_fut_symbol_equity() -> None:
+    fut = suggest_fut_symbol("NSE:RELIANCE")
+    assert fut.startswith("NFO:RELIANCE") and fut.endswith("FUT")
+
+
+def test_fut_matches_underlying() -> None:
+    from app.domains.options_lab import _fut_matches_underlying
+
+    assert _fut_matches_underlying("NFO:NIFTY26AUGFUT", "NSE:NIFTY 50")
+    assert not _fut_matches_underlying("NFO:NIFTY26AUGFUT", "NSE:RELIANCE")
+    assert _fut_matches_underlying("NFO:RELIANCE26AUGFUT", "NSE:RELIANCE")
 
 
 def test_mock_screener_rows_cover_all_presets() -> None:

@@ -3613,6 +3613,9 @@ export interface SignalUnderlyingPreset {
   label: string;
   symbol: string;
   strike_step: number;
+  fut_symbol?: string;
+  universe?: string;
+  lot_size?: number;
 }
 
 export interface SignalEngineAdminConfig {
@@ -3659,6 +3662,14 @@ export interface SignalEngineState {
   has_broker: boolean;
   engine_enabled?: boolean;
   engine_active?: boolean;
+  /** Wall-clock ms when the snapshot was computed (worker / stream). */
+  computed_at_ms?: number;
+  /** Age of the snapshot in ms; null when computed_at_ms is unknown. */
+  data_age_ms?: number | null;
+  /** Server freshness window (ms); echoed for clients that want to display it. */
+  snapshot_fresh_ms?: number;
+  /** true when data_age_ms > snapshot_fresh_ms; null when age unknown. */
+  snapshot_stale?: boolean | null;
   live_warnings: string[];
   team_slug: string;
   underlying?: { symbol: string; label: string };
@@ -4077,6 +4088,100 @@ export async function importOptionsPortfolioFromKite(
     accessToken,
     method: "POST",
     body: name ? { name } : {},
+  });
+}
+
+export type OptionsLabMarginResponse = {
+  ok: boolean;
+  error?: string;
+  source?: string;
+  funds_needed?: number | null;
+  margin_needed?: number | null;
+  margin_available?: number | null;
+  lot_size?: number;
+  product?: string;
+  estimated?: boolean;
+  warnings?: string[];
+};
+
+export async function postOptionsLabMargins(
+  accessToken: string,
+  body: {
+    legs: Array<{
+      id?: string;
+      side: string;
+      type?: string;
+      strike?: number;
+      qty: number;
+      entry_premium?: number;
+      premium?: number;
+      symbol?: string;
+    }>;
+    lot_size?: number;
+    product?: string;
+    underlying_symbol?: string;
+    heuristic?: { marginNeeded?: number; fundsNeeded?: number };
+    mock?: boolean;
+  },
+): Promise<OptionsLabMarginResponse> {
+  return apiFetch<OptionsLabMarginResponse>("/admin/options-lab/margins", {
+    accessToken,
+    method: "POST",
+    body,
+  });
+}
+
+export type OptionsLabOrderResponse = {
+  ok: boolean;
+  partial?: boolean;
+  error?: string;
+  mock?: boolean;
+  tool?: string;
+  team_slug?: string;
+  submitted_count?: number;
+  failed_count?: number;
+  orders?: Array<{
+    leg_index?: number;
+    symbol?: string;
+    side?: string;
+    quantity?: number;
+    status?: string;
+    order_id?: string | null;
+    error?: string;
+  }>;
+  errors?: string[];
+  warnings?: string[];
+  draft?: { ok?: boolean; portfolio?: OptionsPortfolio; error?: string };
+};
+
+export async function postOptionsLabOrders(
+  accessToken: string,
+  body: {
+    legs: Array<{
+      id?: string;
+      side: string;
+      type?: string;
+      strike?: number;
+      qty: number;
+      entry_premium?: number;
+      premium?: number;
+      symbol?: string;
+    }>;
+    confirm: boolean;
+    live?: boolean;
+    lot_size?: number;
+    product?: string;
+    order_type?: string;
+    name?: string;
+    underlying_symbol?: string;
+    save_draft?: boolean;
+    mock?: boolean;
+  },
+): Promise<OptionsLabOrderResponse> {
+  return apiFetch<OptionsLabOrderResponse>("/admin/options-lab/orders", {
+    accessToken,
+    method: "POST",
+    body,
   });
 }
 

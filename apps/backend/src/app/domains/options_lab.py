@@ -36,6 +36,16 @@ from app.domains.options_lab_iv import (
     record_atm_iv,
     reset_iv_history as clear_iv_history,
 )
+from app.domains.options_lab_underlyings import (
+    EQUITY_FNO_SEED,
+    equity_root_from_underlying,
+    extract_instruments_csv,
+    extract_instruments_rows,
+    merge_presets,
+    parse_nfo_instrument_rows,
+    parse_nfo_instruments_csv,
+    suggest_equity_fut_symbol,
+)
 from app.domains.signal_engine_cache import get_session_value, set_session_value
 from app.domains.signal_engine_chain import (
     build_chain_symbols,
@@ -48,11 +58,13 @@ MIN_WINGS = 5
 MAX_WINGS = 25
 SCREENER_WINGS = 5
 # Keep enough intra-session detail while avoiding huge write amplification.
-STRADDLE_HISTORY_MAX = 2_400  # ~80m at 2s poll
+STRADDLE_HISTORY_MAX = 2_400  # ~40m at 1 point/s (fetched_at is whole seconds)
 STRADDLE_HISTORY_RESPONSE_MAX = 600  # chart-facing payload cap
 OI_BASELINE_FIELD = "options_lab:oi_baseline"
 STRADDLE_HISTORY_FIELD = "options_lab:straddle_history"
 SCREENER_BASELINE_FIELD = "options_lab:screener_baseline"
+INSTRUMENTS_CACHE_FIELD = "options_lab:nfo_underlyings"
+INSTRUMENTS_CACHE_TTL_SEC = 12 * 60 * 60
 OPTIONS_LAB_SETTINGS_KEY = "options_lab"
 
 MONTH_CODES = (
@@ -75,6 +87,7 @@ FUT_ROOT_BY_UNDERLYING: dict[str, tuple[str, str]] = {
     "NSE:NIFTY": ("NFO", "NIFTY"),
     "NSE:BANKNIFTY": ("NFO", "BANKNIFTY"),
     "NSE:FINNIFTY": ("NFO", "FINNIFTY"),
+    "NSE:NIFTYNXT50": ("NFO", "NIFTYNXT50"),
     "NSE:MIDCPNIFTY": ("NFO", "MIDCPNIFTY"),
     "BSE:SENSEX": ("BFO", "SENSEX"),
 }
@@ -210,33 +223,60 @@ def _active_fut_month(when: datetime) -> tuple[int, int]:
     return year, month
 
 
+def _fut_matches_underlying(fut_symbol: str, underlying_symbol: str) -> bool:
+    fut = (fut_symbol or "").strip().upper()
+    if not fut:
+        return False
+    tradingsymbol = fut.split(":", 1)[-1]
+    meta = FUT_ROOT_BY_UNDERLYING.get(underlying_symbol.strip())
+    root = meta[1] if meta else equity_root_from_underlying(underlying_symbol)
+    if not root:
+        return False
+    return tradingsymbol.startswith(root.upper())
+
+
 def suggest_fut_symbol(
     underlying_symbol: str,
     when: datetime | None = None,
 ) -> str:
     meta = FUT_ROOT_BY_UNDERLYING.get(underlying_symbol.strip())
-    if not meta:
-        return ""
-    exchange, root = meta
-    now = when or datetime.now(ZoneInfo("Asia/Kolkata"))
-    year, month = _active_fut_month(now)
-    yy = str(year)[-2:]
-    mon = MONTH_CODES[month - 1]
-    return f"{exchange}:{root}{yy}{mon}FUT"
+    if meta:
+        exchange, root = meta
+        now = when or datetime.now(ZoneInfo("Asia/Kolkata"))
+        year, month = _active_fut_month(now)
+        yy = str(year)[-2:]
+        mon = MONTH_CODES[month - 1]
+        return f"{exchange}:{root}{yy}{mon}FUT"
+    return suggest_equity_fut_symbol(underlying_symbol, when=when)
 
 
-def screener_presets(universe: str = "indices") -> list[dict[str, Any]]:
-    if universe != "indices":
-        return []
+def screener_presets(
+    universe: str = "indices",
+    *,
+    equity_presets: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    indices = []
     seen: set[str] = set()
-    out: list[dict[str, Any]] = []
     for preset in UNDERLYING_PRESETS:
         symbol = str(preset.get("symbol") or "").strip()
         if not symbol or symbol in seen:
             continue
         seen.add(symbol)
-        out.append(dict(preset))
-    return out
+        row = dict(preset)
+        row.setdefault("universe", "indices")
+        indices.append(row)
+
+    equities = list(equity_presets) if equity_presets is not None else list(EQUITY_FNO_SEED)
+    for row in equities:
+        row.setdefault("universe", "equities")
+
+    if universe == "indices":
+        return indices
+    if universe == "equities":
+        return merge_presets(equities)
+    if universe == "all":
+        return merge_presets(indices, equities)
+    return indices
 
 
 def _atm_metrics_from_rows(rows: list[dict[str, Any]]) -> dict[str, float | None]:
@@ -760,14 +800,77 @@ class OptionsLabService:
     async def get_admin_config(self) -> dict[str, Any]:
         tool = await self.engine._signal_engine_tool()
         _, has_broker, team_ready = await self.engine._load_setup()
+        equity_presets, equity_meta = await self._equity_presets()
+        presets = merge_presets(
+            [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
+            equity_presets,
+        )
         return {
             "ok": True,
             "config": (await self._read_config()).to_admin_dict(),
-            "presets": UNDERLYING_PRESETS,
+            "presets": presets,
+            "equity_source": equity_meta.get("source"),
+            "equity_count": len(equity_presets),
             "tool_bound": tool is not None,
             "has_broker": has_broker,
             "team_ready": team_ready,
         }
+
+    async def _equity_presets(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        from app.domains.desk_snapshot import DESK_TEAM_SLUGS, invoke_tool
+        from app.domains.options_lab_trading import OptionsLabTradingService
+        from app.domains.signal_engine import SIGNAL_TEAM_SLUG
+
+        tenant_id = _tenant_key(self.context)
+        cached = await get_session_value(tenant_id, INSTRUMENTS_CACHE_FIELD)
+        now = int(time.time())
+        if (
+            isinstance(cached, dict)
+            and isinstance(cached.get("presets"), list)
+            and cached.get("presets")
+            and int(cached.get("fetched_at") or 0) + INSTRUMENTS_CACHE_TTL_SEC > now
+        ):
+            return list(cached["presets"]), {
+                "source": cached.get("source") or "cache",
+                "fetched_at": cached.get("fetched_at"),
+            }
+
+        presets: list[dict[str, Any]] = []
+        source = "seed"
+        try:
+            trading = OptionsLabTradingService(self.session, self.context)
+            fn, name, _ = await trading._find_tool(
+                ("get_instruments", "list_instruments"),
+                team_slugs=(SIGNAL_TEAM_SLUG, *DESK_TEAM_SLUGS),
+            )
+            if fn is not None:
+                raw = await invoke_tool(fn, {"exchange": "NFO"})
+                rows = extract_instruments_rows(raw)
+                if rows:
+                    presets = parse_nfo_instrument_rows(rows)
+                else:
+                    csv_text = extract_instruments_csv(raw)
+                    if csv_text:
+                        presets = parse_nfo_instruments_csv(csv_text)
+                if presets:
+                    source = name or "instruments"
+        except Exception:  # noqa: BLE001
+            presets = []
+
+        if not presets:
+            presets = []
+            for row in EQUITY_FNO_SEED:
+                item = dict(row)
+                item.setdefault("fut_symbol", suggest_fut_symbol(str(item["symbol"])))
+                presets.append(item)
+            source = "seed"
+
+        await set_session_value(
+            tenant_id,
+            INSTRUMENTS_CACHE_FIELD,
+            {"fetched_at": now, "source": source, "presets": presets},
+        )
+        return presets, {"source": source, "fetched_at": now}
 
     async def update_admin_config(self, patch: dict[str, Any]) -> dict[str, Any]:
         tool = await self.engine._signal_engine_tool()
@@ -794,6 +897,29 @@ class OptionsLabService:
                     merged_lab[key] = False
             else:
                 merged_lab[key] = val
+        # When underlying changes, fill FUT + strike_step from presets / suggest.
+        # Full-config patches may still carry a stale FUT from the previous name.
+        if "underlying_symbol" in patch and patch.get("underlying_symbol"):
+            symbol = str(merged_lab["underlying_symbol"])
+            equity_presets, _ = await self._equity_presets()
+            all_presets = merge_presets(
+                [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
+                equity_presets,
+            )
+            hit = next((p for p in all_presets if p.get("symbol") == symbol), None)
+            if hit:
+                if not patch.get("underlying_label"):
+                    merged_lab["underlying_label"] = hit.get("label") or symbol
+                if "strike_step" not in patch and hit.get("strike_step"):
+                    merged_lab["strike_step"] = int(hit["strike_step"])
+            suggested = ""
+            if hit and hit.get("fut_symbol"):
+                suggested = str(hit["fut_symbol"])
+            if not suggested:
+                suggested = suggest_fut_symbol(symbol)
+            incoming_fut = str(merged_lab.get("fut_symbol") or "")
+            if not _fut_matches_underlying(incoming_fut, symbol):
+                merged_lab["fut_symbol"] = suggested
         next_config = OptionsLabConfig.from_dict(merged_lab)
         await self.engine._write_tool_settings(
             tool,
@@ -939,7 +1065,7 @@ class OptionsLabService:
         return await self._finalize_payload(payload, config)
 
     async def screener_snapshot(self, *, universe: str = "indices") -> dict[str, Any]:
-        universe = universe if universe in {"indices"} else "indices"
+        universe = universe if universe in {"indices", "equities", "all"} else "indices"
         config = await self._read_config()
         tenant_id = _tenant_key(self.context)
         cache_key = f"options_lab:screener:{universe}:{int(config.mock)}"
@@ -956,11 +1082,20 @@ class OptionsLabService:
                 "rows": rows_with_deltas,
             }
 
-        presets = screener_presets(universe)
+        equity_presets, equity_meta = await self._equity_presets()
+        presets = screener_presets(universe, equity_presets=equity_presets)
+        # Equities screener can be large — cap live scan for broker quote budget.
+        if universe in {"equities", "all"} and len(presets) > 40:
+            presets = presets[:40]
         _, has_broker, team_ready = await self.engine._load_setup()
         warnings: list[str] = []
         if not team_ready:
             warnings.append("Publish the Signals ops team and bind Kite toolkit.")
+        if equity_meta.get("source") == "seed" and universe in {"equities", "all"}:
+            warnings.append(
+                "Equity list from seed — republish kite_toolkit with get_instruments "
+                "for full NFO underlyings."
+            )
 
         if config.mock:
             payload = {
@@ -999,7 +1134,7 @@ class OptionsLabService:
 
         for preset in presets:
             symbol = str(preset.get("symbol") or "").strip()
-            fut = suggest_fut_symbol(symbol)
+            fut = str(preset.get("fut_symbol") or "").strip() or suggest_fut_symbol(symbol)
             if not fut:
                 errors.append(
                     compose_screener_row(
@@ -1318,6 +1453,96 @@ class OptionsLabService:
             "mark": marked if marked.get("ok") else None,
             "warnings": warnings,
         }
+
+    async def strategy_margins(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.domains.options_lab_trading import (
+            OptionsLabTradingService,
+            estimate_lot_size,
+        )
+
+        config = await self._read_config()
+        legs = list(payload.get("legs") or [])
+        underlying = str(
+            payload.get("underlying_symbol")
+            or config.underlying_symbol
+            or config.underlying_label
+            or ""
+        )
+        try:
+            lot_size = int(payload.get("lot_size") or estimate_lot_size(underlying))
+        except (TypeError, ValueError):
+            lot_size = estimate_lot_size(underlying)
+        product = str(payload.get("product") or "NRML")
+        heuristic = payload.get("heuristic") if isinstance(payload.get("heuristic"), dict) else None
+        trading = OptionsLabTradingService(self.session, self.context)
+        return await trading.strategy_margins(
+            legs=legs,
+            lot_size=lot_size,
+            product=product,
+            mock=bool(config.mock or payload.get("mock")),
+            heuristic=heuristic,
+        )
+
+    async def place_strategy_orders(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.domains.options_lab_trading import (
+            OptionsLabTradingService,
+            estimate_lot_size,
+        )
+
+        config = await self._read_config()
+        legs = list(payload.get("legs") or [])
+        underlying = str(
+            payload.get("underlying_symbol")
+            or config.underlying_symbol
+            or config.underlying_label
+            or ""
+        )
+        try:
+            lot_size = int(payload.get("lot_size") or estimate_lot_size(underlying))
+        except (TypeError, ValueError):
+            lot_size = estimate_lot_size(underlying)
+        trading = OptionsLabTradingService(self.session, self.context)
+        placed = await trading.place_strategy_orders(
+            legs=legs,
+            lot_size=lot_size,
+            product=str(payload.get("product") or "NRML"),
+            order_type=str(payload.get("order_type") or "LIMIT"),
+            confirm=bool(payload.get("confirm")),
+            live=bool(payload.get("live")),
+            mock=bool(config.mock or payload.get("mock")),
+            tag=str(payload.get("tag") or "atlas-ol"),
+        )
+        # Persist a draft only when at least one leg was submitted (or mock).
+        draft = None
+        if (
+            bool(payload.get("confirm"))
+            and payload.get("save_draft", True)
+            and legs
+            and (placed.get("mock") or int(placed.get("submitted_count") or 0) > 0)
+        ):
+            draft_legs = legs
+            draft_name = payload.get("name") or f"Order {_now_label()}"
+            if placed.get("partial"):
+                submitted_idx = {
+                    r.get("leg_index")
+                    for r in (placed.get("orders") or [])
+                    if r.get("status") == "submitted" and r.get("leg_index") is not None
+                }
+                draft_legs = [
+                    leg for idx, leg in enumerate(legs) if idx in submitted_idx
+                ]
+                draft_name = f"PARTIAL {draft_name}"
+            if draft_legs:
+                draft = await self.create_portfolio(
+                    {
+                        "name": draft_name,
+                        "legs": draft_legs,
+                        "underlying_symbol": config.underlying_symbol,
+                        "underlying_label": config.underlying_label,
+                        "fut_symbol": config.fut_symbol,
+                    }
+                )
+        return {**placed, "draft": draft}
 
 
 def _now_label() -> str:

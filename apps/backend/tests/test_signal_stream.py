@@ -50,10 +50,39 @@ async def signals_db(monkeypatch):
 
 
 def test_stream_and_broker_intervals() -> None:
+    from app.domains.signal_engine_constants import (
+        LOCK_HEARTBEAT_SECONDS,
+        LOCK_TTL_MS,
+        SNAPSHOT_FRESH_MS,
+        SNAPSHOT_TTL_MS,
+    )
+
     assert STREAM_INTERVAL_MS == 125
     assert BROKER_QUOTE_TTL_MS == 500
     assert TIER_TTL_MS["fast"] == STREAM_INTERVAL_MS
     assert TIER_TTL_MS["broker"] == BROKER_QUOTE_TTL_MS
+    # Fresh window shorter than TTL so Stale is reachable while Redis still serves.
+    assert SNAPSHOT_FRESH_MS < SNAPSHOT_TTL_MS
+    assert SNAPSHOT_FRESH_MS >= STREAM_INTERVAL_MS * 8
+    assert SNAPSHOT_TTL_MS > STREAM_INTERVAL_MS
+    # Short lock + heartbeat: dead workers self-heal quickly.
+    assert LOCK_TTL_MS == 10_000
+    assert LOCK_HEARTBEAT_SECONDS * 1000 < LOCK_TTL_MS
+
+
+@pytest.mark.asyncio
+async def test_snapshot_survives_beyond_stream_interval() -> None:
+    """Worker/SSE must keep serving last-good while the next compute runs."""
+    import asyncio
+
+    from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
+
+    tenant = "tenant-ttl"
+    await cache.set_snapshot(tenant, {"engine_active": True, "passed": 3})
+    await asyncio.sleep((STREAM_INTERVAL_MS * 2) / 1000)
+    hit = await cache.get_snapshot(tenant)
+    assert hit is not None
+    assert hit["passed"] == 3
 
 
 @pytest.mark.asyncio
@@ -113,6 +142,31 @@ def test_apply_engine_stopped_overlay() -> None:
     assert out["engine_enabled"] is False
     assert out["engine_active"] is False
     assert out["feed_source"] == "stopped"
+
+
+def test_annotate_snapshot_freshness_marks_stale_before_ttl() -> None:
+    """Age past FRESH but under TTL must still be servable as stale."""
+    import time
+
+    from app.domains.signal_engine import _annotate_snapshot_freshness
+    from app.domains.signal_engine_constants import SNAPSHOT_FRESH_MS, SNAPSHOT_TTL_MS
+
+    assert SNAPSHOT_FRESH_MS < SNAPSHOT_TTL_MS
+    # Just older than fresh window.
+    computed = int(time.time() * 1000) - (SNAPSHOT_FRESH_MS + 100)
+    out = _annotate_snapshot_freshness({"passed": 1, "computed_at_ms": computed})
+    assert out["snapshot_stale"] is True
+    assert out["data_age_ms"] is not None
+    assert out["data_age_ms"] > SNAPSHOT_FRESH_MS
+
+
+def test_annotate_snapshot_freshness_unknown_without_computed_at() -> None:
+    from app.domains.signal_engine import _annotate_snapshot_freshness
+
+    out = _annotate_snapshot_freshness({"passed": 1})
+    assert out["data_age_ms"] is None
+    assert out["snapshot_stale"] is None
+    assert "computed_at_ms" not in out
 
 
 @pytest.mark.asyncio

@@ -378,3 +378,128 @@ async def test_options_lab_stream_denies_end_user(options_lab_db, tenant_a) -> N
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         denied = await client.get("/admin/options-lab/stream", headers=headers)
         assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_options_lab_idle_does_not_clear_when_signal_synced(monkeypatch) -> None:
+    from app.domains.kite_ticker_hub import get_kite_ticker_hub
+    from app.domains.options_lab_worker import OptionsLabWorker
+
+    hub = get_kite_ticker_hub()
+    hub._tenants["keep-me"] = type("F", (), {"stop": asyncio.Event(), "task": None})()
+    cleared: list[str] = []
+
+    async def _clear(tenant_id: str) -> None:
+        cleared.append(tenant_id)
+
+    async def _async_empty():
+        return []
+
+    async def _async_true():
+        return True
+
+    monkeypatch.setattr(hub, "clear_tenant", _clear)
+    monkeypatch.setattr(
+        "app.domains.options_lab_worker.ol_cache.list_watched",
+        _async_empty,
+    )
+    monkeypatch.setattr(
+        "app.domains.options_lab_worker._sync_signal_engine_watchers",
+        _async_true,
+    )
+
+    worker = OptionsLabWorker()
+    for _ in range(5):
+        assert await worker.tick() is True
+    assert worker._idle_clear_ticks == 0
+    assert cleared == []
+    hub._tenants.pop("keep-me", None)
+
+
+@pytest.mark.asyncio
+async def test_options_lab_idle_resets_counter_after_transient_signal_fail(
+    monkeypatch,
+) -> None:
+    """A brief signal_synced=False must not leave the counter primed to wipe."""
+    from app.domains.kite_ticker_hub import get_kite_ticker_hub
+    from app.domains.options_lab_worker import OptionsLabWorker
+
+    hub = get_kite_ticker_hub()
+    hub._tenants["keep-me"] = type("F", (), {"stop": asyncio.Event(), "task": None})()
+    cleared: list[str] = []
+    sync_results = iter([False, True, True])
+
+    async def _clear(tenant_id: str) -> None:
+        cleared.append(tenant_id)
+
+    async def _async_empty():
+        return []
+
+    async def _sync():
+        return next(sync_results)
+
+    monkeypatch.setattr(hub, "clear_tenant", _clear)
+    monkeypatch.setattr(
+        "app.domains.options_lab_worker.ol_cache.list_watched",
+        _async_empty,
+    )
+    monkeypatch.setattr(
+        "app.domains.options_lab_worker._sync_signal_engine_watchers",
+        _sync,
+    )
+
+    worker = OptionsLabWorker()
+    assert await worker.tick() is False
+    assert worker._idle_clear_ticks == 1
+    assert await worker.tick() is True
+    assert worker._idle_clear_ticks == 0
+    assert cleared == []
+    hub._tenants.pop("keep-me", None)
+
+
+@pytest.mark.asyncio
+async def test_options_lab_idle_wipes_hub_after_sustained_idle(monkeypatch) -> None:
+    from app.domains.kite_ticker_hub import get_kite_ticker_hub
+    from app.domains.options_lab_worker import OptionsLabWorker
+
+    hub = get_kite_ticker_hub()
+    hub._tenants["gone"] = type("F", (), {"stop": asyncio.Event(), "task": None})()
+    cleared: list[str] = []
+
+    async def _clear(tenant_id: str) -> None:
+        cleared.append(tenant_id)
+        hub._tenants.pop(tenant_id, None)
+
+    async def _async_empty():
+        return []
+
+    async def _async_false():
+        return False
+
+    monkeypatch.setattr(hub, "clear_tenant", _clear)
+    monkeypatch.setattr(
+        "app.domains.options_lab_worker.ol_cache.list_watched",
+        _async_empty,
+    )
+    monkeypatch.setattr(
+        "app.domains.options_lab_worker._sync_signal_engine_watchers",
+        _async_false,
+    )
+
+    worker = OptionsLabWorker()
+    assert await worker.tick() is False
+    assert await worker.tick() is False
+    assert cleared == []
+    assert await worker.tick() is False
+    assert cleared == ["gone"]
+    assert worker._idle_clear_ticks == 0
+
+
+def test_price_divisor_cds_vs_bcd() -> None:
+    from app.domains.kite_ticker_hub import _price_divisor
+
+    assert _price_divisor(3) == 10_000_000.0  # CDS
+    assert _price_divisor(6) == 10_000.0  # BCD
+    assert _price_divisor(0x103) == 10_000_000.0
+    assert _price_divisor(0x106) == 10_000.0
+    assert _price_divisor(256 + 1) == 100.0  # NSE equity

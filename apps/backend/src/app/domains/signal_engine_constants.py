@@ -21,6 +21,13 @@ TIER_TTL_MS: dict[Tier, int] = {
 TICKER_IDLE_POLL_SECONDS = 2.0
 
 WATCH_TTL_SECONDS = 2
-# Coalesce concurrent stream readers; refresh at stream cadence (not 2× slower).
-SNAPSHOT_TTL_MS = STREAM_INTERVAL_MS
-LOCK_TTL_MS = max(BROKER_QUOTE_TTL_MS, STREAM_INTERVAL_MS * 2)
+# Redis keeps last-good longer than the badge "fresh" window so SSE can serve
+# stale frames (snapshot_stale=true) instead of missing and cold-recomputing.
+SNAPSHOT_FRESH_MS = 2_000  # ~16 stream ticks
+SNAPSHOT_TTL_MS = 15_000
+# Short lock TTL so a killed worker self-heals quickly; holders must heartbeat.
+LOCK_TTL_MS = 10_000
+LOCK_HEARTBEAT_SECONDS = 3.0
+
+# How long SSE waits for an in-flight compute before starting its own.
+STREAM_COMPUTE_WAIT_MS = 3_000

@@ -84,6 +84,9 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   const [wings, setWings] = useState<number>(15);
   const [snapshot, setSnapshot] = useState<OptionsChainSnapshot | null>(null);
   const [screener, setScreener] = useState<OptionsScreenerSnapshot | null>(null);
+  const [screenerUniverse, setScreenerUniverse] = useState<
+    "indices" | "equities" | "all"
+  >("indices");
   const [error, setError] = useState<string | null>(null);
   const [screenerError, setScreenerError] = useState<string | null>(null);
   const [resettingOi, setResettingOi] = useState(false);
@@ -136,7 +139,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
     try {
       const token = await getAccessToken();
       if (!token || !mounted.current) return;
-      const data = await getOptionsScreener(token);
+      const data = await getOptionsScreener(token, screenerUniverse);
       if (!mounted.current || seq !== screenerSeq.current) return;
       setScreener(data);
       setScreenerError(data.ok ? null : data.error ?? "Screener unavailable");
@@ -145,7 +148,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
         setScreenerError(err instanceof Error ? err.message : "Failed to load screener");
       }
     }
-  }, [getAccessToken]);
+  }, [getAccessToken, screenerUniverse]);
 
   const onResetIvHistory = useCallback(async () => {
     setResettingIv(true);
@@ -630,6 +633,10 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
       {view === "screener" ? (
         <OptionsLabScreenerPanel
           snapshot={screener}
+          universe={screenerUniverse}
+          onUniverseChange={(next) => {
+            setScreenerUniverse(next);
+          }}
           onRefresh={() => void refreshScreener()}
           onResetBaseline={() => void onResetScreenerBaseline()}
           resetting={resettingScreener}
