@@ -161,30 +161,51 @@ export function StockBrokerWorkspace({
             <div
               role="tablist"
               aria-label="Trading desk views"
-              className="inline-flex rounded-lg border border-line bg-canvas/60 p-1"
+              className="grid w-full max-w-xl grid-cols-2 gap-1 rounded-xl border border-line bg-canvas/70 p-1.5"
             >
               {(
                 [
-                  ["signals", "Signal Engine"],
-                  ["options-lab", "Options Lab"],
+                  {
+                    id: "signals" as const,
+                    label: "Signal Engine",
+                    hint: "Checklist & live feeds",
+                  },
+                  {
+                    id: "options-lab" as const,
+                    label: "Options Lab",
+                    hint: "Chain, builder & Greeks",
+                  },
                 ] as const
-              ).map(([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  role="tab"
-                  aria-selected={deskTab === id}
-                  onClick={() => setDeskTab(id)}
-                  className={cn(
-                    "rounded-md px-3 py-1.5 text-sm font-medium transition",
-                    deskTab === id
-                      ? "bg-raised text-ink shadow-sm"
-                      : "text-slate-muted hover:text-ink",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
+              ).map(({ id, label, hint }) => {
+                const selected = deskTab === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    onClick={() => setDeskTab(id)}
+                    className={cn(
+                      "rounded-lg px-3 py-2.5 text-left transition duration-150",
+                      selected
+                        ? "bg-raised text-ink shadow-sm ring-1 ring-line/80"
+                        : "text-slate-muted hover:bg-raised/50 hover:text-ink",
+                    )}
+                  >
+                    <span className="font-display block text-base font-semibold tracking-tight">
+                      {label}
+                    </span>
+                    <span
+                      className={cn(
+                        "mt-0.5 block text-[11px] leading-snug",
+                        selected ? "text-slate-muted" : "text-slate-muted/80",
+                      )}
+                    >
+                      {hint}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
             {deskTab === "signals" ? (
               <SignalMetricsPanel />

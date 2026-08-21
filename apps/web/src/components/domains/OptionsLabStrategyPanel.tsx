@@ -10,6 +10,8 @@ import {
   buildStrategyFromTemplate,
   chainLegPremium,
   estimateProbabilityOfProfit,
+  estimateStrategyGreeks,
+  formatOptionContractName,
   istSessionHourKey,
   resolveDaysToExpiry,
   summarizeStrategy,
@@ -207,22 +209,17 @@ export function OptionsLabStrategyPanel({
         .join("|"),
     [legs, rows],
   );
-  const [sessionHourBucket, setSessionHourBucket] = useState(() => istSessionHourKey());
+  const [pinnedNow, setPinnedNow] = useState(() => new Date());
   useEffect(() => {
+    let lastKey = istSessionHourKey();
     const id = window.setInterval(() => {
-      setSessionHourBucket((prev) => {
-        const next = istSessionHourKey();
-        return prev === next ? prev : next;
-      });
+      const next = istSessionHourKey();
+      if (next === lastKey) return;
+      lastKey = next;
+      setPinnedNow(new Date());
     }, 60_000);
     return () => window.clearInterval(id);
   }, []);
-
-  // Clock pinned to IST hour bucket so DTE/PoP recompute intraday without render thrash.
-  const now = useMemo(() => {
-    // sessionHourBucket is the intentional invalidation key (YYYY-MM-DDTHH).
-    return sessionHourBucket ? new Date() : new Date();
-  }, [sessionHourBucket]);
 
   // Memoize DTE against symbol/FUT + IST hour — expiry-day fractions stay honest.
   const daysToExpiry = useMemo(() => {
@@ -234,13 +231,13 @@ export function OptionsLabStrategyPanel({
         futSymbol: snapshot?.fut_symbol,
         optionSymbols: symbols,
       },
-      now,
+      pinnedNow,
     );
     if (resolved != null) return resolved;
     // Decoded-but-expired options → null (PoP —). Demo with no expiry meta → 7d.
     if (symbols.length > 0) return null;
     return 7;
-  }, [now, optionSymbolsKey, snapshot?.fut_symbol]);
+  }, [pinnedNow, optionSymbolsKey, snapshot?.fut_symbol]);
 
   // Forward after DTE so the ATM basis guard can tighten near expiry (no cycle).
   const forward = useMemo(
@@ -268,17 +265,49 @@ export function OptionsLabStrategyPanel({
     });
   }, [blendedIv, daysToExpiry, forward, legs, strikeStep]);
 
+  const greeks = useMemo(
+    () =>
+      estimateStrategyGreeks(legs, rows, {
+        forward,
+        daysToExpiry,
+        atmIv,
+      }),
+    [atmIv, daysToExpiry, forward, legs, rows],
+  );
+  const greeksById = useMemo(() => {
+    const map = new Map(greeks.legs.map((leg) => [leg.id, leg]));
+    return map;
+  }, [greeks.legs]);
+
   const missingQuotes = legs.some((leg) => leg.quoteMissing);
+  // Greeks are premium-independent — keep nets even when some LTPs are missing.
   const summaryForDisplay = missingQuotes
     ? {
         ...summary,
         netPremium: null,
+        netDelta: greeks.netDelta,
+        netGamma: greeks.netGamma,
+        netTheta: greeks.netTheta,
+        netVega: greeks.netVega,
+        thetaPerHour: greeks.thetaPerHour,
         breakevens: [],
         maxProfit: null,
         maxLoss: null,
         pop: null as number | null,
       }
-    : { ...summary, pop };
+    : {
+        ...summary,
+        netDelta: greeks.netDelta,
+        netGamma: greeks.netGamma,
+        netTheta: greeks.netTheta,
+        netVega: greeks.netVega,
+        thetaPerHour: greeks.thetaPerHour,
+        pop,
+      };
+
+  const thetaLabel = summaryForDisplay.thetaPerHour ? "Θ Theta /h" : "Θ Theta /d";
+  const formatGamma = (value: number | null | undefined) =>
+    formatNum(value == null ? null : value * 100, 3);
 
   function updateLegPremium(id: string, premium: number) {
     if (Number.isNaN(premium)) return;
@@ -357,13 +386,16 @@ export function OptionsLabStrategyPanel({
             </div>
           ) : null}
 
-          <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
             {[
               ["Net premium", formatNum(summaryForDisplay.netPremium)],
-              ["Net Δ", formatNum(summaryForDisplay.netDelta, 3)],
               ["Max profit†", formatExtreme(summaryForDisplay.maxProfit)],
               ["Max loss†", formatExtreme(summaryForDisplay.maxLoss)],
               ["PoP‡", formatPop(summaryForDisplay.pop)],
+              ["Δ Delta", formatNum(summaryForDisplay.netDelta, 3)],
+              ["Γ Gamma /100pts", formatGamma(summaryForDisplay.netGamma)],
+              [thetaLabel, formatNum(summaryForDisplay.netTheta, 2)],
+              ["ν Vega /1%", formatNum(summaryForDisplay.netVega, 2)],
             ].map(([label, value]) => (
               <div key={label} className="rounded-md border border-line/70 bg-raised/40 px-2 py-1.5">
                 <div className="text-[10px] uppercase tracking-wide text-slate-muted">{label}</div>
@@ -384,6 +416,12 @@ export function OptionsLabStrategyPanel({
           )}
           <p className="text-[10px] text-slate-muted">
             † Max profit/loss at expiry; unlimited risk or reward shown as Unlimited.
+          </p>
+          <p className="text-[10px] text-slate-muted">
+            Greeks are Black-76 model estimates (r=0) from leg IV — not exchange prints. Γ is per
+            100 pts of forward; Θ is per{" "}
+            {summaryForDisplay.thetaPerHour ? "hour when under 1 day to expiry" : "calendar day"}; ν
+            is per 1 vol point.
           </p>
           <p className="text-[10px] text-slate-muted">
             ‡ PoP is an IV-implied estimate at expiry
@@ -456,43 +494,67 @@ export function OptionsLabStrategyPanel({
           <thead className="bg-raised/90 text-[10px] uppercase tracking-wide text-slate-muted">
             <tr>
               <th className="px-3 py-2">Side</th>
-              <th className="px-3 py-2">Type</th>
+              <th className="px-3 py-2">Contract</th>
               <th className="px-3 py-2">Strike</th>
               <th className="px-3 py-2">Premium</th>
-              <th className="px-3 py-2">Δ</th>
+              <th className="px-3 py-2">Δ Delta</th>
+              <th className="px-3 py-2">Γ /100pts</th>
+              <th className="px-3 py-2">{summaryForDisplay.thetaPerHour ? "Θ /h" : "Θ /d"}</th>
+              <th className="px-3 py-2">ν Vega</th>
             </tr>
           </thead>
           <tbody>
-            {legs.map((leg) => (
-              <tr
-                key={leg.id}
-                className={cn(
-                  "border-t border-line/70",
-                  leg.quoteMissing && "bg-amber-500/5",
-                )}
-              >
-                <td className="px-3 py-2 capitalize">{leg.side}</td>
-                <td className={cn("px-3 py-2 font-medium", leg.type === "CE" ? "text-teal" : "text-rose")}>
-                  {leg.type}
-                </td>
-                <td className="px-3 py-2 tabular-nums">{leg.strike}</td>
-                <td className="px-3 py-2">
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.05}
-                    value={leg.premium}
-                    onChange={(e) => updateLegPremium(leg.id, Number(e.target.value))}
-                    className={cn(
-                      "w-24 rounded border bg-canvas px-2 py-1 tabular-nums",
-                      leg.quoteMissing ? "border-amber-500/60" : "border-line",
-                    )}
-                    title={leg.quoteMissing ? "No chain quote at this strike" : undefined}
-                  />
-                </td>
-                <td className="px-3 py-2 tabular-nums">{formatNum(leg.delta, 3)}</td>
-              </tr>
-            ))}
+            {legs.map((leg) => {
+              const row = rows.find((item) => item.strike === leg.strike);
+              const symbol = leg.type === "CE" ? row?.ce.symbol : row?.pe.symbol;
+              const name = formatOptionContractName(symbol);
+              const legGreeks = greeksById.get(leg.id);
+              return (
+                <tr
+                  key={leg.id}
+                  className={cn(
+                    "border-t border-line/70",
+                    leg.quoteMissing && "bg-amber-500/5",
+                  )}
+                >
+                  <td className="px-3 py-2 capitalize">{leg.side}</td>
+                  <td className="px-3 py-2">
+                    <div
+                      className={cn(
+                        "font-medium",
+                        leg.type === "CE" ? "text-teal" : "text-rose",
+                      )}
+                    >
+                      {name ?? `${leg.type} ${leg.strike}`}
+                    </div>
+                    {symbol ? (
+                      <div className="mt-0.5 font-mono text-[10px] text-slate-muted">{symbol}</div>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">{leg.strike}</td>
+                  <td className="px-3 py-2">
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.05}
+                      value={leg.premium}
+                      onChange={(e) => updateLegPremium(leg.id, Number(e.target.value))}
+                      className={cn(
+                        "w-24 rounded border bg-canvas px-2 py-1 tabular-nums",
+                        leg.quoteMissing ? "border-amber-500/60" : "border-line",
+                      )}
+                      title={leg.quoteMissing ? "No chain quote at this strike" : undefined}
+                    />
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">
+                    {formatNum(legGreeks?.delta, 3)}
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">{formatGamma(legGreeks?.gamma)}</td>
+                  <td className="px-3 py-2 tabular-nums">{formatNum(legGreeks?.theta, 2)}</td>
+                  <td className="px-3 py-2 tabular-nums">{formatNum(legGreeks?.vega, 2)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

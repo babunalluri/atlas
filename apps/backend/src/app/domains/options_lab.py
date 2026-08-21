@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 import math
 import time
@@ -12,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domains import options_lab_cache as ol_cache
+from app.domains.kite_ticker_hub import quote_source_for_tenant
 from app.domains.signal_engine import (
     SignalEngineService,
     UNDERLYING_PRESETS,
@@ -22,6 +25,7 @@ from app.domains.signal_engine import (
     _round_strike,
     _tenant_key,
 )
+from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
 from app.domains.options_lab_iv import (
     IVP_MIN_SAMPLES,
     build_iv_chart_payload,
@@ -143,8 +147,14 @@ def _parse_greek(row: dict[str, Any] | None, key: str) -> float | None:
 
 
 def _leg_from_quote(row: dict[str, Any] | None, *, symbol: str) -> dict[str, Any]:
+    token_raw = (row or {}).get("instrument_token")
+    try:
+        instrument_token = int(token_raw) if token_raw is not None else None
+    except (TypeError, ValueError):
+        instrument_token = None
     return {
         "symbol": symbol,
+        "instrument_token": instrument_token,
         "ltp": _pick_float(row or {}, "last_price", "ltp", "last"),
         "oi": _pick_float(row or {}, "open_interest", "oi"),
         "volume": _pick_float(row or {}, "volume"),
@@ -672,6 +682,63 @@ def mock_chain_snapshot(config: OptionsLabConfig, *, wings: int) -> dict[str, An
         },
         "rows": rows,
     }
+
+
+async def chain_state_for_stream(
+    service: "OptionsLabService",
+    *,
+    wings: int = DEFAULT_WINGS,
+) -> dict[str, Any]:
+    """Coalesce concurrent Options Lab stream readers to one chain tick per key."""
+    wings = _clamp_wings(wings)
+    config = await service._read_config()
+    tenant_id = _tenant_key(service.context)
+    fingerprint = config.cache_fingerprint()
+
+    snapshot = await ol_cache.get_snapshot(
+        tenant_id, wings=wings, fingerprint=fingerprint
+    )
+    if snapshot is not None:
+        return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
+
+    if await ol_cache.try_compute_lock(tenant_id, wings=wings, fingerprint=fingerprint):
+        try:
+            snapshot = await ol_cache.get_snapshot(
+                tenant_id, wings=wings, fingerprint=fingerprint
+            )
+            if snapshot is not None:
+                return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
+            payload = await service.chain_snapshot(wings=wings)
+            await ol_cache.set_snapshot(
+                tenant_id, payload, wings=wings, fingerprint=fingerprint
+            )
+            return _decorate_stream_payload(payload, tenant_id=tenant_id)
+        finally:
+            await ol_cache.release_compute_lock(
+                tenant_id, wings=wings, fingerprint=fingerprint
+            )
+
+    for _ in range(8):
+        await asyncio.sleep(STREAM_INTERVAL_MS / 1000 / 4)
+        snapshot = await ol_cache.get_snapshot(
+            tenant_id, wings=wings, fingerprint=fingerprint
+        )
+        if snapshot is not None:
+            return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
+
+    payload = await service.chain_snapshot(wings=wings)
+    await ol_cache.set_snapshot(
+        tenant_id, payload, wings=wings, fingerprint=fingerprint
+    )
+    return _decorate_stream_payload(payload, tenant_id=tenant_id)
+
+
+def _decorate_stream_payload(payload: dict[str, Any], *, tenant_id: str) -> dict[str, Any]:
+    out = dict(payload)
+    out["poll_ms"] = STREAM_INTERVAL_MS
+    out["stream"] = True
+    out["quote_source"] = quote_source_for_tenant(tenant_id)
+    return out
 
 
 class OptionsLabService:

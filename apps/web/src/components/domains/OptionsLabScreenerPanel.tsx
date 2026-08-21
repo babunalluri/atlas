@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { HistoryIcon, RefreshIcon } from "@/components/ui/icons";
 import type { OptionsScreenerRow, OptionsScreenerSnapshot } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
@@ -132,10 +133,16 @@ export function OptionsLabScreenerPanel({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" disabled={resetting} onClick={onResetBaseline}>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<HistoryIcon />}
+            disabled={resetting}
+            onClick={onResetBaseline}
+          >
             Reset session baselines
           </Button>
-          <Button variant="secondary" size="sm" onClick={onRefresh}>
+          <Button variant="secondary" size="sm" icon={<RefreshIcon />} onClick={onRefresh}>
             Refresh
           </Button>
         </div>

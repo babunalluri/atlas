@@ -3818,6 +3818,9 @@ export interface OptionsChainSnapshot {
   strike_step?: number;
   wings?: number;
   fetched_at?: number;
+  poll_ms?: number;
+  stream?: boolean;
+  quote_source?: "ticker" | "rest" | string;
   warnings?: string[];
   summary?: {
     pcr: number | null;

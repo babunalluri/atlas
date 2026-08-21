@@ -1489,8 +1489,34 @@ class SignalEngineService:
         if hit is not None:
             return hit
 
+        # Live ticker book overlays REST so LTP/OI stay hot without dropping IV.
+        try:
+            from app.domains.kite_ticker_hub import (
+                assemble_quotes_from_book,
+                overlay_ticker_rows,
+            )
+
+            ticker_partial = (
+                await assemble_quotes_from_book(tenant_id, symbols, require_all=False)
+                or {}
+            )
+        except Exception:
+            ticker_partial = {}
+
+        # Ticker-only is fine for LTP-style callers; get_quote needs REST for IV/greeks.
+        if (
+            prefer != "get_quote"
+            and ticker_partial
+            and len(ticker_partial) == len(symbols)
+        ):
+            await _cache_set(tenant_id, cached_key, "broker", ticker_partial)
+            return ticker_partial
+
         fns = await self._quote_tools()
         if not fns:
+            if ticker_partial:
+                await _cache_set(tenant_id, cached_key, "broker", ticker_partial)
+                return ticker_partial
             return {}
 
         if prefer:
@@ -1511,6 +1537,8 @@ class SignalEngineService:
                 merged.update(_normalize_quote_payload(result))
             if merged:
                 break
+        if ticker_partial:
+            merged = overlay_ticker_rows(merged, ticker_partial)
         await _cache_set(tenant_id, cached_key, "broker", merged)
         return merged
 

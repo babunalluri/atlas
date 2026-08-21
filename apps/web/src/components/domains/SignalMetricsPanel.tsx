@@ -6,9 +6,9 @@ import { SignalSetupBar } from "@/components/domains/SignalSetupBar";
 import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Badge } from "@/components/ui/Badge";
-import { Button, buttonClassName } from "@/components/ui/Button";
+import { Button } from "@/components/ui/Button";
 import { FieldHint, Input, Label, Textarea } from "@/components/ui/Field";
-import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon, ChevronDownIcon } from "@/components/ui/icons";
+import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon, ChevronDownIcon, ArrowUpIcon } from "@/components/ui/icons";
 import {
   getSignalState,
   publishSignalEntry,
@@ -336,15 +336,31 @@ function defaultNotifyBody(
 }
 
 function notifyBellButtonClass(tone: BuySignalTone): string {
+  // Full class sets — do not stack on variant="secondary" (cn has no twMerge;
+  // bg-raised + text-white would make the icon invisible).
+  const base =
+    "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-[color,background-color,border-color,opacity] duration-150 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas";
   switch (tone) {
     case "ready":
-      return "bg-teal text-white hover:bg-teal-bright focus-visible:ring-teal-bright/45";
+      return cn(
+        base,
+        "border-teal bg-teal text-white hover:bg-teal-bright focus-visible:ring-teal-bright/45",
+      );
     case "blocked":
-      return "bg-rose text-white hover:bg-rose/90 focus-visible:ring-rose/45";
+      return cn(
+        base,
+        "border-rose bg-rose text-white hover:bg-rose/90 focus-visible:ring-rose/45",
+      );
     case "waiting":
-      return "bg-amber-500 text-white hover:bg-amber-600 focus-visible:ring-amber-400/45";
+      return cn(
+        base,
+        "border-amber-500 bg-amber-500 text-white hover:bg-amber-600 focus-visible:ring-amber-400/45",
+      );
     default:
-      return "bg-fog text-slate-muted hover:bg-mist focus-visible:ring-line/50";
+      return cn(
+        base,
+        "border-line bg-fog text-slate-muted hover:bg-mist focus-visible:ring-line/50",
+      );
   }
 }
 
@@ -416,19 +432,26 @@ function NotifySignalDialog({
           <Button variant="secondary" onClick={onClose} disabled={publishing}>
             Cancel
           </Button>
-          <Button
-            variant={tone === "blocked" ? "danger" : tone === "waiting" ? "secondary" : "accent"}
-            className={cn(
-              tone === "waiting" &&
-                "border-amber-400 bg-amber-500 text-white hover:bg-amber-600",
-              tone === "ready" && "bg-teal hover:bg-teal-bright",
-            )}
-            icon={<BellIcon />}
-            disabled={publishing || !title.trim() || !body.trim()}
-            onClick={onSend}
-          >
-            {publishing ? "Sending…" : "Send notification"}
-          </Button>
+          {tone === "waiting" ? (
+            <button
+              type="button"
+              disabled={publishing || !title.trim() || !body.trim()}
+              onClick={onSend}
+              className="inline-flex items-center justify-center gap-1.5 rounded-md border border-amber-500 bg-amber-500 px-3.5 py-2 text-sm font-medium text-white transition-[color,background-color,opacity] hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/45 focus-visible:ring-offset-1 focus-visible:ring-offset-canvas"
+            >
+              <BellIcon />
+              {publishing ? "Sending…" : "Send notification"}
+            </button>
+          ) : (
+            <Button
+              variant={tone === "blocked" ? "danger" : "accent"}
+              icon={<BellIcon />}
+              disabled={publishing || !title.trim() || !body.trim()}
+              onClick={onSend}
+            >
+              {publishing ? "Sending…" : "Send notification"}
+            </Button>
+          )}
         </div>
       </div>
     </AdminFormDialog>
@@ -518,10 +541,7 @@ function BuySignalBanner({
                   : "Notify all users with current signal snapshot"
           }
           onClick={onOpenNotify}
-          className={cn(
-            buttonClassName({ variant: "secondary", size: "icon" }),
-            notifyBellButtonClass(tone),
-          )}
+          className={notifyBellButtonClass(tone)}
         >
           <BellIcon />
         </button>
@@ -1126,10 +1146,20 @@ export function SignalMetricsPanel() {
         ) : (
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-end gap-2 px-1">
-              <Button variant="secondary" size="sm" onClick={expandAllCategories}>
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<ChevronDownIcon />}
+                onClick={expandAllCategories}
+              >
                 Expand all
               </Button>
-              <Button variant="secondary" size="sm" onClick={collapseAllCategories}>
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<ArrowUpIcon />}
+                onClick={collapseAllCategories}
+              >
                 Collapse all
               </Button>
             </div>

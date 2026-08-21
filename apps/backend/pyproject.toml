@@ -81,6 +81,7 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "valyu>=0.1",
   "webexpythonsdk>=2.0",
+  "websockets>=12.0",
   "wikipedia>=1.4",
   "yfinance>=0.2",
   "youtube-transcript-api>=0.6",

@@ -8,7 +8,7 @@ import {
 } from "@/components/domains/options-lab-portfolio";
 import { Button } from "@/components/ui/Button";
 import { Label } from "@/components/ui/Field";
-import { RefreshIcon } from "@/components/ui/icons";
+import { RefreshIcon, TrashIcon, UploadIcon } from "@/components/ui/icons";
 import {
   createOptionsPortfolio,
   deleteOptionsPortfolio,
@@ -243,6 +243,7 @@ export function OptionsLabPortfoliosPanel({
             type="button"
             variant="secondary"
             size="sm"
+            icon={<UploadIcon />}
             disabled={importing || mock}
             onClick={() => void onImportKite()}
             title={mock ? "Disable mock for Kite import" : undefined}
@@ -344,6 +345,7 @@ export function OptionsLabPortfoliosPanel({
                   variant="ghost"
                   size="sm"
                   className="text-rose"
+                  icon={<TrashIcon />}
                   onClick={() => void onDelete(selected.id)}
                 >
                   Delete

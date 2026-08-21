@@ -25,13 +25,14 @@ import {
   type OptionsScreenerRow,
   type OptionsScreenerSnapshot,
 } from "@/lib/api/admin";
+import { streamOptionsChain } from "@/lib/api/options-lab-stream";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
 
-const POLL_MS = 2_000;
 const SCREENER_POLL_MS = 60_000;
 const WING_OPTIONS = [10, 15, 20] as const;
-type LabView = "chain" | "oi" | "straddle" | "builder" | "screener" | "iv" | "portfolios";
+type LabView = "chain" | "builder" | "screener" | "portfolios";
+type ChainPane = "table" | "oi" | "straddle" | "iv";
 
 type PendingPortfolioSave = {
   name: string;
@@ -79,6 +80,7 @@ function LegCell({ leg, tone }: { leg: OptionsChainLeg; tone: "ce" | "pe" }) {
 export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [view, setView] = useState<LabView>("chain");
+  const [chainPane, setChainPane] = useState<ChainPane>("table");
   const [wings, setWings] = useState<number>(15);
   const [snapshot, setSnapshot] = useState<OptionsChainSnapshot | null>(null);
   const [screener, setScreener] = useState<OptionsScreenerSnapshot | null>(null);
@@ -90,6 +92,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   const [pendingPortfolioSave, setPendingPortfolioSave] = useState<PendingPortfolioSave | null>(
     null,
   );
+  const [streaming, setStreaming] = useState(false);
   const mounted = useRef(true);
   const refreshSeq = useRef(0);
   const screenerSeq = useRef(0);
@@ -202,13 +205,79 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
     };
   }, []);
 
+  const streamGeneration = useRef(0);
+
   useEffect(() => {
     if (!active || !isLoaded || !isSignedIn || !configReady) return;
     if (!config?.underlying_symbol?.trim() || !config.fut_symbol?.trim()) return;
     if (view === "screener" || view === "portfolios") return;
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), POLL_MS);
-    return () => window.clearInterval(timer);
+
+    const controller = new AbortController();
+    const myGeneration = ++streamGeneration.current;
+    let cancelled = false;
+    setStreaming(true);
+
+    void (async () => {
+      let attempt = 0;
+      while (!cancelled && myGeneration === streamGeneration.current) {
+        try {
+          const token = await getAccessToken();
+          if (!token || !mounted.current || controller.signal.aborted) return;
+          setStreaming(true);
+          let gotFrame = false;
+          await streamOptionsChain({
+            accessToken: token,
+            wings,
+            signal: controller.signal,
+            onState: (data) => {
+              if (
+                !mounted.current ||
+                controller.signal.aborted ||
+                myGeneration !== streamGeneration.current
+              ) {
+                return;
+              }
+              if (!gotFrame) {
+                gotFrame = true;
+                attempt = 0;
+              }
+              setSnapshot(data);
+              setError(data.ok ? null : data.error ?? "Chain unavailable");
+            },
+          });
+          // Clean EOF — reconnect with light backoff unless aborted.
+          if (controller.signal.aborted || cancelled) return;
+          if (mounted.current && myGeneration === streamGeneration.current) {
+            setStreaming(false);
+          }
+          attempt += 1;
+        } catch (err) {
+          if (
+            !mounted.current ||
+            controller.signal.aborted ||
+            cancelled ||
+            myGeneration !== streamGeneration.current
+          ) {
+            return;
+          }
+          setStreaming(false);
+          setError(err instanceof Error ? err.message : "Options Lab stream failed");
+          if (attempt === 0) void refresh();
+          attempt += 1;
+        }
+        if (controller.signal.aborted || cancelled) return;
+        const delayMs = Math.min(8_000, 500 * 2 ** Math.min(attempt - 1, 4));
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      }
+      if (mounted.current && myGeneration === streamGeneration.current) {
+        setStreaming(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [
     active,
     config?.fut_symbol,
@@ -216,6 +285,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
     config?.strike_step,
     config?.underlying_symbol,
     configReady,
+    getAccessToken,
     isLoaded,
     isSignedIn,
     refresh,
@@ -262,35 +332,52 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
 
   return (
     <section className="mt-5 flex min-h-[min(68vh,52rem)] flex-col rounded-xl border border-line bg-raised/20 p-4">
-      <header className="border-b border-line pb-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              {snapshot?.mock ? <Badge tone="info">Mock</Badge> : null}
-              {snapshot?.ok && !snapshot?.mock ? (
-                <Badge tone="success" live>
-                  Live
-                </Badge>
-              ) : snapshot?.ok ? null : (
-                <Badge tone="warning">Offline</Badge>
-              )}
-              {saveLabel ? (
-                <span className="text-xs text-slate-muted">{saveLabel}</span>
-              ) : null}
-            </div>
-            <p className="mt-1 text-sm text-slate-muted">
-              Chain, OI, straddle, IV, builder, screener, portfolios · ATM ±{wings} · refreshed{" "}
-              {fetchedLabel ?? "…"}
-            </p>
+      <header className="pb-0">
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {snapshot?.mock ? <Badge tone="info">Mock</Badge> : null}
+            {snapshot?.ok && !snapshot?.mock ? (
+              <Badge tone="success" live>
+                Live
+              </Badge>
+            ) : snapshot?.ok ? null : (
+              <Badge tone="warning">Offline</Badge>
+            )}
+            {view !== "screener" && view !== "portfolios" ? (
+              <Badge tone={streaming ? "success" : "warning"} dot={false}>
+                Stream {streaming ? "connected" : "…"}
+              </Badge>
+            ) : null}
+            <span className="text-xs text-slate-muted tabular-nums">
+              ATM ±{wings} · refreshed {fetchedLabel ?? "…"}
+              {snapshot?.quote_source ? ` · ${snapshot.quote_source}` : ""}
+            </span>
+            {saveLabel ? (
+              <span className="text-xs text-slate-muted">{saveLabel}</span>
+            ) : null}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <label
+              htmlFor="options-lab-mock"
+              title="Rehearsal mode — demo chain without live Kite quotes"
+              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-ink"
+            >
+              <input
+                id="options-lab-mock"
+                type="checkbox"
+                checked={Boolean(config?.mock)}
+                onChange={(e) => patchConfig({ mock: e.target.checked })}
+                className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
+              />
+              Mock feed
+            </label>
             <label className="flex items-center gap-2 text-xs text-slate-muted">
               Wings
               <select
                 value={wings}
                 onChange={(event) => setWings(Number(event.target.value))}
                 className="rounded-md border border-line bg-canvas px-2 py-1 text-xs text-ink"
-                disabled={view === "screener" || view === "iv" || view === "portfolios"}
+                disabled={view === "screener" || view === "portfolios"}
               >
                 {WING_OPTIONS.map((value) => (
                   <option key={value} value={value}>
@@ -299,7 +386,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                 ))}
               </select>
             </label>
-            {view === "iv" ? (
+            {view === "chain" && chainPane === "iv" ? (
               <Button
                 variant="secondary"
                 size="sm"
@@ -309,7 +396,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                 Reset IV history
               </Button>
             ) : null}
-            {view === "oi" ? (
+            {view === "chain" && chainPane === "oi" ? (
               <Button
                 variant="secondary"
                 size="sm"
@@ -335,16 +422,13 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
         <div
           role="tablist"
           aria-label="Options Lab views"
-          className="mt-3 inline-flex rounded-lg border border-line bg-canvas/60 p-1"
+          className="flex flex-wrap gap-x-1 border-b border-line"
         >
           {(
             [
               ["chain", "Chain"],
-              ["oi", "OI"],
-              ["straddle", "Straddle"],
               ["builder", "Builder"],
               ["screener", "Screener"],
-              ["iv", "IV"],
               ["portfolios", "Portfolios"],
             ] as const
           ).map(([id, label]) => (
@@ -355,10 +439,10 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
               aria-selected={view === id}
               onClick={() => setView(id)}
               className={cn(
-                "rounded-md px-3 py-1.5 text-sm font-medium transition",
+                "border-b-2 px-3 py-2 text-sm font-medium transition",
                 view === id
-                  ? "bg-raised text-ink shadow-sm"
-                  : "text-slate-muted hover:text-ink",
+                  ? "border-ink text-ink"
+                  : "border-transparent text-slate-muted hover:text-ink",
               )}
             >
               {label}
@@ -414,89 +498,133 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
 
       {view === "chain" ? (
         <>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-8">
-            {[
-              ["Spot", formatNum(snapshot?.spot)],
-              ["ATM", snapshot?.atm != null ? String(snapshot.atm) : "—"],
-              ["PCR", formatNum(summary?.pcr, 3)],
-              ["Max pain", summary?.max_pain != null ? String(summary.max_pain) : "—"],
-              ["ATM IV", formatNum(summary?.atm_iv, 1)],
-              ["IVP", summary?.ivp != null ? `${Math.round(summary.ivp)}` : "—"],
-              ["CE OI", formatOi(summary?.chain_ce_oi)],
-              ["PE OI", formatOi(summary?.chain_pe_oi)],
-            ].map(([label, value]) => (
-              <div
-                key={label}
-                className="rounded-lg border border-line bg-canvas/60 px-3 py-2"
+          <div
+            role="tablist"
+            aria-label="Chain views"
+            className="mt-2 flex flex-wrap gap-x-1 border-b border-line"
+          >
+            {(
+              [
+                ["table", "Quotes"],
+                ["oi", "OI"],
+                ["straddle", "Straddle"],
+                ["iv", "IV"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={chainPane === id}
+                onClick={() => setChainPane(id)}
+                className={cn(
+                  "border-b-2 px-3 py-1.5 text-sm font-medium transition",
+                  chainPane === id
+                    ? "border-ink text-ink"
+                    : "border-transparent text-slate-muted hover:text-ink",
+                )}
               >
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-muted">
-                  {label}
-                </div>
-                <div className="font-display text-base font-semibold tabular-nums text-ink">
-                  {value}
-                </div>
-              </div>
+                {label}
+              </button>
             ))}
           </div>
 
-          <div className="mt-3 min-h-0 flex-1 overflow-auto rounded-lg border border-line">
-            <table className="min-w-full border-collapse text-left text-xs">
-              <thead className="sticky top-0 z-10 bg-raised/95 backdrop-blur">
-                <tr className="border-b border-line text-[10px] uppercase tracking-wide text-slate-muted">
-                  <th className="px-3 py-2">Strike</th>
-                  <th className="px-3 py-2">Call (CE)</th>
-                  <th className="px-3 py-2">Put (PE)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr
-                    key={row.strike}
-                    className={cn(
-                      "border-b border-line/70",
-                      row.is_atm && "bg-teal/10",
-                    )}
+          {chainPane === "table" ? (
+            <>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-8">
+                {[
+                  ["Spot", formatNum(snapshot?.spot)],
+                  ["ATM", snapshot?.atm != null ? String(snapshot.atm) : "—"],
+                  ["PCR", formatNum(summary?.pcr, 3)],
+                  ["Max pain", summary?.max_pain != null ? String(summary.max_pain) : "—"],
+                  ["ATM IV", formatNum(summary?.atm_iv, 1)],
+                  ["IVP", summary?.ivp != null ? `${Math.round(summary.ivp)}` : "—"],
+                  ["CE OI", formatOi(summary?.chain_ce_oi)],
+                  ["PE OI", formatOi(summary?.chain_pe_oi)],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="rounded-lg border border-line bg-canvas/60 px-3 py-2"
                   >
-                    <td className="px-3 py-2 font-semibold tabular-nums">
-                      {row.strike}
-                      {row.is_atm ? (
-                        <span className="ml-1 text-[10px] font-medium text-teal">ATM</span>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-2">
-                      <LegCell leg={row.ce} tone="ce" />
-                    </td>
-                    <td className="px-3 py-2">
-                      <LegCell leg={row.pe} tone="pe" />
-                    </td>
-                  </tr>
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-muted">
+                      {label}
+                    </div>
+                    <div className="font-display text-base font-semibold tabular-nums text-ink">
+                      {value}
+                    </div>
+                  </div>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      ) : null}
+              </div>
 
-      {view === "oi" ? (
-        <div className="mt-3 min-h-0 flex-1">
-          {oiBaselineLabel ? (
-            <p className="mb-2 text-[11px] text-slate-muted">
-              Δ OI baseline set at {oiBaselineLabel} IST session
-            </p>
+              <div className="mt-3 min-h-0 flex-1 overflow-auto rounded-lg border border-line">
+                <table className="min-w-full border-collapse text-left text-xs">
+                  <thead className="sticky top-0 z-10 bg-raised/95 backdrop-blur">
+                    <tr className="border-b border-line text-[10px] uppercase tracking-wide text-slate-muted">
+                      <th className="px-3 py-2">Strike</th>
+                      <th className="px-3 py-2">Call (CE)</th>
+                      <th className="px-3 py-2">Put (PE)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <tr
+                        key={row.strike}
+                        className={cn(
+                          "border-b border-line/70",
+                          row.is_atm && "bg-teal/10",
+                        )}
+                      >
+                        <td className="px-3 py-2 font-semibold tabular-nums">
+                          {row.strike}
+                          {row.is_atm ? (
+                            <span className="ml-1 text-[10px] font-medium text-teal">ATM</span>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2">
+                          <LegCell leg={row.ce} tone="ce" />
+                        </td>
+                        <td className="px-3 py-2">
+                          <LegCell leg={row.pe} tone="pe" />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           ) : null}
-          <OptionsLabOiChart rows={charts?.oi ?? []} spot={snapshot?.spot ?? null} />
-        </div>
-      ) : null}
 
-      {view === "iv" ? (
-        <div className="mt-3 min-h-0 flex-1">
-          <OptionsLabIvChart
-            points={charts?.iv?.points ?? []}
-            atmIv={charts?.iv?.atm_iv ?? summary?.atm_iv ?? null}
-            ivp={charts?.iv?.ivp ?? summary?.ivp ?? null}
-            sampleDays={charts?.iv?.sample_days}
-          />
-        </div>
+          {chainPane === "oi" ? (
+            <div className="mt-3 min-h-0 flex-1">
+              {oiBaselineLabel ? (
+                <p className="mb-2 text-[11px] text-slate-muted">
+                  Δ OI baseline set at {oiBaselineLabel} IST session
+                </p>
+              ) : null}
+              <OptionsLabOiChart rows={charts?.oi ?? []} spot={snapshot?.spot ?? null} />
+            </div>
+          ) : null}
+
+          {chainPane === "iv" ? (
+            <div className="mt-3 min-h-0 flex-1">
+              <OptionsLabIvChart
+                points={charts?.iv?.points ?? []}
+                atmIv={charts?.iv?.atm_iv ?? summary?.atm_iv ?? null}
+                ivp={charts?.iv?.ivp ?? summary?.ivp ?? null}
+                sampleDays={charts?.iv?.sample_days}
+              />
+            </div>
+          ) : null}
+
+          {chainPane === "straddle" ? (
+            <div className="mt-3 min-h-0 flex-1">
+              <OptionsLabStraddleChart
+                points={charts?.straddle.points ?? []}
+                atm={charts?.straddle.atm ?? snapshot?.atm ?? null}
+              />
+            </div>
+          ) : null}
+        </>
       ) : null}
 
       {view === "screener" ? (
@@ -533,15 +661,6 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
           pendingSave={pendingPortfolioSave}
           onSaved={() => setPendingPortfolioSave(null)}
         />
-      ) : null}
-
-      {view === "straddle" ? (
-        <div className="mt-3 min-h-0 flex-1">
-          <OptionsLabStraddleChart
-            points={charts?.straddle.points ?? []}
-            atm={charts?.straddle.atm ?? snapshot?.atm ?? null}
-          />
-        </div>
       ) : null}
     </section>
   );

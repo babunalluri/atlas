@@ -423,6 +423,112 @@ export function normCdf(x: number): number {
   return x >= 0 ? 1 - p : p;
 }
 
+/** Standard normal PDF. */
+export function normPdf(x: number): number {
+  return 0.3989422804014327 * Math.exp((-x * x) / 2);
+}
+
+/** Reject junk / near-zero IV that would explode Γ (and step-function PoP). */
+export const MIN_USABLE_IV_PCT = 0.5;
+
+export function usableIvPct(iv: number | null | undefined): number | null {
+  if (iv == null || Number.isNaN(iv) || !(iv >= MIN_USABLE_IV_PCT)) return null;
+  return iv;
+}
+
+function formatExpiryDayLabel(expiry: Date): string {
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  const day = String(expiry.getUTCDate()).padStart(2, "0");
+  return `${day} ${months[expiry.getUTCMonth()]} ${String(expiry.getUTCFullYear()).slice(-2)}`;
+}
+
+/** `26AUG` → `Aug 26` — month token only; do not invent last-Thursday calendar day. */
+function formatMonthlyCodeLabel(code: string): string | null {
+  const match = code.toUpperCase().match(/^(\d{2})([A-Z]{3})$/);
+  if (!match) return null;
+  const mon = match[2][0] + match[2].slice(1).toLowerCase();
+  return `${mon} ${match[1]}`;
+}
+
+/**
+ * Human-readable contract label from an NSE-style option symbol.
+ * Weekly codes decode to a calendar day; monthly codes keep month+year only
+ * (last-Thursday is a modelling assumption — not user-facing as a day).
+ * `NFO:NIFTY26AUG24500CE` → `NIFTY Aug 26 24500 CE`
+ * `NIFTY25112724500CE` → `NIFTY 27 Nov 25 24500 CE`
+ */
+export function formatOptionContractName(symbol: string | null | undefined): string | null {
+  if (!symbol) return null;
+  let raw = symbol.trim().toUpperCase();
+  if (!raw) return null;
+  if (raw.includes(":")) raw = raw.split(":", 2)[1] ?? raw;
+  if (!raw.endsWith("CE") && !raw.endsWith("PE")) return raw;
+  const side = raw.slice(-2) as "CE" | "PE";
+  const body = raw.slice(0, -2);
+
+  let underlier: string | null = null;
+  let expiryCode: string | null = null;
+  let strike: string | null = null;
+  let monthlyToken = false;
+
+  const monthly = body.match(/^([A-Z]+)(\d{2}[A-Z]{3})(\d+)$/);
+  if (monthly) {
+    underlier = monthly[1];
+    expiryCode = monthly[2];
+    strike = monthly[3];
+    monthlyToken = true;
+  } else {
+    const weeklyAlpha = body.match(/^([A-Z]+)(\d{2}[OND]\d{2})(\d+)$/);
+    if (weeklyAlpha) {
+      underlier = weeklyAlpha[1];
+      expiryCode = weeklyAlpha[2];
+      strike = weeklyAlpha[3];
+    } else {
+      for (const root of INDEX_OPTION_ROOTS) {
+        if (!body.startsWith(root)) continue;
+        const tail = body.slice(root.length);
+        if (!/^\d+$/.test(tail)) continue;
+        for (const strikeLen of [5, 4, 6]) {
+          if (tail.length <= strikeLen + 4) continue;
+          const expiryPart = tail.slice(0, -strikeLen);
+          const strikePart = tail.slice(-strikeLen);
+          if (/^\d+$/.test(expiryPart) && expiryPart.length >= 5) {
+            underlier = root;
+            expiryCode = expiryPart;
+            strike = String(Number(strikePart));
+            break;
+          }
+        }
+        if (underlier) break;
+      }
+    }
+  }
+
+  if (!underlier || !expiryCode || !strike) return raw;
+
+  let expiryLabel: string;
+  if (monthlyToken) {
+    expiryLabel = formatMonthlyCodeLabel(expiryCode) ?? expiryCode;
+  } else {
+    const expiry = expiryDateFromExpiryCode(expiryCode);
+    expiryLabel = expiry ? formatExpiryDayLabel(expiry) : expiryCode;
+  }
+  return `${underlier} ${expiryLabel} ${strike} ${side}`;
+}
+
 function lognormalCdf(spot: number, forward: number, sigma: number, years: number): number {
   if (!(spot > 0) || !(forward > 0) || !(sigma > 0) || !(years > 0)) return 0;
   const vol = sigma * Math.sqrt(years);
@@ -595,7 +701,7 @@ function chainSideQuote(
   const row = rows.find((item) => item.strike === strike);
   if (!row) return { iv: null, ltp: null };
   const leg = type === "CE" ? row.ce : row.pe;
-  const iv = leg.iv != null && leg.iv > 0 ? leg.iv : null;
+  const iv = usableIvPct(leg.iv);
   const ltp = leg.ltp != null && leg.ltp > 0 ? leg.ltp : null;
   return { iv, ltp };
 }
@@ -647,6 +753,179 @@ function black76Price(
   const d2 = d1 - vol;
   if (type === "CE") return forward * normCdf(d1) - strike * normCdf(d2);
   return strike * normCdf(-d2) - forward * normCdf(-d1);
+}
+
+export type Black76Greeks = {
+  /** Forward delta (r=0 Black-76). */
+  delta: number;
+  /** ∂²V/∂F² per point of forward. */
+  gamma: number;
+  /** Premium change per calendar day. */
+  theta: number;
+  /** Premium change per 1 vol point (1%). */
+  vega: number;
+};
+
+/**
+ * Black-76 greeks with r=0 (index F&O style).
+ * Theta is per calendar day when DTE ≥ 1d, otherwise per hour (avoids /day blow-ups).
+ * Vega is per 1 percentage point of IV.
+ */
+export function black76Greeks({
+  forward,
+  strike,
+  daysToExpiry,
+  ivPct,
+  type,
+}: {
+  forward: number;
+  strike: number;
+  daysToExpiry: number;
+  ivPct: number;
+  type: OptionSide;
+}): Black76Greeks | null {
+  if (
+    !(forward > 0) ||
+    !(strike > 0) ||
+    !(daysToExpiry > 0) ||
+    usableIvPct(ivPct) == null
+  ) {
+    return null;
+  }
+  const years = yearsFromDte(daysToExpiry);
+  const sigma = ivPct / 100;
+  const sqrtT = Math.sqrt(years);
+  const vol = sigma * sqrtT;
+  if (vol < 1e-12) return null;
+
+  const d1 = (Math.log(forward / strike) + 0.5 * sigma * sigma * years) / vol;
+  const density = normPdf(d1);
+  const delta = type === "CE" ? normCdf(d1) : normCdf(d1) - 1;
+  const gamma = density / (forward * vol);
+  // Calendar-day theta (Black-76, r=0): leading term is the same for CE/PE.
+  const thetaPerDay = (-(forward * density * sigma) / (2 * sqrtT)) / 365;
+  const theta = daysToExpiry < 1 ? thetaPerDay / 24 : thetaPerDay;
+  const vega = (forward * density * sqrtT) / 100;
+
+  return {
+    delta: round4(delta),
+    gamma: Math.round(gamma * 1e6) / 1e6,
+    theta: round2(theta),
+    vega: round2(vega),
+  };
+}
+
+export type StrategyLegGreeks = {
+  id: string;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+};
+
+export type StrategyGreeksSummary = {
+  legs: StrategyLegGreeks[];
+  netDelta: number | null;
+  netGamma: number | null;
+  netTheta: number | null;
+  netVega: number | null;
+  /** True when theta is reported per hour (DTE &lt; 1). */
+  thetaPerHour: boolean;
+};
+
+/** Per-leg + net Black-76 greeks using the same IV resolution as PoP. */
+export function estimateStrategyGreeks(
+  legs: StrategyLeg[],
+  rows: OptionsChainRow[],
+  {
+    forward,
+    daysToExpiry,
+    atmIv,
+  }: {
+    forward: number | null | undefined;
+    daysToExpiry: number | null | undefined;
+    atmIv?: number | null;
+  },
+): StrategyGreeksSummary {
+  const thetaPerHour = daysToExpiry != null && daysToExpiry > 0 && daysToExpiry < 1;
+  const empty: StrategyGreeksSummary = {
+    legs: [],
+    netDelta: null,
+    netGamma: null,
+    netTheta: null,
+    netVega: null,
+    thetaPerHour,
+  };
+  if (
+    legs.length === 0 ||
+    forward == null ||
+    !(forward > 0) ||
+    daysToExpiry == null ||
+    !(daysToExpiry > 0)
+  ) {
+    return empty;
+  }
+
+  const outLegs: StrategyLegGreeks[] = [];
+  let netDelta = 0;
+  let netGamma = 0;
+  let netTheta = 0;
+  let netVega = 0;
+  let haveModel = true;
+
+  for (const leg of legs) {
+    const resolved = resolveLegIv(rows, leg, {
+      atmIv,
+      forward,
+      daysToExpiry,
+      premium: leg.premium,
+    });
+    const model =
+      resolved != null
+        ? black76Greeks({
+            forward,
+            strike: leg.strike,
+            daysToExpiry,
+            ivPct: resolved.iv,
+            type: leg.type,
+          })
+        : null;
+
+    // Model-only Δ — never mix broker chain delta with Black-76.
+    if (model == null) {
+      haveModel = false;
+      outLegs.push({
+        id: leg.id,
+        delta: null,
+        gamma: null,
+        theta: null,
+        vega: null,
+      });
+      continue;
+    }
+
+    const sign = legSign(leg.side);
+    netDelta += sign * model.delta * leg.qty;
+    netGamma += sign * model.gamma * leg.qty;
+    netTheta += sign * model.theta * leg.qty;
+    netVega += sign * model.vega * leg.qty;
+    outLegs.push({
+      id: leg.id,
+      delta: model.delta,
+      gamma: model.gamma,
+      theta: model.theta,
+      vega: model.vega,
+    });
+  }
+
+  return {
+    legs: outLegs,
+    netDelta: haveModel ? round4(netDelta) : null,
+    netGamma: haveModel ? Math.round(netGamma * 1e6) / 1e6 : null,
+    netTheta: haveModel ? round2(netTheta) : null,
+    netVega: haveModel ? round2(netVega) : null,
+    thetaPerHour,
+  };
 }
 
 /**
@@ -714,7 +993,7 @@ export function interpolateSideIv(
   const points = rows
     .map((row) => {
       const iv = type === "CE" ? row.ce.iv : row.pe.iv;
-      return iv != null && iv > 0 ? { strike: row.strike, iv } : null;
+      return usableIvPct(iv) != null ? { strike: row.strike, iv: iv as number } : null;
     })
     .filter((item): item is { strike: number; iv: number } => item != null)
     .sort((a, b) => a.strike - b.strike);
@@ -792,10 +1071,12 @@ export function resolveLegIv(
       type: leg.type,
       daysToExpiry,
     });
-    if (fromLtp != null) return { iv: fromLtp, source: "ltp" };
+    const usableLtp = usableIvPct(fromLtp);
+    if (usableLtp != null) return { iv: usableLtp, source: "ltp" };
   }
 
-  if (opts.atmIv != null && opts.atmIv > 0) return { iv: opts.atmIv, source: "atm" };
+  const atm = usableIvPct(opts.atmIv);
+  if (atm != null) return { iv: atm, source: "atm" };
   return null;
 }
 

@@ -295,6 +295,16 @@ class Settings(BaseSettings):
         validation_alias="SIGNAL_ENGINE_TICKER_ENABLED",
         description="Pre-compute signal snapshots for watched admin desks (~8 Hz when active).",
     )
+    options_lab_ticker_enabled: bool = Field(
+        default=True,
+        validation_alias="OPTIONS_LAB_TICKER_ENABLED",
+        description="Pre-compute Options Lab chain snapshots for watched desks (~8 Hz when active).",
+    )
+    kite_ticker_enabled: bool = Field(
+        default=True,
+        validation_alias="KITE_TICKER_ENABLED",
+        description="Shared asyncio Kite WebSocket quote hub for Options Lab + Signal Engine.",
+    )
     scheduler_run_timeout_seconds: int = Field(
         default=900,
         ge=30,

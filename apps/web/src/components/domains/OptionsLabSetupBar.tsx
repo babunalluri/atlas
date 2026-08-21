@@ -78,17 +78,6 @@ export function OptionsLabSetupBar({
       layoutClassName="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
       futLabel="FUT symbol"
       atmHint={atmHint}
-      footer={
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <input
-            type="checkbox"
-            checked={Boolean(config?.mock)}
-            onChange={(event) => patchConfig({ mock: event.target.checked })}
-            className="size-4 rounded border-line"
-          />
-          Mock data (demo — uncheck for live Kite quotes)
-        </label>
-      }
     />
   );
 }

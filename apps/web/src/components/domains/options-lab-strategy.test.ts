@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  black76Greeks,
   blendStrategyIv,
   buildPayoffCurve,
   buildStrategyFromTemplate,
   daysToExpiryFromFutSymbol,
   daysToExpiryFromOptionSymbol,
   estimateProbabilityOfProfit,
+  estimateStrategyGreeks,
   expiryCodeFromOptionSymbol,
+  formatOptionContractName,
   impliedVolFromLtp,
   interpolateSideIv,
   lastThursdayOfMonth,
@@ -570,5 +573,95 @@ describe("options lab strategy", () => {
     expect(flooredHalfDay).not.toBeNull();
     // Half-day floor would inflate σ√T and PoP vs true 30m left.
     expect(shortDated!).toBeLessThan(flooredHalfDay!);
+  });
+
+  it("formats option contract names without inventing monthly expiry days", () => {
+    // Monthly token → month+year only (no last-Thursday guess in the label).
+    expect(formatOptionContractName("NFO:NIFTY26AUG24500CE")).toBe("NIFTY Aug 26 24500 CE");
+    // Weekly codes encode the calendar day — pad single-digit days.
+    expect(formatOptionContractName("NIFTY25N0724500PE")).toBe("NIFTY 07 Nov 25 24500 PE");
+    expect(formatOptionContractName("NIFTY25N1124500PE")).toBe("NIFTY 11 Nov 25 24500 PE");
+    expect(formatOptionContractName("NIFTY25112724500CE")).toBe("NIFTY 27 Nov 25 24500 CE");
+  });
+
+  it("rejects junk sub-0.5% chain IV so gamma cannot explode", () => {
+    const junk = [
+      {
+        strike: 24300,
+        is_atm: true,
+        ce: { symbol: "", ltp: 120, oi: 1, volume: 1, iv: 0.001, delta: 0.5 },
+        pe: { symbol: "", ltp: 110, oi: 1, volume: 1, iv: 12, delta: -0.5 },
+      },
+    ];
+    const resolved = resolveLegIv(
+      junk,
+      { strike: 24300, type: "CE" },
+      { atmIv: 11, forward: 24300, daysToExpiry: 7, premium: 120 },
+    );
+    // Own-side 0.001% is unusable → parity PE IV
+    expect(resolved).toEqual({ iv: 12, source: "parity" });
+    expect(black76Greeks({
+      forward: 24300,
+      strike: 24300,
+      daysToExpiry: 7,
+      ivPct: 0.001,
+      type: "CE",
+    })).toBeNull();
+  });
+
+  it("reports theta per hour when under one day to expiry", () => {
+    const perDay = black76Greeks({
+      forward: 24300,
+      strike: 24300,
+      daysToExpiry: 2,
+      ivPct: 12,
+      type: "CE",
+    });
+    const perHour = black76Greeks({
+      forward: 24300,
+      strike: 24300,
+      daysToExpiry: 0.5,
+      ivPct: 12,
+      type: "CE",
+    });
+    expect(perDay).not.toBeNull();
+    expect(perHour).not.toBeNull();
+    // Hourly magnitude should be much smaller than a raw /day print near expiry.
+    expect(Math.abs(perHour!.theta)).toBeLessThan(Math.abs(perDay!.theta) * 2);
+  });
+
+  it("computes Black-76 gamma/theta/vega for near-ATM options", () => {
+    const greeks = black76Greeks({
+      forward: 24300,
+      strike: 24300,
+      daysToExpiry: 7,
+      ivPct: 12,
+      type: "CE",
+    });
+    expect(greeks).not.toBeNull();
+    expect(greeks!.delta).toBeGreaterThan(0.4);
+    expect(greeks!.delta).toBeLessThan(0.6);
+    expect(greeks!.gamma).toBeGreaterThan(0);
+    expect(greeks!.vega).toBeGreaterThan(0);
+    expect(greeks!.theta).toBeLessThan(0);
+  });
+
+  it("nets strategy greeks with buy/sell signs", () => {
+    const legs = buildStrategyFromTemplate("short_straddle", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+    });
+    const summary = estimateStrategyGreeks(legs, rows, {
+      forward: 24300,
+      daysToExpiry: 7,
+      atmIv: 11.5,
+    });
+    expect(summary.netGamma).not.toBeNull();
+    expect(summary.netVega).not.toBeNull();
+    // Short straddle → negative gamma and vega
+    expect(summary.netGamma!).toBeLessThan(0);
+    expect(summary.netVega!).toBeLessThan(0);
+    expect(summary.netTheta!).toBeGreaterThan(0);
   });
 });

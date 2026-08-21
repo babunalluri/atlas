@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
 from app.db.models import Role
-from app.db.session import tenant_session
-from app.domains.options_lab import DEFAULT_WINGS, MAX_WINGS, MIN_WINGS, OptionsLabService
+from app.db.session import SessionFactory, apply_tenant_guc, tenant_session
+from app.domains import options_lab_cache as ol_cache
+from app.domains.options_lab import (
+    DEFAULT_WINGS,
+    MAX_WINGS,
+    MIN_WINGS,
+    OptionsLabService,
+    chain_state_for_stream,
+)
+from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
 from app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/admin/options-lab", tags=["admin-options-lab"])
 AdminContext = Annotated[
+    TenantContext,
+    Depends(require_roles(Role.platform_admin, Role.tenant_admin)),
+]
+StreamAdminContext = Annotated[
     TenantContext,
     Depends(require_roles(Role.platform_admin, Role.tenant_admin)),
 ]
@@ -105,6 +121,46 @@ async def get_options_chain(
 ) -> dict[str, Any]:
     """Live CE/PE chain from Kite quotes (ATM ± wings)."""
     return await OptionsLabService(session, context).chain_snapshot(wings=wings)
+
+
+@router.get("/stream")
+async def stream_options_chain(
+    request: Request,
+    context: StreamAdminContext,
+    wings: int = Query(DEFAULT_WINGS, ge=MIN_WINGS, le=MAX_WINGS),
+) -> StreamingResponse:
+    """Server-sent events: ~8 Hz chain snapshots with coalesced ticks."""
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        tenant_key = str(context.tenant_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                await ol_cache.touch_watcher(tenant_key, wings=wings)
+                async with SessionFactory() as session:
+                    async with session.begin():
+                        await apply_tenant_guc(session, context.tenant_id)
+                        service = OptionsLabService(session, context)
+                        payload = await chain_state_for_stream(service, wings=wings)
+                await ol_cache.touch_watcher(tenant_key, wings=wings)
+                frame = json.dumps(payload, separators=(",", ":"))
+                yield f"data: {frame}\n\n".encode()
+                await asyncio.sleep(STREAM_INTERVAL_MS / 1000)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await ol_cache.clear_watcher(tenant_key)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 class OptionsLabPortfolioLegIn(BaseModel):
