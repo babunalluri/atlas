@@ -16,6 +16,7 @@ import { OptionsLabStraddleChart } from "@/components/domains/OptionsLabStraddle
 import { useOptionsLabConfigAutosave } from "@/components/domains/useOptionsLabConfigAutosave";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import type { StrategyLeg, StrategyTemplateId } from "@/components/domains/options-lab-strategy";
+import { STRATEGY_TEMPLATES } from "@/components/domains/options-lab-strategy";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import {
@@ -202,6 +203,10 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
     id: StrategyTemplateId;
     seq: number;
   } | null>(null);
+  const [backtestHandoffHint, setBacktestHandoffHint] = useState<string | null>(null);
+  const [backtestHandoffUnderlying, setBacktestHandoffUnderlying] = useState<string | null>(
+    null,
+  );
   const mounted = useRef(true);
   const refreshSeq = useRef(0);
   const screenerSeq = useRef(0);
@@ -242,6 +247,17 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   const onLegsChange = useCallback((legs: StrategyLeg[]) => {
     setActiveLegs(legs);
   }, []);
+
+  /** Hide prior-strategy legs until the *loaded chain* matches the Ideas handoff.
+   * Key on snapshot (not config): patchConfig is optimistic and would open the gate
+   * while applyTemplate still rebuilds against the previous chain. */
+  const backtestLegs = useMemo(() => {
+    if (!backtestHandoffUnderlying) return activeLegs;
+    if ((snapshot?.underlying_symbol ?? "") !== backtestHandoffUnderlying) {
+      return [];
+    }
+    return activeLegs;
+  }, [activeLegs, backtestHandoffUnderlying, snapshot?.underlying_symbol]);
 
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current;
@@ -323,7 +339,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   }, [getAccessToken, refreshScreener]);
 
   const onSelectScreenerUnderlying = useCallback(
-    (row: OptionsScreenerRow) => {
+    (row: OptionsScreenerRow, opts?: { closeOverlay?: boolean }) => {
       const preset = presets.find((item) => item.symbol === row.underlying_symbol);
       patchConfig({
         underlying_symbol: row.underlying_symbol,
@@ -331,7 +347,9 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
         strike_step: preset?.strike_step ?? config?.strike_step ?? 50,
         fut_symbol: row.fut_symbol || suggestFutSymbol(row.underlying_symbol),
       });
-      setOverlay(null);
+      if (opts?.closeOverlay !== false) {
+        setOverlay(null);
+      }
     },
     [config?.strike_step, patchConfig, presets],
   );
@@ -343,6 +361,24 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
         id: templateId,
         seq: (prev?.seq ?? 0) + 1,
       }));
+    },
+    [onSelectScreenerUnderlying],
+  );
+
+  const onSendIdeaToBacktest = useCallback(
+    (row: OptionsScreenerRow, templateId: StrategyTemplateId) => {
+      const tplLabel =
+        STRATEGY_TEMPLATES.find((t) => t.id === templateId)?.label ?? templateId;
+      // Drop stale rail legs immediately so Backtest never saves the prior strategy.
+      setActiveLegs([]);
+      onSelectScreenerUnderlying(row, { closeOverlay: false });
+      setApplyTemplate((prev) => ({
+        id: templateId,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      setBacktestHandoffHint(`${row.underlying_label} · ${tplLabel}`);
+      setBacktestHandoffUnderlying(row.underlying_symbol);
+      setOverlay("backtest");
     },
     [onSelectScreenerUnderlying],
   );
@@ -373,6 +409,13 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [overlay]);
+
+  useEffect(() => {
+    if (overlay !== "backtest") {
+      setBacktestHandoffHint(null);
+      setBacktestHandoffUnderlying(null);
+    }
   }, [overlay]);
 
   const streamGeneration = useRef(0);
@@ -1138,16 +1181,18 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                 <OptionsLabIdeasPanel
                   snapshot={screener}
                   onApplyIdea={onApplyIdea}
+                  onSendToBacktest={onSendIdeaToBacktest}
                 />
               ) : overlay === "backtest" ? (
                 <OptionsLabBacktestPanel
-                  legs={activeLegs}
+                  legs={backtestLegs}
                   spot={snapshot?.spot ?? null}
                   strikeStep={config?.strike_step ?? snapshot?.strike_step ?? 50}
                   ivPoints={charts?.iv?.points}
                   getAccessToken={getAccessToken}
                   underlyingSymbol={config?.underlying_symbol ?? snapshot?.underlying_symbol}
                   underlyingLabel={config?.underlying_label ?? snapshot?.underlying_label}
+                  handoffHint={backtestHandoffHint}
                 />
               ) : overlay === "flows" ? (
                 <OptionsLabFlowsPanel

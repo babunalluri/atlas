@@ -28,6 +28,7 @@ export function OptionsLabBacktestPanel({
   getAccessToken,
   underlyingSymbol,
   underlyingLabel,
+  handoffHint,
 }: {
   legs: StrategyLeg[];
   spot: number | null;
@@ -36,6 +37,8 @@ export function OptionsLabBacktestPanel({
   getAccessToken: () => Promise<string | null>;
   underlyingSymbol?: string;
   underlyingLabel?: string;
+  /** e.g. Ideas handoff label while chain/template legs load. */
+  handoffHint?: string | null;
 }) {
   const ivCalibrated = useMemo(() => {
     const ivs = (ivPoints ?? [])
@@ -262,9 +265,18 @@ export function OptionsLabBacktestPanel({
 
   if (!legs.length) {
     return (
-      <p className="py-10 text-center text-sm text-slate-muted">
-        Build a strategy in the rail first, then run a model backtest.
-      </p>
+      <div className="flex flex-col gap-2 py-10 text-center text-sm text-slate-muted">
+        {handoffHint ? (
+          <p className="text-ink">
+            Loading idea into Lab: <span className="font-medium">{handoffHint}</span>
+          </p>
+        ) : null}
+        <p>
+          {handoffHint
+            ? "Waiting for chain quotes + template legs — keep this overlay open a moment."
+            : "Build a strategy in the rail first, then run a model backtest."}
+        </p>
+      </div>
     );
   }
 
@@ -274,6 +286,11 @@ export function OptionsLabBacktestPanel({
 
   return (
     <div className="flex flex-col gap-3 pt-3">
+      {handoffHint ? (
+        <p className="rounded border border-teal/30 bg-teal/10 px-2 py-1.5 text-xs text-teal">
+          From Ideas: {handoffHint}
+        </p>
+      ) : null}
       <p className="text-xs text-slate-muted">
         Model estimate (expiry payoff vs spot path) — not historical option tick replay. Shock % is
         a daily proxy; path moves scale with √t. Fidelity:{" "}

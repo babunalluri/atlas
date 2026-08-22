@@ -24,7 +24,8 @@ async def razorpay_webhook(request: Request) -> dict[str, str]:
     secret = settings.razorpay_webhook_secret.get_secret_value().strip()
     body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature")
-    if secret and not verify_webhook_signature(body, signature, secret):
+    # Fail closed: missing secret must not credit wallets.
+    if not secret or not verify_webhook_signature(body, signature, secret):
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
 
     import json
