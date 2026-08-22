@@ -106,32 +106,36 @@ async def test_straddle_history_appends_and_trims() -> None:
         }
     ]
     fingerprint = "fp1"
-    points = await append_straddle_point(
+    hist = await append_straddle_point(
         tenant,
         fingerprint,
         rows,
         fetched_at=100,
         atm=24300,
     )
+    points = hist["points"]
     assert len(points) == 1
     assert points[0]["combined"] == 175.0
+    assert "24300" in hist["series"]
 
-    points = await append_straddle_point(
+    hist = await append_straddle_point(
         tenant,
         fingerprint,
         rows,
         fetched_at=100,
         atm=24300,
     )
+    points = hist["points"]
     assert len(points) == 1
 
-    points = await append_straddle_point(
+    hist = await append_straddle_point(
         tenant,
         fingerprint,
         rows,
         fetched_at=101,
         atm=24300,
     )
+    points = hist["points"]
     assert len(points) == 2
 
 
@@ -152,7 +156,8 @@ async def test_straddle_history_resets_on_new_trading_day(monkeypatch) -> None:
     await append_straddle_point(tenant, "fp1", rows, fetched_at=100, atm=24300)
 
     monkeypatch.setattr(ol, "_ist_trading_day", lambda: "2026-08-21")
-    points = await append_straddle_point(tenant, "fp1", rows, fetched_at=200, atm=24300)
+    hist = await append_straddle_point(tenant, "fp1", rows, fetched_at=200, atm=24300)
+    points = hist["points"]
     assert len(points) == 1
     assert points[0]["t"] == 200
 
@@ -331,3 +336,38 @@ def test_downsample_straddle_points_caps_payload() -> None:
     assert len(out) == 600
     assert out[0]["t"] == 0
     assert out[-1]["t"] == 1999
+
+
+@pytest.mark.asyncio
+async def test_append_flows_day_upserts_and_caps() -> None:
+    from app.domains.options_lab import FLOWS_HISTORY_MAX_DAYS, append_flows_day
+
+    series = await append_flows_day("tenant-flows", fii_net=100.0, dii_net=-50.0)
+    assert len(series) >= 1
+    assert series[-1]["label"] == "Today"
+    assert series[-1]["fii_net"] == 100.0
+
+    again = await append_flows_day("tenant-flows", fii_net=120.0, dii_net=-40.0)
+    today_rows = [r for r in again if r["label"] == "Today"]
+    assert len(today_rows) == 1
+    assert today_rows[0]["fii_net"] == 120.0
+
+    mock_series = await append_flows_day(
+        "tenant-flows-mock",
+        fii_net=850.0,
+        dii_net=-120.0,
+        mock_seed=True,
+    )
+    assert len(mock_series) >= 5
+    assert len(mock_series) <= FLOWS_HISTORY_MAX_DAYS
+
+
+@pytest.mark.asyncio
+async def test_append_flows_day_preserves_partial_side() -> None:
+    from app.domains.options_lab import append_flows_day
+
+    await append_flows_day("tenant-partial", fii_net=100.0, dii_net=-50.0)
+    again = await append_flows_day("tenant-partial", fii_net=None, dii_net=-10.0)
+    today = [r for r in again if r["label"] == "Today"][0]
+    assert today["fii_net"] == 100.0
+    assert today["dii_net"] == -10.0

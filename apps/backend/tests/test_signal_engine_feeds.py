@@ -142,6 +142,27 @@ def test_parse_fii_dii() -> None:
     assert _parse_fii_dii(body) == 1234.56
 
 
+def test_parse_fii_dii_nets_includes_dii() -> None:
+    from app.domains.signal_engine_nse import _parse_fii_dii_nets
+
+    body = {
+        "data": [
+            {"category": "FII/FPI", "netValue": "1,234.56"},
+            {"category": "DII", "netValue": "-120.5"},
+        ]
+    }
+    nets = _parse_fii_dii_nets(body)
+    assert nets["fii_net"] == 1234.56
+    assert nets["dii_net"] == -120.5
+
+
+def test_mock_nse_fields_include_dii() -> None:
+    fields = mock_nse_fields()
+    assert fields["fii_net"] == 850.0
+    assert "dii_net" in fields
+    assert fields["dii_net"] == -120.0
+
+
 def test_parse_advance_decline() -> None:
     body = [
         {"percentChange": 1.2},

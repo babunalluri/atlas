@@ -58,10 +58,14 @@ MIN_WINGS = 5
 MAX_WINGS = 25
 SCREENER_WINGS = 5
 # Keep enough intra-session detail while avoiding huge write amplification.
-STRADDLE_HISTORY_MAX = 2_400  # ~40m at 1 point/s (fetched_at is whole seconds)
+STRADDLE_HISTORY_MAX = 480  # ~8m at 1 point/s per strike (fetched_at is whole seconds)
 STRADDLE_HISTORY_RESPONSE_MAX = 600  # chart-facing payload cap
+STRADDLE_SERIES_NEIGHBORS = 1  # ATM ±1 → 3 series (was ±2 → 5)
 OI_BASELINE_FIELD = "options_lab:oi_baseline"
 STRADDLE_HISTORY_FIELD = "options_lab:straddle_history"
+FLOWS_HISTORY_FIELD = "options_lab:flows_history"
+FLOWS_HISTORY_MOCK_FIELD = "options_lab:flows_history_mock"
+FLOWS_HISTORY_MAX_DAYS = 30
 SCREENER_BASELINE_FIELD = "options_lab:screener_baseline"
 INSTRUMENTS_CACHE_FIELD = "options_lab:nfo_underlyings"
 INSTRUMENTS_CACHE_TTL_SEC = 12 * 60 * 60
@@ -506,6 +510,41 @@ def _atm_straddle_from_rows(
     return None, None, None
 
 
+def _straddle_legs_from_row(
+    row: dict[str, Any],
+) -> tuple[float | None, float | None, float | None]:
+    ce = row.get("ce", {}).get("ltp") if isinstance(row.get("ce"), dict) else None
+    pe = row.get("pe", {}).get("ltp") if isinstance(row.get("pe"), dict) else None
+    if ce is None or pe is None:
+        return (
+            float(ce) if ce is not None else None,
+            float(pe) if pe is not None else None,
+            None,
+        )
+    return float(ce), float(pe), round(float(ce) + float(pe), 2)
+
+
+def _multi_straddle_targets(
+    rows: list[dict[str, Any]],
+    atm: int | None,
+    *,
+    neighbors: int = 2,
+) -> list[int]:
+    """ATM ± N strike steps present in the chain (for multi-straddle history)."""
+    strikes = sorted(
+        {int(row["strike"]) for row in rows if row.get("strike") is not None}
+    )
+    if not strikes:
+        return []
+    center = int(atm) if atm is not None else strikes[len(strikes) // 2]
+    if center not in strikes:
+        center = min(strikes, key=lambda s: abs(s - center))
+    idx = strikes.index(center)
+    lo = max(0, idx - neighbors)
+    hi = min(len(strikes), idx + neighbors + 1)
+    return strikes[lo:hi]
+
+
 def _baseline_strikes_from_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, float | None]]:
     strikes: dict[str, dict[str, float | None]] = {}
     for row in rows:
@@ -561,7 +600,8 @@ async def append_straddle_point(
     *,
     fetched_at: int,
     atm: int | None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
+    """Append ATM + nearby-strike straddle samples for the IST session."""
     today = _ist_trading_day()
     stored = await get_session_value(tenant_id, STRADDLE_HISTORY_FIELD)
     if (
@@ -569,30 +609,163 @@ async def append_straddle_point(
         or stored.get("fingerprint") != fingerprint
         or stored.get("day") != today
     ):
-        stored = {"fingerprint": fingerprint, "day": today, "points": []}
+        stored = {"fingerprint": fingerprint, "day": today, "points": [], "series": {}}
 
-    ce, pe, combined = _atm_straddle_from_rows(rows)
-    points: list[dict[str, Any]] = list(stored.get("points") or [])
-    if combined is not None and ce is not None and pe is not None:
-        if not points or points[-1].get("t") != fetched_at:
-            points.append(
+    series: dict[str, list[dict[str, Any]]] = dict(stored.get("series") or {})
+    targets = _multi_straddle_targets(rows, atm, neighbors=STRADDLE_SERIES_NEIGHBORS)
+    row_by_strike = {int(row["strike"]): row for row in rows if row.get("strike") is not None}
+
+    for strike in targets:
+        row = row_by_strike.get(strike)
+        if row is None:
+            continue
+        ce, pe, combined = _straddle_legs_from_row(row)
+        if combined is None or ce is None or pe is None:
+            continue
+        key = str(strike)
+        pts: list[dict[str, Any]] = list(series.get(key) or [])
+        if not pts or pts[-1].get("t") != fetched_at:
+            # Compact samples — strike lives in series key; atm only on response meta.
+            pts.append(
                 {
                     "t": fetched_at,
                     "ce": round(ce, 2),
                     "pe": round(pe, 2),
                     "combined": combined,
-                    "atm": atm,
                 }
             )
-        if len(points) > STRADDLE_HISTORY_MAX:
-            points = points[-STRADDLE_HISTORY_MAX:]
+        if len(pts) > STRADDLE_HISTORY_MAX:
+            pts = pts[-STRADDLE_HISTORY_MAX:]
+        series[key] = pts
+
+    # ATM series stays the primary `points` array for older clients (derived, not duplicated in Redis).
+    atm_key = str(int(atm)) if atm is not None else None
+    points: list[dict[str, Any]] = list(
+        series.get(atm_key) if atm_key and atm_key in series else []
+    )
+    if not points:
+        ce, pe, combined = _atm_straddle_from_rows(rows)
+        if combined is not None and ce is not None and pe is not None:
+            points = [
+                {
+                    "t": fetched_at,
+                    "ce": round(ce, 2),
+                    "pe": round(pe, 2),
+                    "combined": combined,
+                }
+            ]
 
     await set_session_value(
         tenant_id,
         STRADDLE_HISTORY_FIELD,
-        {"fingerprint": fingerprint, "day": today, "points": points},
+        {
+            "fingerprint": fingerprint,
+            "day": today,
+            # Do not persist duplicate `points` — derive from series[atm] on read.
+            "series": series,
+            "atm": atm,
+        },
     )
-    return points
+    return {"points": points, "series": series, "strikes": targets}
+
+
+def _flows_series_labels(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    today = _ist_trading_day()
+    out: list[dict[str, Any]] = []
+    for row in points:
+        day = str(row.get("day") or "")
+        label = "Today" if day == today else day
+        item: dict[str, Any] = {
+            "label": label,
+            "day": day or None,
+            "fii_net": row.get("fii_net"),
+            "dii_net": row.get("dii_net"),
+        }
+        if row.get("mock"):
+            item["mock"] = True
+            if label != "Today":
+                item["label"] = f"{label} (mock)"
+        out.append(item)
+    return out
+
+
+async def append_flows_day(
+    tenant_id: str,
+    *,
+    fii_net: float | None,
+    dii_net: float | None,
+    mock_seed: bool = False,
+) -> list[dict[str, Any]]:
+    """Upsert today's FII/DII sample into a multi-day session series.
+
+    Mock history uses a separate Redis key so it cannot leak into live mode.
+    """
+    today = _ist_trading_day()
+    field = FLOWS_HISTORY_MOCK_FIELD if mock_seed else FLOWS_HISTORY_FIELD
+    stored = await get_session_value(tenant_id, field)
+    points: list[dict[str, Any]] = []
+    if isinstance(stored, dict) and isinstance(stored.get("points"), list):
+        points = [dict(p) for p in stored["points"] if isinstance(p, dict)]
+
+    if mock_seed and len(points) < 5:
+        # Deterministic short history for Mock mode (not NSE archive replay).
+        base_fii = float(fii_net) if fii_net is not None else 850.0
+        base_dii = float(dii_net) if dii_net is not None else -120.0
+        seeded: list[dict[str, Any]] = []
+        for i in range(6, 0, -1):
+            day = (
+                datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(days=i)
+            ).strftime("%Y-%m-%d")
+            seeded.append(
+                {
+                    "day": day,
+                    "fii_net": round(base_fii * (0.7 + 0.08 * i), 1),
+                    "dii_net": round(base_dii * (0.6 + 0.07 * i), 1),
+                    "mock": True,
+                }
+            )
+        known = {p["day"] for p in seeded}
+        for p in points:
+            d = str(p.get("day") or "")
+            if d and d not in known and d != today:
+                seeded.append({**p, "mock": True})
+        points = seeded
+
+    if fii_net is not None or dii_net is not None:
+        updated = False
+        for p in points:
+            if str(p.get("day")) == today:
+                if fii_net is not None:
+                    p["fii_net"] = fii_net
+                if dii_net is not None:
+                    p["dii_net"] = dii_net
+                if mock_seed:
+                    p["mock"] = True
+                updated = True
+                break
+        if not updated:
+            row: dict[str, Any] = {"day": today, "fii_net": fii_net, "dii_net": dii_net}
+            if mock_seed:
+                row["mock"] = True
+            points.append(row)
+
+    points.sort(key=lambda p: str(p.get("day") or ""))
+    if len(points) > FLOWS_HISTORY_MAX_DAYS:
+        points = points[-FLOWS_HISTORY_MAX_DAYS:]
+
+    await set_session_value(tenant_id, field, {"points": points})
+    return _flows_series_labels(points)
+
+
+async def flows_series_snapshot(tenant_id: str, *, mock: bool = False) -> list[dict[str, Any]]:
+    """Read stored multi-day flows without mutating."""
+    field = FLOWS_HISTORY_MOCK_FIELD if mock else FLOWS_HISTORY_FIELD
+    stored = await get_session_value(tenant_id, field)
+    points: list[dict[str, Any]] = []
+    if isinstance(stored, dict) and isinstance(stored.get("points"), list):
+        points = [dict(p) for p in stored["points"] if isinstance(p, dict)]
+    points.sort(key=lambda p: str(p.get("day") or ""))
+    return _flows_series_labels(points)
 
 
 def _downsample_straddle_points(
@@ -629,13 +802,16 @@ async def attach_charts(
         rows,
         force=force_baseline,
     )
-    straddle_points = await append_straddle_point(
+    straddle_hist = await append_straddle_point(
         tenant_id,
         fingerprint,
         rows,
         fetched_at=int(payload.get("fetched_at") or time.time()),
         atm=payload.get("atm"),
     )
+    series_out: dict[str, list[dict[str, Any]]] = {}
+    for key, pts in (straddle_hist.get("series") or {}).items():
+        series_out[key] = _downsample_straddle_points(pts)
     atm_metrics = _atm_metrics_from_rows(rows)
     symbol = str(payload.get("underlying_symbol") or "")
     iv_chart = await build_iv_chart_payload(
@@ -654,8 +830,10 @@ async def attach_charts(
             "oi": build_oi_chart_rows(rows, baseline.get("strikes")),
             "oi_baseline_at": baseline.get("set_at"),
             "straddle": {
-                "points": _downsample_straddle_points(straddle_points),
+                "points": _downsample_straddle_points(straddle_hist.get("points") or []),
                 "atm": payload.get("atm"),
+                "series": series_out,
+                "strikes": straddle_hist.get("strikes") or [],
             },
             "iv": iv_chart,
         },
@@ -931,6 +1109,75 @@ class OptionsLabService:
         tenant_id = _tenant_key(self.context)
         await set_session_value(tenant_id, OI_BASELINE_FIELD, None)
         return {"ok": True}
+
+    async def flows_snapshot(self) -> dict[str, Any]:
+        """FII/DII net (₹ Cr) for Options Lab Flows overlay — independent of Signal Start."""
+        from app.domains.signal_engine_nse import fetch_nse_slow_fields, mock_nse_fields
+
+        config = await self._read_config()
+        tenant_id = _tenant_key(self.context)
+        if config.mock:
+            fields = mock_nse_fields()
+            series = await append_flows_day(
+                tenant_id,
+                fii_net=fields.get("fii_net"),
+                dii_net=fields.get("dii_net"),
+                mock_seed=True,
+            )
+            return {
+                "ok": True,
+                "mock": True,
+                "fetched_at": int(time.time()),
+                "fii_net": fields.get("fii_net"),
+                "dii_net": fields.get("dii_net"),
+                "advance_decline_ratio": fields.get("advance_decline_ratio"),
+                "series": series,
+            }
+
+        try:
+            fields = await asyncio.to_thread(fetch_nse_slow_fields)
+        except Exception as exc:  # noqa: BLE001
+            stored = await flows_series_snapshot(tenant_id, mock=False)
+            return {
+                "ok": False,
+                "error": f"NSE flows unavailable: {exc}",
+                "fetched_at": int(time.time()),
+                "fii_net": None,
+                "dii_net": None,
+                "series": stored,
+            }
+
+        fii = fields.get("fii_net")
+        dii = fields.get("dii_net")
+        series = await append_flows_day(tenant_id, fii_net=fii, dii_net=dii, mock_seed=False)
+        return {
+            "ok": True,
+            "mock": False,
+            "fetched_at": int(time.time()),
+            "fii_net": fii,
+            "dii_net": dii,
+            "advance_decline_ratio": fields.get("advance_decline_ratio"),
+            "series": series,
+            "warnings": (
+                []
+                if fii is not None or dii is not None
+                else ["NSE FII/DII feed empty — try again later or enable Mock."]
+            ),
+        }
+
+    async def list_gtts(self) -> dict[str, Any]:
+        from app.domains.options_lab_trading import OptionsLabTradingService
+
+        config = await self._read_config()
+        trading = OptionsLabTradingService(self.session, self.context)
+        return await trading.list_gtts(mock=bool(config.mock))
+
+    async def delete_gtt(self, trigger_id: str | int) -> dict[str, Any]:
+        from app.domains.options_lab_trading import OptionsLabTradingService
+
+        config = await self._read_config()
+        trading = OptionsLabTradingService(self.session, self.context)
+        return await trading.delete_gtt(trigger_id, mock=bool(config.mock))
 
     async def _finalize_payload(
         self,
@@ -1481,6 +1728,7 @@ class OptionsLabService:
             product=product,
             mock=bool(config.mock or payload.get("mock")),
             heuristic=heuristic,
+            basket=bool(payload.get("basket")),
         )
 
     async def place_strategy_orders(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1502,6 +1750,17 @@ class OptionsLabService:
         except (TypeError, ValueError):
             lot_size = estimate_lot_size(underlying)
         trading = OptionsLabTradingService(self.session, self.context)
+
+        def _pct(key: str) -> float | None:
+            raw = payload.get(key)
+            if raw is None or raw == "":
+                return None
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return val if val > 0 else None
+
         placed = await trading.place_strategy_orders(
             legs=legs,
             lot_size=lot_size,
@@ -1511,6 +1770,9 @@ class OptionsLabService:
             live=bool(payload.get("live")),
             mock=bool(config.mock or payload.get("mock")),
             tag=str(payload.get("tag") or "atlas-ol"),
+            stop_loss_pct=_pct("stop_loss_pct"),
+            target_pct=_pct("target_pct"),
+            basket=bool(payload.get("basket")),
         )
         # Persist a draft only when at least one leg was submitted (or mock).
         draft = None
@@ -1521,7 +1783,7 @@ class OptionsLabService:
             and (placed.get("mock") or int(placed.get("submitted_count") or 0) > 0)
         ):
             draft_legs = legs
-            draft_name = payload.get("name") or f"Order {_now_label()}"
+            draft_name = str(payload.get("name") or f"Order {_now_label()}")
             if placed.get("partial"):
                 submitted_idx = {
                     r.get("leg_index")
@@ -1532,7 +1794,9 @@ class OptionsLabService:
                     leg for idx, leg in enumerate(legs) if idx in submitted_idx
                 ]
                 draft_name = f"PARTIAL {draft_name}"
+            # Tag paper fills so Books → Paper filter finds them (name convention).
             if draft_legs:
+                draft_name = paper_book_draft_name(draft_name, tool=placed.get("tool"))
                 draft = await self.create_portfolio(
                     {
                         "name": draft_name,
@@ -1547,3 +1811,11 @@ class OptionsLabService:
 
 def _now_label() -> str:
     return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %H:%M")
+
+
+def paper_book_draft_name(name: str, *, tool: str | None) -> str:
+    """Prefix Paper books so the Books → Paper filter finds place_paper_order saves."""
+    text = str(name or "").strip() or f"Order {_now_label()}"
+    if tool == "place_paper_order" and not text.lower().startswith("paper"):
+        return f"Paper {text}"
+    return text

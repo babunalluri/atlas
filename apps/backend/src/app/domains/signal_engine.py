@@ -445,7 +445,15 @@ def _build_alt_fut_symbol(primary_fut: str, root: str, exchange: str) -> str | N
     if not sym.endswith("FUT"):
         return None
     body = sym[:-3]
-    known_roots = ("MIDCPNIFTY", "BANKNIFTY", "FINNIFTY", "NIFTY50", "NIFTY", "SENSEX")
+    known_roots = (
+        "MIDCPNIFTY",
+        "NIFTYNXT50",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "NIFTY50",
+        "NIFTY",
+        "SENSEX",
+    )
     expiry_part: str | None = None
     for known in known_roots:
         if body.startswith(known):
