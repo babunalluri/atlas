@@ -293,6 +293,89 @@
     }
   }
 
+  /* Mid-weight track + ring thumb — bolder than hairline, lighter than native. */
+  .slider-sleek {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 1rem;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .slider-sleek:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
+  .slider-sleek:focus-visible {
+    outline: none;
+  }
+
+  .slider-sleek:focus-visible::-webkit-slider-thumb {
+    box-shadow:
+      0 0 0 3px color-mix(in oklab, var(--tone-accent) 28%, transparent),
+      0 1px 2px rgba(7, 16, 24, 0.12);
+  }
+
+  .slider-sleek:focus-visible::-moz-range-thumb {
+    box-shadow:
+      0 0 0 3px color-mix(in oklab, var(--tone-accent) 28%, transparent),
+      0 1px 2px rgba(7, 16, 24, 0.12);
+  }
+
+  .slider-sleek::-webkit-slider-runnable-track {
+    height: 3.5px;
+    border-radius: 9999px;
+    background: linear-gradient(
+      to right,
+      var(--tone-accent) 0%,
+      var(--tone-accent) var(--slider-pct, 0%),
+      color-mix(in oklab, var(--tone-line) 70%, var(--tone-raised))
+        var(--slider-pct, 0%),
+      color-mix(in oklab, var(--tone-line) 70%, var(--tone-raised)) 100%
+    );
+  }
+
+  .slider-sleek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 0.85rem;
+    height: 0.85rem;
+    margin-top: -0.28rem;
+    border-radius: 9999px;
+    border: 2px solid var(--tone-accent);
+    background: var(--tone-raised);
+    box-shadow: 0 1px 2px rgba(7, 16, 24, 0.12);
+    transition: transform 0.12s ease;
+  }
+
+  .slider-sleek:hover::-webkit-slider-thumb {
+    transform: scale(1.08);
+  }
+
+  .slider-sleek::-moz-range-track {
+    height: 3.5px;
+    border: none;
+    border-radius: 9999px;
+    background: color-mix(in oklab, var(--tone-line) 70%, var(--tone-raised));
+  }
+
+  .slider-sleek::-moz-range-progress {
+    height: 3.5px;
+    border: none;
+    border-radius: 9999px;
+    background: var(--tone-accent);
+  }
+
+  .slider-sleek::-moz-range-thumb {
+    width: 0.85rem;
+    height: 0.85rem;
+    border-radius: 9999px;
+    border: 2px solid var(--tone-accent);
+    background: var(--tone-raised);
+    box-shadow: 0 1px 2px rgba(7, 16, 24, 0.12);
+  }
+
   .grid-noise {
     background-image:
       linear-gradient(to right, var(--grid-line) 1px, transparent 1px),

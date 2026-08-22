@@ -18,7 +18,11 @@ export type SearchableSelectOption = {
 };
 
 const fieldClass =
-  "w-full rounded-md border border-line bg-raised px-3 py-2 text-sm text-ink outline-none transition placeholder:text-slate-muted focus:border-teal focus:ring-2 focus:ring-teal/20";
+  "w-full rounded-md border border-line bg-raised text-ink outline-none transition placeholder:text-slate-muted focus:border-teal focus:ring-2 focus:ring-teal/20";
+const fieldSizeClass = {
+  md: "px-3 py-2 text-sm",
+  sm: "px-2 py-1 text-xs",
+} as const;
 
 /** ~12 option rows before the panel scrolls. */
 const LIST_MAX_HEIGHT = "max-h-72";
@@ -33,6 +37,7 @@ export function SearchableSelect({
   className,
   emptyMessage = "No matches",
   allowCustom = false,
+  size = "md",
 }: {
   id?: string;
   value: string;
@@ -44,6 +49,7 @@ export function SearchableSelect({
   emptyMessage?: string;
   /** When true, Enter/blur/Tab commits typed text even if it is not in options. */
   allowCustom?: boolean;
+  size?: "sm" | "md";
 }) {
   const reactId = useId();
   const listId = `${id ?? reactId}-listbox`;
@@ -257,7 +263,12 @@ export function SearchableSelect({
         onClick={openPanel}
         onBlur={onBlur}
         onKeyDown={onKeyDown}
-        className={cn(fieldClass, "pr-9", disabled && "cursor-not-allowed opacity-60")}
+        className={cn(
+          fieldClass,
+          fieldSizeClass[size],
+          "pr-9",
+          disabled && "cursor-not-allowed opacity-60",
+        )}
       />
       <span
         aria-hidden

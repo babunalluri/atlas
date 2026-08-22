@@ -3792,6 +3792,7 @@ export interface OptionsStraddlePoint {
   pe: number;
   combined: number;
   atm?: number | null;
+  strike?: number;
 }
 
 export interface OptionsIvPoint {
@@ -3813,6 +3814,8 @@ export interface OptionsLabCharts {
   straddle: {
     points: OptionsStraddlePoint[];
     atm: number | null;
+    series?: Record<string, OptionsStraddlePoint[]>;
+    strikes?: number[];
   };
   iv?: OptionsIvChart;
 }
@@ -3900,6 +3903,72 @@ export async function getOptionsScreener(
   const params = new URLSearchParams({ universe });
   return apiFetch<OptionsScreenerSnapshot>(`/admin/options-lab/screener?${params}`, {
     accessToken,
+  });
+}
+
+export interface OptionsLabFlowsPoint {
+  label: string;
+  day?: string | null;
+  fii_net: number | null;
+  dii_net: number | null;
+  mock?: boolean;
+}
+
+export interface OptionsLabFlowsSnapshot {
+  ok: boolean;
+  error?: string;
+  mock?: boolean;
+  fetched_at?: number;
+  fii_net?: number | null;
+  dii_net?: number | null;
+  advance_decline_ratio?: number | null;
+  series?: OptionsLabFlowsPoint[];
+  warnings?: string[];
+}
+
+export async function getOptionsLabFlows(
+  accessToken: string,
+): Promise<OptionsLabFlowsSnapshot> {
+  return apiFetch<OptionsLabFlowsSnapshot>(`/admin/options-lab/flows`, {
+    accessToken,
+  });
+}
+
+export interface OptionsLabGttRow {
+  trigger_id?: string | number | null;
+  status?: string | null;
+  type?: string | null;
+  trigger_values?: number[] | null;
+  tradingsymbol?: string | null;
+  symbols?: string[];
+  created_at?: string | null;
+}
+
+export interface OptionsLabGttsResponse {
+  ok: boolean;
+  error?: string;
+  mock?: boolean;
+  tool?: string;
+  team_slug?: string;
+  gtts?: OptionsLabGttRow[];
+  warnings?: string[];
+}
+
+export async function listOptionsLabGtts(
+  accessToken: string,
+): Promise<OptionsLabGttsResponse> {
+  return apiFetch<OptionsLabGttsResponse>(`/admin/options-lab/gtts`, {
+    accessToken,
+  });
+}
+
+export async function deleteOptionsLabGtt(
+  accessToken: string,
+  triggerId: string | number,
+): Promise<{ ok: boolean; error?: string; trigger_id?: string | number; warnings?: string[] }> {
+  return apiFetch(`/admin/options-lab/gtts/${encodeURIComponent(String(triggerId))}`, {
+    accessToken,
+    method: "DELETE",
   });
 }
 
@@ -4097,9 +4166,11 @@ export type OptionsLabMarginResponse = {
   source?: string;
   funds_needed?: number | null;
   margin_needed?: number | null;
+  margin_final?: number | null;
   margin_available?: number | null;
   lot_size?: number;
   product?: string;
+  basket?: boolean;
   estimated?: boolean;
   warnings?: string[];
 };
@@ -4122,6 +4193,7 @@ export async function postOptionsLabMargins(
     underlying_symbol?: string;
     heuristic?: { marginNeeded?: number; fundsNeeded?: number };
     mock?: boolean;
+    basket?: boolean;
   },
 ): Promise<OptionsLabMarginResponse> {
   return apiFetch<OptionsLabMarginResponse>("/admin/options-lab/margins", {
@@ -4138,6 +4210,7 @@ export type OptionsLabOrderResponse = {
   mock?: boolean;
   tool?: string;
   team_slug?: string;
+  basket?: boolean;
   submitted_count?: number;
   failed_count?: number;
   orders?: Array<{
@@ -4147,6 +4220,15 @@ export type OptionsLabOrderResponse = {
     quantity?: number;
     status?: string;
     order_id?: string | null;
+    error?: string;
+  }>;
+  gtts?: Array<{
+    leg_index?: number;
+    symbol?: string;
+    status?: string;
+    trigger_id?: string | number | null;
+    trigger_type?: string;
+    trigger_values?: number[];
     error?: string;
   }>;
   errors?: string[];
@@ -4176,6 +4258,9 @@ export async function postOptionsLabOrders(
     underlying_symbol?: string;
     save_draft?: boolean;
     mock?: boolean;
+    stop_loss_pct?: number;
+    target_pct?: number;
+    basket?: boolean;
   },
 ): Promise<OptionsLabOrderResponse> {
   return apiFetch<OptionsLabOrderResponse>("/admin/options-lab/orders", {

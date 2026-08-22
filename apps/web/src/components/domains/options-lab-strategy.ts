@@ -25,13 +25,23 @@ export type StrategyTemplateId =
   | "long_strangle"
   | "bull_call_spread"
   | "bear_put_spread"
-  | "iron_condor";
+  | "bull_put_spread"
+  | "bear_call_spread"
+  | "iron_condor"
+  | "iron_butterfly"
+  | "long_butterfly_ce"
+  | "call_ratio"
+  | "put_ratio"
+  | "calendar_call";
 
 export type StrategyTemplate = {
   id: StrategyTemplateId;
   label: string;
   hint: string;
   usesWidth: boolean;
+  /** True when Lab only has a single expiry chain — show disabled until dual-FUT exists. */
+  gated?: boolean;
+  gateHint?: string;
 };
 
 export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
@@ -44,7 +54,21 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
   { id: "long_strangle", label: "Long Strangle", hint: "Long vol OTM", usesWidth: true },
   { id: "bull_call_spread", label: "Bull Call Spread", hint: "Bullish capped", usesWidth: true },
   { id: "bear_put_spread", label: "Bear Put Spread", hint: "Bearish capped", usesWidth: true },
+  { id: "bull_put_spread", label: "Bull Put Spread", hint: "Bullish credit", usesWidth: true },
+  { id: "bear_call_spread", label: "Bear Call Spread", hint: "Bearish credit", usesWidth: true },
   { id: "iron_condor", label: "Iron Condor", hint: "Range / short vol", usesWidth: true },
+  { id: "iron_butterfly", label: "Iron Butterfly", hint: "ATM short vol", usesWidth: true },
+  { id: "long_butterfly_ce", label: "Call Butterfly", hint: "Pinned ATM", usesWidth: true },
+  { id: "call_ratio", label: "Call Ratio 1×2", hint: "Bullish ratio", usesWidth: true },
+  { id: "put_ratio", label: "Put Ratio 1×2", hint: "Bearish ratio", usesWidth: true },
+  {
+    id: "calendar_call",
+    label: "Call Calendar",
+    hint: "Near vs far expiry",
+    usesWidth: false,
+    gated: true,
+    gateHint: "Needs a second FUT/expiry — Lab chain is single-month today",
+  },
 ];
 
 export type PayoffPoint = { spot: number; pnl: number };
@@ -210,7 +234,10 @@ export function buildPayoffCurve(
   },
 ): PayoffPoint[] {
   if (legs.length === 0) return [];
-  let { gridLo, gridHi, step } = payoffGridBounds(legs, strikeStep, wings);
+  const bounds = payoffGridBounds(legs, strikeStep, wings);
+  let gridLo = bounds.gridLo;
+  let gridHi = bounds.gridHi;
+  const step = bounds.step;
   const anchors = [
     ...(spot != null && Number.isFinite(spot) && spot > 0 ? [spot] : []),
     ...(extraSpots ?? []).filter((v) => Number.isFinite(v) && v > 0),
@@ -239,7 +266,11 @@ export function buildPayoffCurve(
   return points;
 }
 
-/** ±1σ / ±2σ spot bands under lognormal (move ≈ F·σ·√T). */
+/**
+ * ±1σ / ±2σ spot bands under Black–Scholes lognormal dynamics:
+ * F · exp(±k·σ·√T). Additive F ± k·σ√T can go negative for high vol / long T.
+ * `move1` is the +1σ absolute move (F·e^{σ√T} − F).
+ */
 export function volatilitySpotBands(
   forward: number,
   ivPct: number,
@@ -248,12 +279,18 @@ export function volatilitySpotBands(
   if (!(forward > 0) || usableIvPct(ivPct) == null || !(daysToHorizon > 0)) {
     return null;
   }
-  const move1 = forward * (ivPct / 100) * Math.sqrt(yearsFromDte(daysToHorizon));
-  if (!(move1 > 0)) return null;
+  const vol = (ivPct / 100) * Math.sqrt(yearsFromDte(daysToHorizon));
+  if (!(vol > 0) || !Number.isFinite(vol)) return null;
+  const up1 = forward * Math.exp(vol);
+  const dn1 = forward * Math.exp(-vol);
+  const up2 = forward * Math.exp(2 * vol);
+  const dn2 = forward * Math.exp(-2 * vol);
+  const move1 = up1 - forward;
+  if (!(move1 > 0) || !(dn2 > 0)) return null;
   return {
     move1,
-    sd1: [forward - move1, forward + move1],
-    sd2: [forward - 2 * move1, forward + 2 * move1],
+    sd1: [dn1, up1],
+    sd2: [dn2, up2],
   };
 }
 
@@ -1701,7 +1738,7 @@ export function resolveLegIv(
   return null;
 }
 
-/** Average resolved leg IVs into one effective σ* for PoP. */
+/** Vega-weighted average of resolved leg IVs (equal-weight fallback). */
 export function blendStrategyIv(
   legs: StrategyLeg[],
   rows: OptionsChainRow[],
@@ -1725,8 +1762,50 @@ export function blendStrategyIv(
     resolved.push(item);
   }
 
-  const ivPct =
-    resolved.reduce((sum, item) => sum + item.iv, 0) / resolved.length;
+  const forward = opts?.forward;
+  const daysToExpiry = opts?.daysToExpiry;
+  const canVegaWeight =
+    forward != null &&
+    forward > 0 &&
+    daysToExpiry != null &&
+    daysToExpiry > 0;
+
+  let ivPct: number;
+  if (canVegaWeight) {
+    const weights: number[] = [];
+    let allWeighted = true;
+    for (let i = 0; i < resolved.length; i++) {
+      const leg = legs[i];
+      const item = resolved[i];
+      const model = black76Greeks({
+        forward,
+        strike: leg.strike,
+        daysToExpiry,
+        ivPct: item.iv,
+        type: leg.type,
+      });
+      if (model == null || !Number.isFinite(model.vega) || !(leg.qty > 0)) {
+        allWeighted = false;
+        break;
+      }
+      weights.push(Math.abs(model.vega) * leg.qty);
+    }
+    if (allWeighted && weights.some((w) => w > 0)) {
+      let weighted = 0;
+      let weightSum = 0;
+      for (let i = 0; i < resolved.length; i++) {
+        weighted += resolved[i].iv * weights[i];
+        weightSum += weights[i];
+      }
+      ivPct = weighted / weightSum;
+    } else {
+      ivPct =
+        resolved.reduce((sum, item) => sum + item.iv, 0) / resolved.length;
+    }
+  } else {
+    ivPct =
+      resolved.reduce((sum, item) => sum + item.iv, 0) / resolved.length;
+  }
 
   return {
     ivPct: Math.round(ivPct * 100) / 100,
@@ -1748,6 +1827,38 @@ export function chainLegPremium(
   if (!row) return { premium: null, delta: null };
   const leg = type === "CE" ? row.ce : row.pe;
   return { premium: leg.ltp, delta: leg.delta };
+}
+
+/** Chain click cycle: add buy → flip sell → remove. */
+export function cycleChainLeg(
+  legs: StrategyLeg[],
+  rows: OptionsChainRow[],
+  strike: number,
+  type: OptionSide,
+): StrategyLeg[] {
+  const existing = legs.find((leg) => leg.strike === strike && leg.type === type);
+  if (!existing) {
+    const { premium, delta } = chainLegPremium(rows, strike, type);
+    return [
+      ...legs,
+      {
+        id: `chain-${type}-${strike}`,
+        side: "buy",
+        type,
+        strike,
+        premium: premium ?? 0,
+        qty: 1,
+        delta,
+        quoteMissing: premium == null,
+      },
+    ];
+  }
+  if (existing.side === "buy") {
+    return legs.map((leg) =>
+      leg.strike === strike && leg.type === type ? { ...leg, side: "sell" } : leg,
+    );
+  }
+  return legs.filter((leg) => !(leg.strike === strike && leg.type === type));
 }
 
 function mkLeg(
@@ -1870,6 +1981,28 @@ export function buildStrategyFromTemplate(
           index: 1,
         }),
       ];
+    case "bull_put_spread":
+      return [
+        legFromChain(rows, { side: "sell", type: "PE", strike: center, qty: 1, index: 0 }),
+        legFromChain(rows, {
+          side: "buy",
+          type: "PE",
+          strike: center - width,
+          qty: 1,
+          index: 1,
+        }),
+      ];
+    case "bear_call_spread":
+      return [
+        legFromChain(rows, { side: "sell", type: "CE", strike: center, qty: 1, index: 0 }),
+        legFromChain(rows, {
+          side: "buy",
+          type: "CE",
+          strike: center + width,
+          qty: 1,
+          index: 1,
+        }),
+      ];
     case "iron_condor": {
       const putShort = center - width;
       const putLong = center - width * 2;
@@ -1882,6 +2015,44 @@ export function buildStrategyFromTemplate(
         legFromChain(rows, { side: "buy", type: "CE", strike: callLong, qty: 1, index: 3 }),
       ];
     }
+    case "iron_butterfly":
+      return [
+        legFromChain(rows, { side: "buy", type: "PE", strike: center - width, qty: 1, index: 0 }),
+        legFromChain(rows, { side: "sell", type: "PE", strike: center, qty: 1, index: 1 }),
+        legFromChain(rows, { side: "sell", type: "CE", strike: center, qty: 1, index: 2 }),
+        legFromChain(rows, { side: "buy", type: "CE", strike: center + width, qty: 1, index: 3 }),
+      ];
+    case "long_butterfly_ce":
+      return [
+        legFromChain(rows, { side: "buy", type: "CE", strike: center - width, qty: 1, index: 0 }),
+        legFromChain(rows, { side: "sell", type: "CE", strike: center, qty: 2, index: 1 }),
+        legFromChain(rows, { side: "buy", type: "CE", strike: center + width, qty: 1, index: 2 }),
+      ];
+    case "call_ratio":
+      return [
+        legFromChain(rows, { side: "buy", type: "CE", strike: center, qty: 1, index: 0 }),
+        legFromChain(rows, {
+          side: "sell",
+          type: "CE",
+          strike: center + width,
+          qty: 2,
+          index: 1,
+        }),
+      ];
+    case "put_ratio":
+      return [
+        legFromChain(rows, { side: "buy", type: "PE", strike: center, qty: 1, index: 0 }),
+        legFromChain(rows, {
+          side: "sell",
+          type: "PE",
+          strike: center - width,
+          qty: 2,
+          index: 1,
+        }),
+      ];
+    case "calendar_call":
+      // Gated until Lab supports dual-expiry chains — do not fake same-month legs.
+      return [];
     default:
       return [];
   }

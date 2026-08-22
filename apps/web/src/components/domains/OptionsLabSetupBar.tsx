@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 
 import {
   buildFutOptions,
@@ -21,6 +21,7 @@ export function OptionsLabSetupBar({
   patchConfig,
   loading,
   atmHint = null,
+  layoutExtras = null,
 }: {
   config: OptionsLabAdminConfig | null;
       presets: Array<{
@@ -35,6 +36,8 @@ export function OptionsLabSetupBar({
   patchConfig: (patch: Partial<OptionsLabAdminConfig>) => void;
   loading: boolean;
   atmHint?: number | null;
+  /** Inline market strip (Spot / PCR / …) on the same dense row. */
+  layoutExtras?: ReactNode;
 }) {
   const presetOptions = useMemo(() => buildPresetOptions(presets), [presets]);
 
@@ -84,10 +87,13 @@ export function OptionsLabSetupBar({
       futOptions={futOptions}
       strikeOptions={strikeOptions}
       idPrefix="options-lab"
-      containerClassName="rounded-lg border border-line bg-canvas/40 p-3"
-      layoutClassName="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
-      futLabel="FUT symbol"
-      atmHint={atmHint}
+      dense
+      showTradingView
+      containerClassName="w-full rounded-md border border-line bg-canvas/40 px-2 py-1"
+      layoutClassName="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1"
+      futLabel="FUT"
+      atmHint={layoutExtras ? null : atmHint}
+      layoutExtras={layoutExtras}
     />
   );
 }

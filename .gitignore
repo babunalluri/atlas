@@ -17,6 +17,7 @@ node_modules/
 out/
 *.tsbuildinfo
 .DS_Store
+.cursor/
 apps/backend/.env
 apps/web/.env
 apps/web/.env.local

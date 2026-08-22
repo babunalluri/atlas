@@ -2,17 +2,53 @@
 
 import type { ReactNode } from "react";
 
+import { openTradingViewChartWindow } from "@/components/domains/TradingViewChartWidget";
+import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
+import { Button } from "@/components/ui/Button";
 import { Label } from "@/components/ui/Field";
+import { ChartLineIcon } from "@/components/ui/icons";
 import {
   SearchableSelect,
   type SearchableSelectOption,
 } from "@/components/ui/SearchableSelect";
+import { cn } from "@/lib/utils";
 
 type CommonInstrumentConfig = {
   underlying_symbol: string;
   fut_symbol?: string | null;
   strike_step?: number | null;
 };
+
+function FieldShell({
+  dense,
+  htmlFor,
+  label,
+  children,
+  className,
+}: {
+  dense: boolean;
+  htmlFor: string;
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  if (dense) {
+    return (
+      <div className={cn("flex min-w-0 flex-1 items-center gap-2", className)}>
+        <label htmlFor={htmlFor} className="th-label shrink-0">
+          {label}
+        </label>
+        <div className="min-w-0 flex-1">{children}</div>
+      </div>
+    );
+  }
+  return (
+    <div className={className}>
+      <Label htmlFor={htmlFor}>{label}</Label>
+      {children}
+    </div>
+  );
+}
 
 export function CommonInstrumentSetupBar({
   loading,
@@ -42,6 +78,8 @@ export function CommonInstrumentSetupBar({
   footer = null,
   extras = null,
   layoutExtras = null,
+  dense = false,
+  showTradingView = false,
 }: {
   loading: boolean;
   loadingLabel: string;
@@ -70,16 +108,29 @@ export function CommonInstrumentSetupBar({
   footer?: ReactNode;
   extras?: ReactNode;
   layoutExtras?: ReactNode;
+  /** Inline labels + single-row chrome for Options Lab desk. */
+  dense?: boolean;
+  /** Chart button between Preset and Underlying. */
+  showTradingView?: boolean;
 }) {
   if (loading || !config) {
     return <p className="text-sm text-slate-muted">{loadingLabel}</p>;
   }
 
+  const presetOption =
+    presetKey && presetKey !== CUSTOM_PRESET
+      ? presetOptions.find((o) => o.value === presetKey)
+      : undefined;
+  // Prefer locked Preset ticker (NSE:HCLTECH); Custom falls back to underlying.
+  const tvSymbol =
+    (presetKey && presetKey !== CUSTOM_PRESET ? presetKey : "") ||
+    config.underlying_symbol?.trim() ||
+    "";
+
   return (
     <div className={containerClassName}>
       <div className={layoutClassName}>
-        <div>
-          <Label htmlFor={`${idPrefix}-preset`}>Preset</Label>
+        <FieldShell dense={dense} htmlFor={`${idPrefix}-preset`} label="Preset">
           <SearchableSelect
             id={`${idPrefix}-preset`}
             value={presetKey}
@@ -87,9 +138,34 @@ export function CommonInstrumentSetupBar({
             options={presetOptions}
             placeholder="Search preset…"
           />
-        </div>
-        <div>
-          <Label htmlFor={`${idPrefix}-underlying`}>Underlying</Label>
+        </FieldShell>
+        {showTradingView ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            icon={<ChartLineIcon />}
+            disabled={!tvSymbol}
+            title={
+              tvSymbol
+                ? `Chart ${presetOption?.label ?? tvSymbol} on TradingView`
+                : "Select a preset first"
+            }
+            aria-label="Open TradingView chart"
+            onClick={() => {
+              if (!tvSymbol) return;
+              openTradingViewChartWindow(tvSymbol);
+            }}
+            className="shrink-0"
+          >
+            TV
+          </Button>
+        ) : null}
+        <FieldShell
+          dense={dense}
+          htmlFor={`${idPrefix}-underlying`}
+          label="Underlying"
+        >
           <SearchableSelect
             id={`${idPrefix}-underlying`}
             className="tnum"
@@ -101,9 +177,8 @@ export function CommonInstrumentSetupBar({
             placeholder={underlyingPlaceholder}
             emptyMessage={underlyingEmptyMessage}
           />
-        </div>
-        <div>
-          <Label htmlFor={`${idPrefix}-fut`}>{futLabel}</Label>
+        </FieldShell>
+        <FieldShell dense={dense} htmlFor={`${idPrefix}-fut`} label={futLabel}>
           <SearchableSelect
             id={`${idPrefix}-fut`}
             className="tnum"
@@ -114,9 +189,13 @@ export function CommonInstrumentSetupBar({
             placeholder={futPlaceholder}
             emptyMessage={futEmptyMessage}
           />
-        </div>
-        <div>
-          <Label htmlFor={`${idPrefix}-strike-step`}>Strike step</Label>
+        </FieldShell>
+        <FieldShell
+          dense={dense}
+          htmlFor={`${idPrefix}-strike-step`}
+          label="Strike step"
+          className={dense ? "max-w-[8.5rem] shrink-0 flex-none" : undefined}
+        >
           <SearchableSelect
             id={`${idPrefix}-strike-step`}
             className="tnum"
@@ -128,13 +207,18 @@ export function CommonInstrumentSetupBar({
             placeholder={strikeAllowCustom ? "Search step…" : undefined}
             emptyMessage={strikeAllowCustom ? "Type strike step" : undefined}
           />
-        </div>
+        </FieldShell>
         {layoutExtras}
+        {dense && atmHint != null ? (
+          <span className="shrink-0 text-xs tabular-nums text-slate-muted">
+            ATM {atmHint}
+          </span>
+        ) : null}
       </div>
 
       {extras}
 
-      {footer ?? atmHint != null ? (
+      {!dense && (footer ?? atmHint != null) ? (
         <div className="mt-2 flex items-end gap-3">
           {footer}
           {atmHint != null ? (
@@ -142,6 +226,7 @@ export function CommonInstrumentSetupBar({
           ) : null}
         </div>
       ) : null}
+      {dense && footer ? <div className="mt-1">{footer}</div> : null}
     </div>
   );
 }

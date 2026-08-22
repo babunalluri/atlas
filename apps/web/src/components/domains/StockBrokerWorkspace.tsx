@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
+import { OptionsLabAutomationsPanel } from "@/components/domains/OptionsLabAutomationsPanel";
 import { OptionsLabPanel } from "@/components/domains/OptionsLabPanel";
 import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
@@ -16,7 +17,7 @@ import { cn } from "@/lib/utils";
 const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
 const DESK_MAIN_TAB_KEY = "atlas-desk-main-tab";
 
-type DeskMainTab = "signals" | "options-lab";
+type DeskMainTab = "signals" | "options-lab" | "automations";
 
 function useDeskMainTab() {
   const [tab, setTabState] = useState<DeskMainTab>("signals");
@@ -24,7 +25,7 @@ function useDeskMainTab() {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DESK_MAIN_TAB_KEY);
-      if (stored === "options-lab" || stored === "signals") {
+      if (stored === "options-lab" || stored === "signals" || stored === "automations") {
         setTabState(stored);
       }
     } catch {
@@ -73,12 +74,15 @@ export function StockBrokerWorkspace({
   onRefresh,
   variant = "admin",
   deskTitle = "Trading desk",
+  showPageHeader = true,
 }: {
   data: DomainDashboard;
   refreshing?: boolean;
   onRefresh?: () => void;
   variant?: "admin" | "customer";
   deskTitle?: string;
+  /** When false, parent chrome already shows the desk title (avoids duplicate). */
+  showPageHeader?: boolean;
 }) {
   const customer = variant === "customer";
   const { collapsed: chatCollapsed, setCollapsed: setChatCollapsed } =
@@ -133,35 +137,45 @@ export function StockBrokerWorkspace({
         </section>
       ) : null}
 
-      <section className="min-h-0 min-w-0 flex-1 overflow-y-auto px-5 py-5 lg:basis-[66%]">
-        <header className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
-              {data.domain_label} workspace
-            </p>
-            <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
-              {customer ? "Your trading desk" : deskTitle}
-            </h1>
-            <p className="mt-1 max-w-xl text-sm text-slate-muted">
-              {customer
-                ? "Research is for analysis; live orders stay on Live trading. Chat tabs match the teams assigned to you."
-                : "Research is for analysis; live orders stay on Live trading. Chat tabs match assigned teams. Signal engine and Options Lab below."}
-            </p>
-          </div>
-        </header>
+      <section
+        className={cn(
+          "min-h-0 min-w-0 flex-1 px-5 lg:basis-[66%]",
+          showPageHeader ? "py-5" : "py-2",
+          !customer
+            ? "flex flex-col overflow-hidden"
+            : "overflow-y-auto",
+        )}
+      >
+        {showPageHeader ? (
+          <header className="flex shrink-0 flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
+                {data.domain_label} workspace
+              </p>
+              <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
+                {customer ? "Your trading desk" : deskTitle}
+              </h1>
+            </div>
+          </header>
+        ) : null}
 
         {customer ? (
-          <div className="mt-5">
+          <div className={showPageHeader ? "mt-5" : undefined}>
             <TradingViewChartWidget />
           </div>
         ) : null}
 
         {!customer ? (
-          <div className="mt-5">
+          <div
+            className={cn(
+              showPageHeader && "mt-5",
+              "flex min-h-0 flex-1 flex-col",
+            )}
+          >
             <div
               role="tablist"
               aria-label="Trading desk views"
-              className="grid w-full max-w-xl grid-cols-2 gap-1 rounded-xl border border-line bg-canvas/70 p-1.5"
+              className="grid w-full shrink-0 grid-cols-3 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
             >
               {(
                 [
@@ -175,6 +189,11 @@ export function StockBrokerWorkspace({
                     label: "Options Lab",
                     hint: "Chain, builder & Greeks",
                   },
+                  {
+                    id: "automations" as const,
+                    label: "Automations",
+                    hint: "Bots · entry & exits",
+                  },
                 ] as const
               ).map(({ id, label, hint }) => {
                 const selected = deskTab === id;
@@ -184,23 +203,19 @@ export function StockBrokerWorkspace({
                     type="button"
                     role="tab"
                     aria-selected={selected}
+                    title={hint}
                     onClick={() => setDeskTab(id)}
                     className={cn(
-                      "rounded-lg px-3 py-2.5 text-left transition duration-150",
+                      "flex items-baseline gap-2 rounded-md px-3 py-2 text-left transition duration-150",
                       selected
                         ? "bg-raised text-ink shadow-sm ring-1 ring-line/80"
                         : "text-slate-muted hover:bg-raised/50 hover:text-ink",
                     )}
                   >
-                    <span className="font-display block text-base font-semibold tracking-tight">
+                    <span className="text-base font-semibold tracking-tight">
                       {label}
                     </span>
-                    <span
-                      className={cn(
-                        "mt-0.5 block text-[11px] leading-snug",
-                        selected ? "text-slate-muted" : "text-slate-muted/80",
-                      )}
-                    >
+                    <span className="truncate text-sm text-slate-muted">
                       {hint}
                     </span>
                   </button>
@@ -208,22 +223,39 @@ export function StockBrokerWorkspace({
               })}
             </div>
             {deskTab === "signals" ? (
-              <SignalMetricsPanel />
+              <div className="mt-3 min-h-0 flex-1">
+                <SignalMetricsPanel
+                  deskSnapshot={data.desk_snapshot}
+                  brokerTools={data.broker_tools ?? []}
+                  refreshing={refreshing}
+                  onRefreshBooks={onRefresh}
+                  fetchedAt={data.fetched_at}
+                  rangeDays={data.range_days}
+                />
+              </div>
+            ) : deskTab === "automations" ? (
+              <div className="mt-3 min-h-0 flex-1 overflow-hidden rounded-lg border border-line bg-canvas/40">
+                <OptionsLabAutomationsPanel />
+              </div>
             ) : (
-              <OptionsLabPanel active />
+              <div className="mt-3 min-h-0 flex-1">
+                <OptionsLabPanel active />
+              </div>
             )}
           </div>
         ) : null}
 
-        <DeskBooksPanel
-          snapshot={data.desk_snapshot}
-          customer={customer}
-          brokerTools={data.broker_tools ?? []}
-          refreshing={refreshing}
-          onRefresh={onRefresh}
-          fetchedAt={data.fetched_at}
-          rangeDays={data.range_days}
-        />
+        {customer ? (
+          <DeskBooksPanel
+            snapshot={data.desk_snapshot}
+            customer={customer}
+            brokerTools={data.broker_tools ?? []}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            fetchedAt={data.fetched_at}
+            rangeDays={data.range_days}
+          />
+        ) : null}
       </section>
     </div>
   );

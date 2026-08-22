@@ -11,10 +11,13 @@ import { Label } from "@/components/ui/Field";
 import { RefreshIcon, TrashIcon, UploadIcon } from "@/components/ui/icons";
 import {
   createOptionsPortfolio,
+  deleteOptionsLabGtt,
   deleteOptionsPortfolio,
   importOptionsPortfolioFromKite,
+  listOptionsLabGtts,
   listOptionsPortfolios,
   markOptionsPortfolio,
+  type OptionsLabGttRow,
   type OptionsPortfolio,
   type OptionsPortfolioMarkResponse,
 } from "@/lib/api/admin";
@@ -74,10 +77,20 @@ export function OptionsLabPortfoliosPanel({
   const [importing, setImporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newName, setNewName] = useState("");
+  const [bookMode, setBookMode] = useState<"drafts" | "paper">("drafts");
+  const [gtts, setGtts] = useState<OptionsLabGttRow[]>([]);
+  const [gttsLoading, setGttsLoading] = useState(false);
+  const [gttsError, setGttsError] = useState<string | null>(null);
+  const [gttsWarning, setGttsWarning] = useState<string | null>(null);
+  const [cancellingGtt, setCancellingGtt] = useState<string | null>(null);
   const mounted = useRef(true);
   const markSeq = useRef(0);
 
   const selected = portfolios.find((row) => row.id === selectedId) ?? null;
+  const visiblePortfolios = portfolios.filter((p) => {
+    const isPaper = p.name.trim().toLowerCase().startsWith("paper");
+    return bookMode === "paper" ? isPaper : !isPaper;
+  });
 
   const refreshList = useCallback(async () => {
     try {
@@ -96,6 +109,31 @@ export function OptionsLabPortfoliosPanel({
       setError(err instanceof Error ? err.message : "Failed to load portfolios");
     } finally {
       if (mounted.current) setLoading(false);
+    }
+  }, [getAccessToken]);
+
+  const refreshGtts = useCallback(async () => {
+    setGttsLoading(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) return;
+      const res = await listOptionsLabGtts(token);
+      if (!mounted.current) return;
+      if (!res.ok) {
+        setGttsError(res.error ?? "Failed to load GTTs");
+        setGtts([]);
+        setGttsWarning(null);
+        return;
+      }
+      setGtts(res.gtts ?? []);
+      setGttsError(null);
+      setGttsWarning(res.warnings?.[0] ?? null);
+    } catch (err) {
+      if (!mounted.current) return;
+      setGttsError(err instanceof Error ? err.message : "Failed to load GTTs");
+      setGtts([]);
+    } finally {
+      if (mounted.current) setGttsLoading(false);
     }
   }, [getAccessToken]);
 
@@ -133,7 +171,8 @@ export function OptionsLabPortfoliosPanel({
     if (!active || !configReady) return;
     setLoading(true);
     void refreshList();
-  }, [active, configReady, refreshList]);
+    void refreshGtts();
+  }, [active, configReady, refreshList, refreshGtts]);
 
   useEffect(() => {
     if (!active || !configReady || !selectedId) return;
@@ -157,6 +196,29 @@ export function OptionsLabPortfoliosPanel({
     if (!pendingSave?.legs.length) return;
     setNewName(pendingSave.name);
   }, [pendingSave]);
+
+  async function onCancelGtt(triggerId: string | number) {
+    const id = String(triggerId);
+    if (!window.confirm(`Cancel GTT #${id}? This hits the broker delete_gtt tool.`)) {
+      return;
+    }
+    setCancellingGtt(id);
+    setGttsError(null);
+    try {
+      const token = await getAccessToken();
+      if (!token) return;
+      const res = await deleteOptionsLabGtt(token, triggerId);
+      if (!res.ok) {
+        setGttsError(res.error ?? "Cancel GTT failed");
+        return;
+      }
+      await refreshGtts();
+    } catch (err) {
+      setGttsError(err instanceof Error ? err.message : "Cancel GTT failed");
+    } finally {
+      setCancellingGtt(null);
+    }
+  }
 
   async function onCreateFromBuilder() {
     if (!pendingSave?.legs.length) return;
@@ -233,9 +295,31 @@ export function OptionsLabPortfoliosPanel({
     <div className="mt-3 flex min-h-0 flex-1 flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
+          <div className="mb-2 inline-flex rounded-md border border-line bg-canvas/60 p-0.5 text-xs">
+            {(
+              [
+                ["drafts", "Drafts"],
+                ["paper", "Paper"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setBookMode(id)}
+                className={
+                  bookMode === id
+                    ? "rounded bg-raised px-2.5 py-1 font-medium text-ink shadow-sm"
+                    : "rounded px-2.5 py-1 font-medium text-slate-muted"
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <p className="text-sm text-slate-muted">
-            Draft portfolios with live mark-to-market. Save from Builder or import open F&O
-            options from Kite.
+            {bookMode === "paper"
+              ? "Paper book — auto-tagged “Paper …” after place_paper_order; rename drafts the same way."
+              : "Draft portfolios with live mark-to-market. Save from Builder or import open F&O options from Kite."}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -299,13 +383,15 @@ export function OptionsLabPortfoliosPanel({
         <div className="overflow-auto rounded-lg border border-line">
           {loading ? (
             <p className="p-4 text-sm text-slate-muted">Loading portfolios…</p>
-          ) : portfolios.length === 0 ? (
+          ) : visiblePortfolios.length === 0 ? (
             <p className="p-4 text-sm text-slate-muted">
-              No draft portfolios yet. Save a strategy from Builder or import from Kite.
+              {bookMode === "paper"
+                ? "No paper books yet. Buy with paper toolkit bound, or rename a draft to start with “Paper …”."
+                : "No draft portfolios yet. Save a strategy from Builder or import from Kite."}
             </p>
           ) : (
             <ul className="divide-y divide-line/70">
-              {portfolios.map((row) => (
+              {visiblePortfolios.map((row) => (
                 <li key={row.id}>
                   <button
                     type="button"
@@ -428,6 +514,86 @@ export function OptionsLabPortfoliosPanel({
             </>
           )}
         </div>
+      </div>
+
+      <div className="rounded-lg border border-line p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-ink">GTT exits</h3>
+            <p className="text-xs text-slate-muted">
+              Open kite GTTs (list/cancel). Placed after live SL/Tgt orders when place_gtt is bound.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={gttsLoading}
+            onClick={() => void refreshGtts()}
+          >
+            <RefreshIcon className="mr-1.5 size-3.5" />
+            {gttsLoading ? "Loading…" : "Refresh GTTs"}
+          </Button>
+        </div>
+        {gttsError ? (
+          <p className="mt-2 rounded-md border border-rose/30 bg-rose/10 px-2 py-1.5 text-sm text-rose">
+            {gttsError}
+          </p>
+        ) : null}
+        {gttsWarning ? (
+          <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">{gttsWarning}</p>
+        ) : null}
+        {gtts.length === 0 && !gttsLoading && !gttsError ? (
+          <p className="mt-3 text-sm text-slate-muted">No open GTTs.</p>
+        ) : (
+          <div className="mt-3 overflow-auto rounded border border-line/70">
+            <table className="min-w-full border-collapse text-left text-xs">
+              <thead className="bg-raised/90 text-[10px] uppercase tracking-wide text-slate-muted">
+                <tr>
+                  <th className="px-3 py-2">Id</th>
+                  <th className="px-3 py-2">Symbol</th>
+                  <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Triggers</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {gtts.map((row, idx) => {
+                  const id = row.trigger_id;
+                  const key = id != null ? String(id) : `gtt-${idx}`;
+                  return (
+                    <tr key={key} className="border-t border-line/70">
+                      <td className="px-3 py-2 tabular-nums">{id ?? "—"}</td>
+                      <td className="px-3 py-2">
+                        {row.tradingsymbol || row.symbols?.[0] || "—"}
+                      </td>
+                      <td className="px-3 py-2">{row.type || "—"}</td>
+                      <td className="px-3 py-2 tabular-nums">
+                        {Array.isArray(row.trigger_values)
+                          ? row.trigger_values.join(" / ")
+                          : "—"}
+                      </td>
+                      <td className="px-3 py-2">{row.status || "—"}</td>
+                      <td className="px-3 py-2 text-right">
+                        {id != null ? (
+                          <button
+                            type="button"
+                            className="text-rose hover:underline disabled:opacity-50"
+                            disabled={cancellingGtt === String(id)}
+                            onClick={() => void onCancelGtt(id)}
+                          >
+                            {cancellingGtt === String(id) ? "Cancelling…" : "Cancel"}
+                          </button>
+                        ) : null}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

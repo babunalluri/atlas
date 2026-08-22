@@ -3,7 +3,14 @@
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
-import { HistoryIcon, RefreshIcon } from "@/components/ui/icons";
+import {
+  BuildingIcon,
+  ChartLineIcon,
+  ExternalLinkIcon,
+  HistoryIcon,
+  LayersIcon,
+  RefreshIcon,
+} from "@/components/ui/icons";
 import type { OptionsScreenerRow, OptionsScreenerSnapshot } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
@@ -143,24 +150,21 @@ export function OptionsLabScreenerPanel({
           <div className="mt-2 flex flex-wrap gap-1">
             {(
               [
-                ["indices", "Indices"],
-                ["equities", "Equities"],
-                ["all", "All"],
+                ["indices", "Indices", <ChartLineIcon key="i" />],
+                ["equities", "Equities", <BuildingIcon key="e" />],
+                ["all", "All", <LayersIcon key="a" />],
               ] as const
-            ).map(([id, label]) => (
-              <button
+            ).map(([id, label, icon]) => (
+              <Button
                 key={id}
                 type="button"
+                size="sm"
+                variant={universe === id ? "primary" : "secondary"}
+                icon={icon}
                 onClick={() => onUniverseChange(id)}
-                className={cn(
-                  "rounded-md border px-2 py-1 text-xs",
-                  universe === id
-                    ? "border-ink bg-ink text-canvas"
-                    : "border-line bg-canvas text-slate-muted hover:text-ink",
-                )}
               >
                 {label}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
@@ -297,6 +301,7 @@ export function OptionsLabScreenerPanel({
                   <Button
                     variant="secondary"
                     size="sm"
+                    icon={<ExternalLinkIcon />}
                     disabled={Boolean(row.error)}
                     onClick={() => onSelectUnderlying(row)}
                   >

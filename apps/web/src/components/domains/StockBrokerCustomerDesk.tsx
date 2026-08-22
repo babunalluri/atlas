@@ -95,14 +95,18 @@ export function StockBrokerCustomerDesk({
         data-theme={dark ? "dark" : undefined}
         className="app-canvas flex h-dvh min-h-0 flex-col text-ink"
       >
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-2.5">
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-teal">
-            {tenant.name}
+      <header className="flex shrink-0 items-start justify-between gap-3 border-b border-line px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
+            {data?.domain_label
+              ? `${data.domain_label} workspace`
+              : tenant.name}
           </p>
-          <p className="text-sm font-medium">Trading desk</p>
+          <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
+            Trading desk
+          </h1>
         </div>
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2 pt-1">
           <ChatAccountBar
             tenantSlug={tenant.slug}
             signInRedirect={`/t/${tenant.slug}/chat`}
@@ -127,6 +131,7 @@ export function StockBrokerCustomerDesk({
             onRefresh={() => void refresh()}
             variant={isAdminDesk ? "admin" : "customer"}
             deskTitle="Trading desk"
+            showPageHeader={false}
           />
         ) : (
           <p className="px-5 py-10 text-sm text-slate-muted">Loading your desk…</p>

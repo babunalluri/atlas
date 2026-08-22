@@ -104,6 +104,7 @@ export function DeskBooksPanel({
   onRefresh,
   fetchedAt,
   rangeDays,
+  className,
 }: {
   snapshot: DomainDashboard["desk_snapshot"];
   customer: boolean;
@@ -112,6 +113,7 @@ export function DeskBooksPanel({
   onRefresh?: () => void;
   fetchedAt?: string;
   rangeDays?: number;
+  className?: string;
 }) {
   const loaded = snapshot != null;
   const books = snapshot?.books?.length ? snapshot.books : PLACEHOLDER_BOOKS;
@@ -134,7 +136,7 @@ export function DeskBooksPanel({
   const snapshotError = snapshot?.error;
 
   return (
-    <section className="mt-5">
+    <section className={cn(className ?? "mt-5")}>
       <div className="table-shell rounded-xl">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
           <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-muted">

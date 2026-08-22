@@ -120,6 +120,46 @@ export function SaveIcon({ className }: { className?: string }) {
   );
 }
 
+export function TableIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={buttonIconClass(className)}
+      aria-hidden
+    >
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 10h18" />
+      <path d="M3 15h18" />
+      <path d="M9 4v16" />
+    </svg>
+  );
+}
+
+export function BookIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={buttonIconClass(className)}
+      aria-hidden
+    >
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+      <path d="M8 7h8" />
+      <path d="M8 11h6" />
+    </svg>
+  );
+}
+
 export function PublishIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -594,6 +634,68 @@ export function MinusIcon({ className }: { className?: string }) {
       aria-hidden
     >
       <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+export function ChartLineIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={buttonIconClass(className)}
+      aria-hidden
+    >
+      <path d="M3 3v18h18" />
+      <path d="m7 14 4-4 3 3 5-6" />
+    </svg>
+  );
+}
+
+export function BuildingIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={buttonIconClass(className)}
+      aria-hidden
+    >
+      <path d="M6 22V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v18" />
+      <path d="M6 12h12" />
+      <path d="M16 22V9h4v13" />
+      <path d="M10 6h.01" />
+      <path d="M14 6h.01" />
+      <path d="M10 10h.01" />
+      <path d="M14 10h.01" />
+      <path d="M10 14h.01" />
+      <path d="M14 14h.01" />
+    </svg>
+  );
+}
+
+export function LayersIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={buttonIconClass(className)}
+      aria-hidden
+    >
+      <path d="m12 2 9 5-9 5-9-5z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 17 9 5 9-5" />
     </svg>
   );
 }

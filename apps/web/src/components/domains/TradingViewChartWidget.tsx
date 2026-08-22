@@ -3,8 +3,7 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
-import { PlayIcon } from "@/components/ui/icons";
-import { useSurfaceTheme } from "@/components/layout/ThemeToggle";
+import { ChartLineIcon, PlayIcon } from "@/components/ui/icons";
 import { cn } from "@/lib/utils";
 
 const PRESETS = [
@@ -14,43 +13,76 @@ const PRESETS = [
   { label: "BTC", symbol: "BINANCE:BTCUSDT" },
 ];
 
-const INTERVALS = [
-  { label: "5m", value: "5" },
-  { label: "15m", value: "15" },
-  { label: "1h", value: "60" },
-  { label: "D", value: "D" },
-  { label: "W", value: "W" },
-];
+/** Map desk underlying / preset symbols to TradingView tickers. */
+export function toTradingViewSymbol(raw: string | null | undefined): string {
+  const s = (raw || "").trim().toUpperCase();
+  if (!s) return "NSE:NIFTY";
+  const aliases: Record<string, string> = {
+    "NSE:NIFTY 50": "NSE:NIFTY",
+    "NIFTY 50": "NSE:NIFTY",
+    NIFTY: "NSE:NIFTY",
+    BANKNIFTY: "NSE:BANKNIFTY",
+    "NSE:BANKNIFTY": "NSE:BANKNIFTY",
+    FINNIFTY: "NSE:FINNIFTY",
+    "NSE:FINNIFTY": "NSE:FINNIFTY",
+    MIDCPNIFTY: "NSE:MIDCPNIFTY",
+    "NSE:MIDCPNIFTY": "NSE:MIDCPNIFTY",
+    NIFTYNXT50: "NSE:NIFTYNXT50",
+    "NSE:NIFTYNXT50": "NSE:NIFTYNXT50",
+    SENSEX: "BSE:SENSEX",
+    "BSE:SENSEX": "BSE:SENSEX",
+  };
+  if (aliases[s]) return aliases[s];
+  if (s.includes(":")) return s.replace(/\s+/g, "");
+  return `NSE:${s.replace(/\s+/g, "")}`;
+}
 
-function chartSrc(symbol: string, interval: string, dark: boolean) {
-  const params = new URLSearchParams({
-    symbol,
-    interval,
-    timezone: "Asia/Kolkata",
-    theme: dark ? "dark" : "light",
-    style: "1",
-    locale: "en",
-    toolbarbg: dark ? "0f172a" : "f8fafc",
-    hideideas: "1",
-    hide_legend: "0",
-    hide_side_toolbar: "0",
-    allow_symbol_change: "1",
-    withdateranges: "1",
-    saveimage: "0",
-    studies: "[]",
-  });
-  return `https://s.tradingview.com/widgetembed/?${params.toString()}`;
+export function tradingViewChartUrl(raw: string | null | undefined): string {
+  const symbol = toTradingViewSymbol(raw);
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`;
+}
+
+/** Desk-sized TradingView popup (~70% screen, centered — not fullscreen). */
+export function openTradingViewChartWindow(raw: string | null | undefined) {
+  const url = tradingViewChartUrl(raw);
+  const availW = window.screen.availWidth || 1440;
+  const availH = window.screen.availHeight || 900;
+  const width = Math.min(1100, Math.max(880, Math.round(availW * 0.7)));
+  const height = Math.min(720, Math.max(560, Math.round(availH * 0.72)));
+  const left = Math.max(0, Math.round((availW - width) / 2));
+  const top = Math.max(0, Math.round((availH - height) / 2));
+  const features = [
+    "popup=yes",
+    `width=${width}`,
+    `height=${height}`,
+    `left=${left}`,
+    `top=${top}`,
+  ].join(",");
+
+  // Open blank first so we can enforce size before navigating cross-origin.
+  // Drop opener before navigate — features cannot include noopener on about:blank.
+  const win = window.open("about:blank", "atlas-tradingview", features);
+  if (!win) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  try {
+    win.resizeTo(width, height);
+    win.moveTo(left, top);
+  } catch {
+    // Some browsers ignore resize; features still applied on first create.
+  }
+  win.opener = null;
+  win.location.href = url;
+  win.focus();
 }
 
 export function TradingViewChartWidget() {
-  const { theme } = useSurfaceTheme("admin");
-  const dark = theme === "dark";
   const [draft, setDraft] = useState("NSE:NIFTY");
   const [symbol, setSymbol] = useState("NSE:NIFTY");
-  const [interval, setInterval] = useState("15");
 
   function loadSymbol(next: string) {
-    const trimmed = next.trim().toUpperCase();
+    const trimmed = toTradingViewSymbol(next);
     if (!trimmed) return;
     setDraft(trimmed);
     setSymbol(trimmed);
@@ -62,7 +94,7 @@ export function TradingViewChartWidget() {
         <div>
           <p className="th-label">Market chart</p>
           <p className="mt-0.5 text-[11px] text-slate-muted">
-            TradingView candles · {symbol} · {interval === "D" || interval === "W" ? interval : `${interval}m`}
+            TradingView · {symbol}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -91,7 +123,7 @@ export function TradingViewChartWidget() {
             if (event.key === "Enter") loadSymbol(draft);
           }}
           spellCheck={false}
-          className="min-w-[10rem] flex-1 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-teal/25"
+          className="min-w-[10rem] flex-1 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-teal/25"
           placeholder="NSE:NIFTY"
           aria-label="Chart symbol"
         />
@@ -103,30 +135,16 @@ export function TradingViewChartWidget() {
         >
           Load
         </Button>
-        <div className="flex gap-1">
-          {INTERVALS.map((item) => (
-            <button
-              key={item.value}
-              type="button"
-              onClick={() => setInterval(item.value)}
-              className={cn(
-                "rounded-md px-2 py-1 text-[11px] font-medium",
-                interval === item.value
-                  ? "bg-ink text-canvas"
-                  : "text-slate-muted hover:bg-fog/70 hover:text-ink",
-              )}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="primary"
+          icon={<ChartLineIcon />}
+          onClick={() => openTradingViewChartWindow(symbol)}
+        >
+          Open chart
+        </Button>
       </div>
-      <iframe
-        key={`${symbol}:${interval}:${dark ? "dark" : "light"}`}
-        title={`${symbol} TradingView chart`}
-        src={chartSrc(symbol, interval, dark)}
-        className="h-[26rem] w-full border-0"
-      />
     </section>
   );
 }

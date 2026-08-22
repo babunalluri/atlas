@@ -137,17 +137,24 @@ export function useOptionsLabConfigAutosave(
     return () => clearTimeout(timer);
   }, [saveStatus]);
 
-  const patchConfig = useCallback((patch: Partial<OptionsLabAdminConfig>) => {
-    setConfig((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, ...patch };
-      // Underlying change must refresh FUT — keep stale NIFTY FUT off RELIANCE etc.
-      if (patch.underlying_symbol && patch.fut_symbol === undefined) {
-        next.fut_symbol = suggestFutSymbol(next.underlying_symbol) || "";
+  const patchConfig = useCallback(
+    (patch: Partial<OptionsLabAdminConfig>) => {
+      setConfig((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev, ...patch };
+        // Underlying change must refresh FUT — keep stale NIFTY FUT off RELIANCE etc.
+        if (patch.underlying_symbol && patch.fut_symbol === undefined) {
+          next.fut_symbol = suggestFutSymbol(next.underlying_symbol) || "";
+        }
+        return next;
+      });
+      if (patch.underlying_symbol !== undefined) {
+        const match = presets.find((p) => p.symbol === patch.underlying_symbol);
+        setPresetKey(match ? match.symbol : CUSTOM_PRESET);
       }
-      return next;
-    });
-  }, []);
+    },
+    [presets],
+  );
 
   const onPresetChange = useCallback(
     (value: string) => {

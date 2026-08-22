@@ -12,6 +12,7 @@ import {
   buildPayoffCurve,
   buildPnlTable,
   buildStrategyFromTemplate,
+  cycleChainLeg,
   daysToExpiryFromFutSymbol,
   daysToExpiryFromOptionSymbol,
   estimateFundsAndMargins,
@@ -34,6 +35,7 @@ import {
   resolveDaysToExpiry,
   resolveLegIv,
   summarizeStrategy,
+  STRATEGY_TEMPLATES,
   syntheticForwardFromChain,
   totalPayoffAtSpot,
   volatilitySpotBands,
@@ -62,6 +64,17 @@ const rows = [
 ];
 
 describe("options lab strategy", () => {
+  it("cycles chain click buy → sell → remove", () => {
+    let legs: StrategyLeg[] = [];
+    legs = cycleChainLeg(legs, rows, 24300, "CE");
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({ side: "buy", type: "CE", strike: 24300, premium: 120 });
+    legs = cycleChainLeg(legs, rows, 24300, "CE");
+    expect(legs[0].side).toBe("sell");
+    legs = cycleChainLeg(legs, rows, 24300, "CE");
+    expect(legs).toHaveLength(0);
+  });
+
   it("computes long call payoff at expiry", () => {
     const leg: StrategyLeg = {
       id: "1",
@@ -778,6 +791,18 @@ describe("options lab strategy", () => {
     const bands = volatilitySpotBands(24300, 12, 7);
     expect(bands).not.toBeNull();
     expect(bands!.sd1[0]).toBeLessThan(24300);
+    expect(bands!.sd1[0]).toBeGreaterThan(0);
+    expect(bands!.sd2[0]).toBeGreaterThan(0);
+    // Lognormal: downside = F·e^{-σ√T}, not F − F·σ√T
+    const vol = 0.12 * Math.sqrt(7 / 365);
+    expect(bands!.sd1[0]).toBeCloseTo(24300 * Math.exp(-vol), 6);
+    expect(bands!.sd1[1]).toBeCloseTo(24300 * Math.exp(vol), 6);
+
+    // High vol + 1y must stay positive (additive model went negative here).
+    const wide = volatilitySpotBands(25000, 100, 365);
+    expect(wide).not.toBeNull();
+    expect(wide!.sd2[0]).toBeGreaterThan(0);
+    expect(wide!.sd2[1]).toBeGreaterThan(wide!.sd2[0]);
 
     const dist = estimatePayoffDistributionStats(legs, {
       forward: 24300,
@@ -936,5 +961,174 @@ describe("options lab strategy", () => {
     });
     expect(curve[0].spot).toBeLessThanOrEqual(24000);
     expect(curve[curve.length - 1].spot).toBeGreaterThanOrEqual(26000);
+  });
+
+  it("locks auditor golden checks for bands, blend, interp, parity, PnL table", () => {
+    // log-space ±2σ at F=25000, σ=20%, T=30/365
+    const bands30 = volatilitySpotBands(25000, 20, 30);
+    expect(bands30).not.toBeNull();
+    const vol30 = 0.2 * Math.sqrt(30 / 365);
+    expect(bands30!.sd2[0]).toBeCloseTo(25000 * Math.exp(-2 * vol30), 1);
+    expect(bands30!.sd2[1]).toBeCloseTo(25000 * Math.exp(2 * vol30), 1);
+    expect(bands30!.sd2[0]).toBeGreaterThan(0);
+
+    // Vega-weighted blend: ATM 18% + OTM 28% vs independent weights
+    const blendRows = [
+      {
+        strike: 25000,
+        is_atm: true,
+        ce: { symbol: "", ltp: 200, oi: 1, volume: 1, iv: 18, delta: 0.5 },
+        pe: { symbol: "", ltp: 200, oi: 1, volume: 1, iv: 18, delta: -0.5 },
+      },
+      {
+        strike: 28000,
+        is_atm: false,
+        ce: { symbol: "", ltp: 40, oi: 1, volume: 1, iv: 28, delta: 0.2 },
+        pe: { symbol: "", ltp: 40, oi: 1, volume: 1, iv: 28, delta: -0.2 },
+      },
+    ];
+    const blendLegs: StrategyLeg[] = [
+      {
+        id: "atm",
+        side: "buy",
+        type: "CE",
+        strike: 25000,
+        premium: 200,
+        qty: 1,
+        delta: 0.5,
+      },
+      {
+        id: "otm",
+        side: "buy",
+        type: "CE",
+        strike: 28000,
+        premium: 40,
+        qty: 1,
+        delta: 0.2,
+      },
+    ];
+    const vAtm = black76Greeks({
+      forward: 25000,
+      strike: 25000,
+      daysToExpiry: 30,
+      ivPct: 18,
+      type: "CE",
+    })!.vega;
+    const vOtm = black76Greeks({
+      forward: 25000,
+      strike: 28000,
+      daysToExpiry: 30,
+      ivPct: 28,
+      type: "CE",
+    })!.vega;
+    const expectedBlend = (18 * Math.abs(vAtm) + 28 * Math.abs(vOtm)) /
+      (Math.abs(vAtm) + Math.abs(vOtm));
+    const blend = blendStrategyIv(blendLegs, blendRows, 18, {
+      forward: 25000,
+      daysToExpiry: 30,
+    });
+    expect(blend).not.toBeNull();
+    expect(blend!.ivPct).toBeCloseTo(Math.round(expectedBlend * 100) / 100, 5);
+
+    // Linear IV interpolate mid strike
+    const interpRows = [
+      {
+        strike: 24000,
+        is_atm: false,
+        ce: { symbol: "", ltp: 1, oi: 1, volume: 1, iv: 12, delta: 0.6 },
+        pe: { symbol: "", ltp: 1, oi: 1, volume: 1, iv: 12, delta: -0.4 },
+      },
+      {
+        strike: 26000,
+        is_atm: false,
+        ce: { symbol: "", ltp: 1, oi: 1, volume: 1, iv: 16, delta: 0.4 },
+        pe: { symbol: "", ltp: 1, oi: 1, volume: 1, iv: 16, delta: -0.6 },
+      },
+    ];
+    expect(interpolateSideIv(interpRows, 25000, "CE")).toBeCloseTo(14, 5);
+
+    // Put-call parity synthetic forward
+    const parityRows = [
+      {
+        strike: 25000,
+        is_atm: true,
+        ce: { symbol: "", ltp: 400, oi: 1, volume: 1, iv: 15, delta: 0.55 },
+        pe: { symbol: "", ltp: 250, oi: 1, volume: 1, iv: 15, delta: -0.45 },
+      },
+    ];
+    // F ≈ K + C − P = 25000 + 400 − 250 = 25150
+    expect(syntheticForwardFromChain(parityRows, 25000, 25000, 30)).toBeCloseTo(
+      25150,
+      5,
+    );
+
+    // Expiry column of PnL table matches intrinsic payoff
+    const straddle = buildStrategyFromTemplate("long_straddle", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+    });
+    const table = buildPnlTable(straddle, {
+      strikeStep: 50,
+      remainingDtes: [7, 0],
+      ivPct: 12,
+      wings: 6,
+    });
+    const expiryCol = table.remainingDtes.indexOf(0);
+    expect(expiryCol).toBeGreaterThanOrEqual(0);
+    let maxErr = 0;
+    for (let i = 0; i < table.spots.length; i++) {
+      const intrinsic = totalPayoffAtSpot(straddle, table.spots[i]);
+      maxErr = Math.max(maxErr, Math.abs(table.cells[i][expiryCol] - intrinsic));
+    }
+    expect(maxErr).toBe(0);
+
+    // Breakevens: long straddle debit 175 → BE = 24300 ± 175
+    const bePoints = buildPayoffCurve(straddle, {
+      spot: 24300,
+      strikeStep: 50,
+      wings: 12,
+    });
+    const be = summarizeStrategy(straddle, bePoints).breakevens;
+    expect(be.length).toBeGreaterThanOrEqual(2);
+    expect(be[0]).toBeCloseTo(24125, -1);
+    expect(be[be.length - 1]).toBeCloseTo(24475, -1);
+  });
+
+  it("builds new Sensibull templates without duplicate strike+type legs", () => {
+    const ids = [
+      "bull_put_spread",
+      "bear_call_spread",
+      "iron_butterfly",
+      "long_butterfly_ce",
+      "call_ratio",
+      "put_ratio",
+    ] as const;
+    for (const id of ids) {
+      const legs = buildStrategyFromTemplate(id, {
+        atm: 24300,
+        strikeStep: 50,
+        rows,
+        widthSteps: 1,
+      });
+      expect(legs.length).toBeGreaterThan(0);
+      const keys = legs.map((l) => `${l.side}:${l.type}:${l.strike}`);
+      // iron_butterfly sells both CE and PE at ATM — same strike ok, different type
+      const typeStrike = legs.map((l) => `${l.type}:${l.strike}`);
+      expect(new Set(typeStrike).size).toBe(typeStrike.length);
+      expect(keys.length).toBe(legs.length);
+    }
+  });
+
+  it("gates call calendar until dual-expiry exists", () => {
+    const tpl = STRATEGY_TEMPLATES.find((t) => t.id === "calendar_call");
+    expect(tpl?.gated).toBe(true);
+    const legs = buildStrategyFromTemplate("calendar_call", {
+      atm: 24300,
+      strikeStep: 50,
+      rows,
+      widthSteps: 1,
+    });
+    expect(legs).toEqual([]);
   });
 });

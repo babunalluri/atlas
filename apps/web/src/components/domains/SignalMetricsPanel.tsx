@@ -3,15 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SignalSetupBar } from "@/components/domains/SignalSetupBar";
+import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { FieldHint, Input, Label, Textarea } from "@/components/ui/Field";
-import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon, ChevronDownIcon, ArrowUpIcon } from "@/components/ui/icons";
+import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon, ChevronDownIcon, ArrowUpIcon, BookIcon } from "@/components/ui/icons";
 import {
   getSignalState,
   publishSignalEntry,
+  type DomainBrokerTool,
+  type DomainDashboard,
   type SignalEngineAdminConfig,
   type SignalEngineState,
   type SignalEntry,
@@ -262,8 +265,10 @@ type BuySignalTone = SignalEntryStatus | "loading";
 function buySignalTone(
   state: SignalEngineState | null,
   entry: SignalEntry | null | undefined,
+  engineEnabled = true,
 ): BuySignalTone {
   if (!state) return "loading";
+  if (!engineEnabled) return "waiting";
   return entry?.status ?? (state.entry_ready ? "ready" : "waiting");
 }
 
@@ -429,9 +434,15 @@ function NotifySignalDialog({
           <FieldHint>Adjust CE/PE, exit, or add desk notes before sending.</FieldHint>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="secondary" onClick={onClose} disabled={publishing}>
-            Cancel
-          </Button>
+          <Button
+            variant="secondary"
+            size="icon"
+            icon={<CloseIcon />}
+            aria-label="Cancel"
+            title="Cancel"
+            onClick={onClose}
+            disabled={publishing}
+          />
           {tone === "waiting" ? (
             <button
               type="button"
@@ -475,15 +486,18 @@ function BuySignalBanner({
   publishMsg: string | null;
   onOpenNotify: () => void;
 }) {
-  const tone = buySignalTone(state, entry);
-  const buyLine = buySignalLine(entry);
-  const note =
-    entry?.status_note ??
-    (state
-      ? `${state.passed}/${state.evaluable} rules passing`
-      : "Loading buy signal…");
+  const tone = buySignalTone(state, entry, engineEnabled);
+  const buyLine = engineEnabled
+    ? buySignalLine(entry)
+    : "Engine stopped — signals paused";
+  const note = !engineEnabled
+    ? "Start the engine to resume live buy signals"
+    : (entry?.status_note ??
+      (state
+        ? `${state.passed}/${state.evaluable} rules passing`
+        : "Loading buy signal…"));
   const statusLine = publishMsg ?? note;
-  const canNotify = !publishing && Boolean(state?.entry);
+  const canNotify = engineEnabled && !publishing && Boolean(state?.entry);
 
   return (
     <div
@@ -502,15 +516,17 @@ function BuySignalBanner({
         </span>
         <Badge
           tone={
-            tone === "ready"
-              ? "success"
-              : tone === "blocked"
-                ? "danger"
-                : "warning"
+            !engineEnabled
+              ? "warning"
+              : tone === "ready"
+                ? "success"
+                : tone === "blocked"
+                  ? "danger"
+                  : "warning"
           }
-          live={tone === "ready"}
+          live={engineEnabled && tone === "ready"}
         >
-          {buySignalBadge(tone)}
+          {!engineEnabled ? "STOPPED" : buySignalBadge(tone)}
         </Badge>
         <p
           className={cn(
@@ -766,7 +782,21 @@ function MetricTable({
   );
 }
 
-export function SignalMetricsPanel() {
+export function SignalMetricsPanel({
+  deskSnapshot,
+  brokerTools = [],
+  refreshing,
+  onRefreshBooks,
+  fetchedAt,
+  rangeDays,
+}: {
+  deskSnapshot?: DomainDashboard["desk_snapshot"];
+  brokerTools?: DomainBrokerTool[];
+  refreshing?: boolean;
+  onRefreshBooks?: () => void;
+  fetchedAt?: string;
+  rangeDays?: number;
+} = {}) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [state, setState] = useState<SignalEngineState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -778,6 +808,7 @@ export function SignalMetricsPanel() {
   const [streaming, setStreaming] = useState(false);
   const [warningsOpen, setWarningsOpen] = useState(true);
   const [engineBusy, setEngineBusy] = useState(false);
+  const [booksOpen, setBooksOpen] = useState(false);
   const mounted = useRef(true);
 
   const {
@@ -863,6 +894,15 @@ export function SignalMetricsPanel() {
   }, [getAccessToken]);
 
   useEffect(() => {
+    if (!booksOpen) return;
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setBooksOpen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [booksOpen]);
+
+  useEffect(() => {
     mounted.current = true;
     if (!isLoaded || !isSignedIn) return;
 
@@ -946,7 +986,7 @@ export function SignalMetricsPanel() {
     }
   }
 
-  const buyTone = buySignalTone(state, state?.entry);
+  const buyTone = buySignalTone(state, state?.entry, engineEnabled);
 
   function openNotifyDialog() {
     setNotifyTitle(defaultNotifyTitle(buyTone));
@@ -961,11 +1001,10 @@ export function SignalMetricsPanel() {
   const fetchedLabel = formatEvaluatedAt(state?.evaluated_at);
 
   return (
-    <section className="mt-4 flex min-h-[min(72vh,54rem)] flex-col rounded-xl border border-line bg-raised/20 p-4">
-      <header className="border-b border-line pb-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
+    <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-raised/20 p-2">
+      <header className="shrink-0 space-y-1.5 border-b border-line pb-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
               <Badge
                 tone={
                   !engineEnabled
@@ -999,23 +1038,30 @@ export function SignalMetricsPanel() {
               ) : saveStatus === "saved" ? (
                 <Badge tone="success">Saved</Badge>
               ) : null}
-            </div>
-            <p className="mt-1 text-sm text-slate-muted">
+            <span className="text-xs text-slate-muted">
               {state?.underlying?.label ?? "No underlying"} ·{" "}
               {state ? `${state.passed}/${state.evaluable} passing` : "—"} ·{" "}
               {engineEnabled
                 ? mockMode
-                  ? "mock feed · demo metrics"
+                  ? "mock feed"
                   : (state?.feed_source ?? "…")
-                : "engine stopped — metrics frozen"}
+                : "engine stopped"}
               {!state?.has_broker && !mockMode ? " · broker not bound" : ""}
-            </p>
+            </span>
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <Button
+              variant={booksOpen ? "primary" : "secondary"}
+              size="sm"
+              icon={<BookIcon />}
+              onClick={() => setBooksOpen((open) => !open)}
+            >
+              Books
+            </Button>
             <label
               htmlFor="signal-mock"
               title="Rehearsal mode — demo metrics without live broker quotes"
-              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2.5 py-1.5 text-xs font-medium text-ink"
+              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink"
             >
               <input
                 id="signal-mock"
@@ -1024,7 +1070,7 @@ export function SignalMetricsPanel() {
                 onChange={(e) => patchConfig({ mock: e.target.checked })}
                 className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
               />
-              Mock feed
+              Mock
             </label>
             {engineEnabled ? (
               <Button
@@ -1034,7 +1080,7 @@ export function SignalMetricsPanel() {
                 disabled={engineBusy}
                 onClick={() => void onToggleEngine(false)}
               >
-                {engineBusy ? "Stopping…" : "Stop engine"}
+                {engineBusy ? "Stopping…" : "Stop"}
               </Button>
             ) : (
               <Button
@@ -1043,7 +1089,7 @@ export function SignalMetricsPanel() {
                 disabled={engineBusy}
                 onClick={() => void onToggleEngine(true)}
               >
-                {engineBusy ? "Starting…" : "Start engine"}
+                {engineBusy ? "Starting…" : "Start"}
               </Button>
             )}
             <Button
@@ -1060,7 +1106,7 @@ export function SignalMetricsPanel() {
         {failingRules.length > 0 || fetchedLabel ? (
           <div
             className={cn(
-              "mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-amber-950",
+              "flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-amber-950",
               failingRules.length > 0 ? "justify-between" : "justify-end",
             )}
           >
@@ -1133,7 +1179,7 @@ export function SignalMetricsPanel() {
         onSend={() => void onPublish(notifyTitle, notifyBody)}
       />
 
-      <div className="mt-3 shrink-0">
+      <div className="mt-2 shrink-0">
         <SignalSetupBar
           config={config}
           presets={presets}
@@ -1189,10 +1235,55 @@ export function SignalMetricsPanel() {
       </div>
 
       {state ? (
-        <p className="mt-2 shrink-0 text-xs text-slate-muted">
-          {metrics.length} checklist metrics · 3 columns per group · stream{" "}
-          {state.poll_ms}ms · broker {state.broker_poll_ms ?? 500}ms
+        <p className="mt-1 shrink-0 text-xs text-slate-muted">
+          {metrics.length} checklist metrics · stream {state.poll_ms}ms · broker{" "}
+          {state.broker_poll_ms ?? 500}ms
         </p>
+      ) : null}
+
+      {booksOpen ? (
+        <div className="absolute inset-0 z-30 flex justify-end bg-ink/35">
+          <button
+            type="button"
+            aria-label="Close overlay"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setBooksOpen(false)}
+          />
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-label="Desk books"
+            className="relative z-10 flex h-full w-full max-w-3xl flex-col border-l border-line bg-canvas shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
+              <h2 className="flex items-center gap-2 font-display text-base font-semibold text-ink">
+                <BookIcon className="h-4 w-4" />
+                Books
+              </h2>
+              <button
+                type="button"
+                onClick={() => setBooksOpen(false)}
+                aria-label="Close"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-muted hover:bg-fog/70 hover:text-ink"
+              >
+                <CloseIcon className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
+              <DeskBooksPanel
+                className="mt-2"
+                snapshot={deskSnapshot}
+                customer={false}
+                brokerTools={brokerTools}
+                refreshing={refreshing}
+                onRefresh={onRefreshBooks}
+                fetchedAt={fetchedAt}
+                rangeDays={rangeDays}
+              />
+            </div>
+          </aside>
+        </div>
       ) : null}
     </section>
   );
