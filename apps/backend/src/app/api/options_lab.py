@@ -368,6 +368,9 @@ class OptionsLabBacktestCreateIn(BaseModel):
     underlying_symbol: str | None = None
     underlying_label: str | None = None
     use_historical: bool = False
+    use_marks: bool = False
+    iv_pct: float | None = None
+    entry_dte: float | None = None
     closes: list[float] | None = Field(default=None, max_length=400)
 
 
@@ -378,6 +381,9 @@ class OptionsLabBacktestRunIn(BaseModel):
     shock_pct: float = 2.0
     path_bias: str = "flat"
     use_historical: bool = False
+    use_marks: bool = False
+    iv_pct: float | None = None
+    entry_dte: float | None = None
     closes: list[float] | None = Field(default=None, max_length=400)
 
 

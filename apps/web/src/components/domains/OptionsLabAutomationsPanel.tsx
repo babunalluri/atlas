@@ -175,10 +175,8 @@ export function OptionsLabAutomationsPanel() {
       ) : (
         <ul className="divide-y divide-line rounded-lg border border-line">
           {bots.map((bot) => (
-            <li
-              key={bot.id}
-              className="flex flex-col gap-2 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-            >
+            <li key={bot.id} className="flex flex-col gap-2 px-3 py-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-ink">{bot.name}</p>
                 <p className="text-xs text-slate-muted">
@@ -186,6 +184,11 @@ export function OptionsLabAutomationsPanel() {
                   {bot.stop_pct}% · {bot.mode}
                   {bot.avoid_events ? " · event-avoid" : ""}
                   {bot.max_dte_hold != null ? ` · flat≤${bot.max_dte_hold}d` : ""}
+                  {bot.entry?.min_ivp != null ? ` · IVP≥${bot.entry.min_ivp}` : ""}
+                  {bot.entry?.max_dte != null ? ` · enter≤${bot.entry.max_dte}d` : ""}
+                  {bot.schedule?.window_start
+                    ? ` · ${bot.schedule.window_start}–${bot.schedule.window_end ?? "15:30"}`
+                    : ""}
                   {bot.open_position ? " · OPEN" : ""}
                   {bot.kill
                     ? " · KILL"
@@ -329,6 +332,90 @@ export function OptionsLabAutomationsPanel() {
                 >
                   Delete
                 </button>
+              </div>
+              </div>
+              <div className="flex w-full flex-wrap items-center gap-2 border-t border-line/60 pt-2 text-xs text-slate-muted">
+                <span className="font-medium text-ink">Entry</span>
+                <label className="flex items-center gap-1">
+                  IVP≥
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    defaultValue={bot.entry?.min_ivp ?? ""}
+                    key={`${bot.id}-minivp-${bot.entry?.min_ivp ?? "x"}`}
+                    placeholder="—"
+                    onBlur={(e) => {
+                      const raw = e.target.value.trim();
+                      const next = raw === "" ? null : Number(raw);
+                      if (next === (bot.entry?.min_ivp ?? null)) return;
+                      void patchBot(bot.id, {
+                        entry: { ...(bot.entry ?? {}), min_ivp: next },
+                      });
+                    }}
+                    className="w-12 rounded border border-line bg-canvas px-1 py-0.5 text-ink"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  enter≤
+                  <input
+                    type="number"
+                    min={0}
+                    max={45}
+                    defaultValue={bot.entry?.max_dte ?? ""}
+                    key={`${bot.id}-maxdte-${bot.entry?.max_dte ?? "x"}`}
+                    placeholder="—"
+                    onBlur={(e) => {
+                      const raw = e.target.value.trim();
+                      const next = raw === "" ? null : Number(raw);
+                      if (next === (bot.entry?.max_dte ?? null)) return;
+                      void patchBot(bot.id, {
+                        entry: { ...(bot.entry ?? {}), max_dte: next },
+                      });
+                    }}
+                    className="w-12 rounded border border-line bg-canvas px-1 py-0.5 text-ink"
+                  />
+                  d
+                </label>
+                <span className="ml-1 font-medium text-ink">Window</span>
+                <input
+                  type="time"
+                  defaultValue={bot.schedule?.window_start ?? "09:15"}
+                  key={`${bot.id}-ws-${bot.schedule?.window_start ?? "x"}`}
+                  onBlur={(e) => {
+                    const next = e.target.value || "09:15";
+                    if (next === (bot.schedule?.window_start ?? "09:15")) return;
+                    void patchBot(bot.id, {
+                      schedule: {
+                        ...(bot.schedule ?? {}),
+                        window_start: next,
+                        window_end: bot.schedule?.window_end ?? "15:30",
+                        days: bot.schedule?.days ?? [0, 1, 2, 3, 4],
+                      },
+                    });
+                  }}
+                  className="rounded border border-line bg-canvas px-1 py-0.5 text-ink"
+                />
+                <span>–</span>
+                <input
+                  type="time"
+                  defaultValue={bot.schedule?.window_end ?? "15:30"}
+                  key={`${bot.id}-we-${bot.schedule?.window_end ?? "x"}`}
+                  onBlur={(e) => {
+                    const next = e.target.value || "15:30";
+                    if (next === (bot.schedule?.window_end ?? "15:30")) return;
+                    void patchBot(bot.id, {
+                      schedule: {
+                        ...(bot.schedule ?? {}),
+                        window_end: next,
+                        window_start: bot.schedule?.window_start ?? "09:15",
+                        days: bot.schedule?.days ?? [0, 1, 2, 3, 4],
+                      },
+                    });
+                  }}
+                  className="rounded border border-line bg-canvas px-1 py-0.5 text-ink"
+                />
+                <span className="text-[10px] text-slate-muted">IST · Mon–Fri default</span>
               </div>
             </li>
           ))}

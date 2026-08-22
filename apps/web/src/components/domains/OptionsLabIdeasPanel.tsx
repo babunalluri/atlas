@@ -25,16 +25,26 @@ export function OptionsLabIdeasPanel({
 }) {
   const [universe, setUniverse] = useState<IdeaFilters["universe"]>("all");
   const [minPop, setMinPop] = useState(0);
+  const [minIvp, setMinIvp] = useState<number | "">("");
   const [maxIvp, setMaxIvp] = useState<number | "">("");
+  const [minPcr, setMinPcr] = useState<number | "">("");
+  const [maxPcr, setMaxPcr] = useState<number | "">("");
+  const [minDte, setMinDte] = useState<number | "">("");
+  const [maxDte, setMaxDte] = useState<number | "">("");
 
   const ideas = useMemo(
     () =>
       rankIdeasWithPop(snapshot?.rows ?? [], {
         universe,
         minPop: minPop > 0 ? minPop : null,
+        minIvp: minIvp === "" ? null : Number(minIvp),
         maxIvp: maxIvp === "" ? null : Number(maxIvp),
+        minPcr: minPcr === "" ? null : Number(minPcr),
+        maxPcr: maxPcr === "" ? null : Number(maxPcr),
+        minDte: minDte === "" ? null : Number(minDte),
+        maxDte: maxDte === "" ? null : Number(maxDte),
       }),
-    [snapshot?.rows, universe, minPop, maxIvp],
+    [snapshot?.rows, universe, minPop, minIvp, maxIvp, minPcr, maxPcr, minDte, maxDte],
   );
 
   return (
@@ -70,6 +80,20 @@ export function OptionsLabIdeasPanel({
           />
         </label>
         <label>
+          Min IVP
+          <input
+            type="number"
+            min={0}
+            max={100}
+            placeholder="—"
+            value={minIvp}
+            onChange={(e) =>
+              setMinIvp(e.target.value === "" ? "" : Number(e.target.value))
+            }
+            className="ml-1 w-14 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          />
+        </label>
+        <label>
           Max IVP
           <input
             type="number"
@@ -80,7 +104,61 @@ export function OptionsLabIdeasPanel({
             onChange={(e) =>
               setMaxIvp(e.target.value === "" ? "" : Number(e.target.value))
             }
-            className="ml-1 w-16 rounded border border-line bg-canvas px-2 py-1 text-ink"
+            className="ml-1 w-14 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          />
+        </label>
+        <label>
+          Min PCR
+          <input
+            type="number"
+            min={0}
+            step={0.05}
+            placeholder="—"
+            value={minPcr}
+            onChange={(e) =>
+              setMinPcr(e.target.value === "" ? "" : Number(e.target.value))
+            }
+            className="ml-1 w-14 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          />
+        </label>
+        <label>
+          Max PCR
+          <input
+            type="number"
+            min={0}
+            step={0.05}
+            placeholder="—"
+            value={maxPcr}
+            onChange={(e) =>
+              setMaxPcr(e.target.value === "" ? "" : Number(e.target.value))
+            }
+            className="ml-1 w-14 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          />
+        </label>
+        <label>
+          Min DTE
+          <input
+            type="number"
+            min={0}
+            placeholder="—"
+            value={minDte}
+            onChange={(e) =>
+              setMinDte(e.target.value === "" ? "" : Number(e.target.value))
+            }
+            className="ml-1 w-14 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          />
+        </label>
+        <label>
+          Max DTE
+          <input
+            type="number"
+            min={0}
+            placeholder="—"
+            value={maxDte}
+            onChange={(e) =>
+              setMaxDte(e.target.value === "" ? "" : Number(e.target.value))
+            }
+            className="ml-1 w-14 rounded border border-line bg-canvas px-2 py-1 text-ink"
           />
         </label>
       </div>

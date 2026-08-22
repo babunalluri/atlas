@@ -133,3 +133,81 @@ async def test_create_backtest_with_closes_is_model_hist() -> None:
     assert created["ok"] is True
     assert created["backtest"]["fidelity"] == "model_hist"
     assert created["backtest"]["result"]["path_bias"] == "historical"
+
+
+def test_run_bs_mark_backtest_fidelity() -> None:
+    from app.domains.options_lab_backtests import run_bs_mark_backtest
+
+    out = run_bs_mark_backtest(
+        legs=LEGS,
+        spot=24500,
+        days=8,
+        shock_pct=2.0,
+        path_bias="flat",
+        iv_pct=18.0,
+        entry_dte=10,
+    )
+    assert out is not None
+    assert out["fidelity"] == "bs_marks"
+    assert out["days"] == 8
+    assert "iv_pct" in out
+    # Flat-ish spot + theta: path equity should not be identical every day
+    path_vals = {round(s["pnl_path"], 2) for s in out["shocks"]}
+    assert len(path_vals) > 1
+
+
+def test_bs_mark_short_dte_decays_toward_intrinsic() -> None:
+    """Short DTE must retain theta — no 0.02y (~7d) floor flattening the path."""
+    from app.domains.options_lab_backtests import run_bs_mark_backtest
+
+    out = run_bs_mark_backtest(
+        legs=LEGS,
+        spot=24500,
+        days=5,
+        shock_pct=0.5,
+        path_bias="flat",
+        iv_pct=15.0,
+        entry_dte=5,
+    )
+    assert out is not None
+    assert out["days"] == 5
+    first = out["shocks"][0]["pnl_path"]
+    last = out["shocks"][-1]["pnl_path"]
+    intrinsic = strategy_pnl_at_spot(LEGS, out["shocks"][-1]["path_spot"])
+    # Path should move (theta), and day-5 mark should be near expiry intrinsic.
+    assert first != pytest.approx(last, abs=1.0)
+    assert last == pytest.approx(intrinsic, abs=0.01)
+
+
+def test_bs_mark_path_clamped_to_entry_dte() -> None:
+    from app.domains.options_lab_backtests import run_bs_mark_backtest
+
+    out = run_bs_mark_backtest(
+        legs=LEGS,
+        spot=24500,
+        days=20,
+        shock_pct=1.0,
+        path_bias="flat",
+        iv_pct=18.0,
+        entry_dte=5,
+    )
+    assert out is not None
+    assert out["days"] == 5
+
+
+@pytest.mark.asyncio
+async def test_create_backtest_with_marks_is_bs_marks() -> None:
+    created = await create_backtest(
+        "tenant-bs",
+        {
+            "name": "BS marks",
+            "legs": LEGS,
+            "spot": 24500,
+            "days": 6,
+            "use_marks": True,
+            "iv_pct": 16,
+            "entry_dte": 8,
+        },
+    )
+    assert created["ok"] is True
+    assert created["backtest"]["fidelity"] == "bs_marks"

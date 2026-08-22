@@ -4356,6 +4356,9 @@ export async function createOptionsLabBacktest(
     underlying_symbol?: string;
     underlying_label?: string;
     use_historical?: boolean;
+    use_marks?: boolean;
+    iv_pct?: number;
+    entry_dte?: number;
     closes?: number[];
   },
 ): Promise<{

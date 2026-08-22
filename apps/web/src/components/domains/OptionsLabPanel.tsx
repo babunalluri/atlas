@@ -1192,6 +1192,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                   getAccessToken={getAccessToken}
                   underlyingSymbol={config?.underlying_symbol ?? snapshot?.underlying_symbol}
                   underlyingLabel={config?.underlying_label ?? snapshot?.underlying_label}
+                  futSymbol={config?.fut_symbol ?? snapshot?.fut_symbol}
                   handoffHint={backtestHandoffHint}
                 />
               ) : overlay === "flows" ? (

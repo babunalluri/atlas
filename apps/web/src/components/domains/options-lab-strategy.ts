@@ -11,6 +11,8 @@ export type StrategyLeg = {
   premium: number;
   qty: number;
   delta: number | null;
+  /** Chain option symbol when resolved from quotes. */
+  symbol?: string | null;
   /** Chain had no LTP at this strike when the leg was built. */
   quoteMissing?: boolean;
 };
@@ -1402,7 +1404,10 @@ function black76Price(
   sigma: number,
   type: OptionSide,
 ): number {
-  if (!(forward > 0) || !(strike > 0) || !(years > 0) || !(sigma > 0)) return 0;
+  if (!(forward > 0) || !(strike > 0)) return 0;
+  if (!(years > 0) || !(sigma > 0)) {
+    return type === "CE" ? Math.max(0, forward - strike) : Math.max(0, strike - forward);
+  }
   const vol = sigma * Math.sqrt(years);
   if (vol < 1e-12) {
     return type === "CE" ? Math.max(0, forward - strike) : Math.max(0, strike - forward);
@@ -1411,6 +1416,48 @@ function black76Price(
   const d2 = d1 - vol;
   if (type === "CE") return forward * normCdf(d1) - strike * normCdf(d2);
   return strike * normCdf(-d2) - forward * normCdf(-d1);
+}
+
+/** Exported Black-76 mid — matches backend ``black76_price`` (r=0). */
+export function black76MidPrice(args: {
+  forward: number;
+  strike: number;
+  years: number;
+  ivPct: number;
+  type: OptionSide;
+}): number {
+  return black76Price(
+    args.forward,
+    args.strike,
+    args.years,
+    args.ivPct / 100,
+    args.type,
+  );
+}
+
+export function strategyPnlAtBsMark(
+  legs: StrategyLeg[],
+  {
+    spot,
+    years,
+    ivPct,
+  }: {
+    spot: number;
+    years: number;
+    ivPct: number;
+  },
+): number {
+  const sigma = Math.max(0.01, ivPct / 100);
+  let total = 0;
+  for (const leg of legs) {
+    const premium = Number(leg.premium ?? 0);
+    const qty = Number(leg.qty ?? 1);
+    if (!(leg.strike > 0) || !Number.isFinite(premium) || !Number.isFinite(qty)) continue;
+    const mark = black76Price(spot, leg.strike, Math.max(0, years), sigma, leg.type);
+    const unit = leg.side === "buy" ? mark - premium : premium - mark;
+    total += unit * qty;
+  }
+  return total;
 }
 
 export type Black76Greeks = {

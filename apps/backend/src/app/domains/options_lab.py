@@ -1662,6 +1662,7 @@ class OptionsLabService:
     async def run_model_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
         from app.domains.options_lab_backtests import (
             normalize_leg,
+            run_bs_mark_backtest,
             run_historical_close_backtest,
             run_model_backtest,
         )
@@ -1691,6 +1692,33 @@ class OptionsLabService:
                     closes.append(v)
         elif payload.get("use_historical"):
             closes = await self._fetch_daily_closes(days=int(payload.get("days") or 10)) or []
+
+        if payload.get("use_marks"):
+            try:
+                iv_pct = float(payload.get("iv_pct") or 15)
+            except (TypeError, ValueError):
+                iv_pct = 15.0
+            try:
+                entry_dte = (
+                    float(payload["entry_dte"])
+                    if payload.get("entry_dte") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                entry_dte = None
+            result = run_bs_mark_backtest(
+                legs=legs,
+                spot=spot,
+                days=int(payload.get("days") or 10),
+                shock_pct=float(payload.get("shock_pct") or 2),
+                path_bias=str(payload.get("path_bias") or "flat"),
+                iv_pct=iv_pct,
+                entry_dte=entry_dte,
+                closes=closes if len(closes) >= 3 else None,
+            )
+            if result is None:
+                return {"ok": False, "error": "BS mark backtest failed."}
+            return {"ok": True, "fidelity": "bs_marks", "result": result}
 
         if closes:
             result = run_historical_close_backtest(

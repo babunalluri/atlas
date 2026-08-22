@@ -4,7 +4,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import type { StrategyLeg } from "@/components/domains/options-lab-strategy";
-import { buildPayoffCurve, summarizeStrategy } from "@/components/domains/options-lab-strategy";
+import {
+  buildPayoffCurve,
+  resolveDaysToExpiry,
+  strategyPnlAtBsMark,
+  summarizeStrategy,
+} from "@/components/domains/options-lab-strategy";
 import {
   createOptionsLabBacktest,
   createOptionsLabBot,
@@ -33,6 +38,7 @@ export function OptionsLabBacktestPanel({
   getAccessToken,
   underlyingSymbol,
   underlyingLabel,
+  futSymbol,
   handoffHint,
 }: {
   legs: StrategyLeg[];
@@ -42,6 +48,7 @@ export function OptionsLabBacktestPanel({
   getAccessToken: () => Promise<string | null>;
   underlyingSymbol?: string;
   underlyingLabel?: string;
+  futSymbol?: string;
   /** e.g. Ideas handoff label while chain/template legs load. */
   handoffHint?: string | null;
 }) {
@@ -66,6 +73,7 @@ export function OptionsLabBacktestPanel({
   const [saveName, setSaveName] = useState("");
   const [saving, setSaving] = useState(false);
   const [useHistorical, setUseHistorical] = useState(false);
+  const [useMarks, setUseMarks] = useState(false);
   const [saved, setSaved] = useState<OptionsLabBacktestSummaryRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [summary, setSummary] = useState<Awaited<
@@ -98,8 +106,21 @@ export function OptionsLabBacktestPanel({
     void refreshSaved();
   }, [refreshSaved]);
 
+  const entryDte = useMemo(() => {
+    const fromLegs = resolveDaysToExpiry({
+      futSymbol,
+      optionSymbols: legs.map((leg) => leg.symbol),
+    });
+    if (fromLegs != null && fromLegs > 0) return fromLegs;
+    return null;
+  }, [futSymbol, legs]);
+
   const result = useMemo(() => {
     if (!legs.length || spot == null || !Number.isFinite(spot)) return null;
+    const dte0 = entryDte != null && entryDte > 0 ? entryDte : days;
+    const lifeDays = Math.max(1, Math.ceil(dte0));
+    const pathDays = Math.min(days, lifeDays);
+    const ivPct = ivCalibrated?.latest ?? 15;
     const curve = buildPayoffCurve(legs, { spot, strikeStep, wings: 12 });
     const summaryLocal = summarizeStrategy(legs, curve);
     const nearest = (target: number) => {
@@ -110,9 +131,16 @@ export function OptionsLabBacktestPanel({
       }
       return best.pnl;
     };
+    const markPnl = (target: number, day: number) => {
+      const rawYears = (dte0 - day) / 365;
+      const years =
+        rawYears <= 0 ? 0 : rawYears < 0.0005 ? 0.0005 : rawYears;
+      return strategyPnlAtBsMark(legs, { spot: target, years, ivPct });
+    };
 
-    const shocks = Array.from({ length: days }, (_, i) => {
-      const sqrtT = Math.sqrt(i + 1);
+    const shocks = Array.from({ length: pathDays }, (_, i) => {
+      const day = i + 1;
+      const sqrtT = Math.sqrt(day);
       const move = (shockPct / 100) * sqrtT;
       const up = spot * (1 + move);
       const down = spot * (1 - move);
@@ -122,16 +150,16 @@ export function OptionsLabBacktestPanel({
       } else if (pathBias === "down") {
         pathSpot = spot * (1 - move * 0.85);
       } else {
-        pathSpot = spot * (1 + Math.sin(((i + 1) / days) * Math.PI * 2) * move * 0.35);
+        pathSpot = spot * (1 + Math.sin((day / pathDays) * Math.PI * 2) * move * 0.35);
       }
       return {
-        day: i + 1,
+        day,
         up,
         down,
         pathSpot,
-        pnlUp: nearest(up),
-        pnlDown: nearest(down),
-        pnlPath: nearest(pathSpot),
+        pnlUp: useMarks ? markPnl(up, day) : nearest(up),
+        pnlDown: useMarks ? markPnl(down, day) : nearest(down),
+        pnlPath: useMarks ? markPnl(pathSpot, day) : nearest(pathSpot),
       };
     });
 
@@ -155,8 +183,20 @@ export function OptionsLabBacktestPanel({
       avg,
       maxDd,
       peak,
+      fidelityPreview: useMarks ? "bs_marks" : "model",
+      entryDte: dte0,
     };
-  }, [days, legs, pathBias, shockPct, spot, strikeStep]);
+  }, [
+    days,
+    entryDte,
+    ivCalibrated?.latest,
+    legs,
+    pathBias,
+    shockPct,
+    spot,
+    strikeStep,
+    useMarks,
+  ]);
 
   function downloadCsv() {
     if (!result) return;
@@ -204,13 +244,18 @@ export function OptionsLabBacktestPanel({
         underlying_symbol: underlyingSymbol,
         underlying_label: underlyingLabel,
         use_historical: useHistorical,
+        use_marks: useMarks,
+        iv_pct: ivCalibrated?.latest,
+        entry_dte: entryDte ?? days,
       });
       if (!res.ok || !res.backtest) {
         setMessage(res.error ?? "Save failed");
         return;
       }
       setSaveName("");
-      const fidelity = res.backtest.fidelity ?? (useHistorical ? "model_hist" : "model");
+      const fidelity =
+        res.backtest.fidelity ??
+        (useMarks ? "bs_marks" : useHistorical ? "model_hist" : "model");
       const warnBits = res.warnings?.length ? ` · ${res.warnings.join(" ")}` : "";
       setMessage(
         `Saved “${res.backtest.name}” (${res.backtest.id}) · fidelity ${fidelity}${warnBits}`,
@@ -305,17 +350,32 @@ export function OptionsLabBacktestPanel({
         </p>
       ) : null}
       <p className="text-xs text-slate-muted">
-        Model estimate (expiry payoff vs spot path) — not historical option tick replay. Shock % is
-        a daily proxy; path moves scale with √t. Preview fidelity:{" "}
+        {useMarks
+          ? "Black-76 mark path (flat IV) vs entry premium — not NSE tick / chain archive."
+          : "Model estimate (expiry payoff vs spot path) — not historical option tick replay."}{" "}
+        Shock % is a daily proxy; path moves scale with √t. Preview fidelity:{" "}
         <span className="font-semibold text-ink">
-          {ivCalibrated ? "model · IV-calibrated" : "model"}
+          {useMarks
+            ? "bs_marks"
+            : ivCalibrated
+              ? "model · IV-calibrated"
+              : "model"}
         </span>
         {ivCalibrated
           ? ` · ATM IV ${ivCalibrated.latest.toFixed(1)}% (${ivCalibrated.samples} samples)`
           : null}
-        . Prefer historical closes on save for fidelity{" "}
-        <span className="font-semibold text-ink">model_hist</span> (still expiry-intrinsic P&amp;L).
+        {entryDte != null ? ` · DTE ${entryDte}` : " · DTE≈window"}
+        . Prefer historical closes on save for{" "}
+        <span className="font-semibold text-ink">model_hist</span>
+        {useMarks ? " under BS marks" : ""}.
       </p>
+      {useHistorical && !useMarks ? (
+        <p className="rounded border border-line bg-fog/40 px-2 py-1.5 text-xs text-slate-muted">
+          On-screen chart/table stay <span className="font-medium text-ink">model</span>{" "}
+          preview. <span className="font-medium text-ink">Save run</span> writes{" "}
+          <span className="font-medium text-ink">model_hist</span>.
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-xs text-slate-muted">
           Window (days)
@@ -360,6 +420,14 @@ export function OptionsLabBacktestPanel({
             onChange={(e) => setUseHistorical(e.target.checked)}
           />
           Prefer historical closes
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-slate-muted">
+          <input
+            type="checkbox"
+            checked={useMarks}
+            onChange={(e) => setUseMarks(e.target.checked)}
+          />
+          Mark path (BS)
         </label>
         {ivCalibrated ? (
           <Button
