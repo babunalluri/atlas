@@ -178,6 +178,8 @@ services:
       SIGNAL_ENGINE_TICKER_ENABLED: "true"
       KITE_TICKER_ENABLED: "true"
       OPTIONS_LAB_TICKER_ENABLED: "true"
+      # Armed paper bots (~60s). Requires WEB_CONCURRENCY=1 (default uvicorn).
+      OPTIONS_LAB_BOTS_ENABLED: "true"
     ports:
       - "7777:7777"
     volumes:

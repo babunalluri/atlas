@@ -132,6 +132,58 @@ def run_model_backtest(
     }
 
 
+def run_historical_close_backtest(
+    *,
+    legs: list[dict[str, Any]],
+    closes: list[float],
+    shock_pct: float = 2.0,
+) -> dict[str, Any] | None:
+    """Model P&L along real daily closes (still expiry-intrinsic; fidelity model_hist)."""
+    path = [float(c) for c in closes if isinstance(c, (int, float)) and float(c) > 0]
+    if not legs or len(path) < MIN_DAYS:
+        return None
+    path = path[-MAX_DAYS:]
+    spot0 = path[0]
+    shock = max(0.5, min(15.0, float(shock_pct or 2.0)))
+    shocks: list[dict[str, Any]] = []
+    for i, path_spot in enumerate(path):
+        day = i + 1
+        move = (shock / 100.0) * math.sqrt(day)
+        up = spot0 * (1 + move)
+        down = spot0 * (1 - move)
+        shocks.append(
+            {
+                "day": day,
+                "up": round(up, 4),
+                "down": round(down, 4),
+                "path_spot": round(path_spot, 4),
+                "pnl_up": round(strategy_pnl_at_spot(legs, up), 4),
+                "pnl_down": round(strategy_pnl_at_spot(legs, down), 4),
+                "pnl_path": round(strategy_pnl_at_spot(legs, path_spot), 4),
+            }
+        )
+    pnls = [s["pnl_up"] for s in shocks] + [s["pnl_down"] for s in shocks]
+    path_pnls = [s["pnl_path"] for s in shocks]
+    wins = sum(1 for p in pnls if p > 0)
+    avg = sum(pnls) / len(pnls) if pnls else 0.0
+    return {
+        "fidelity": "model_hist",
+        "days": len(shocks),
+        "shock_pct": shock,
+        "path_bias": "historical",
+        "spot": spot0,
+        "shocks": shocks,
+        "equity": [{"day": s["day"], "equity": s["pnl_path"]} for s in shocks],
+        "stats": {
+            "hit_rate": round(wins / len(pnls), 4) if pnls else 0.0,
+            "avg_pnl": round(avg, 4),
+            "path_trough": round(min(path_pnls), 4) if path_pnls else 0.0,
+            "path_peak": round(max(path_pnls), 4) if path_pnls else 0.0,
+        },
+        "note": "Path uses historical closes; P&L is still expiry-intrinsic model (not chain marks).",
+    }
+
+
 def normalize_leg(raw: dict[str, Any], *, index: int) -> dict[str, Any] | None:
     side = str(raw.get("side") or "").lower()
     opt_type = str(raw.get("type") or "").upper()
@@ -332,14 +384,33 @@ async def create_backtest(tenant_id: str, payload: dict[str, Any]) -> dict[str, 
         "shock_pct": float(payload.get("shock_pct") or 2),
         "path_bias": str(payload.get("path_bias") or "flat"),
         "strike_step": payload.get("strike_step"),
+        "path_source": "historical"
+        if payload.get("use_historical") or payload.get("closes")
+        else "synthetic",
     }
-    result = run_model_backtest(
-        legs=legs,
-        spot=spot,
-        days=params["days"],
-        shock_pct=params["shock_pct"],
-        path_bias=params["path_bias"],
-    )
+    closes_raw = payload.get("closes") if isinstance(payload.get("closes"), list) else None
+    closes: list[float] = []
+    if closes_raw:
+        for c in closes_raw[:400]:
+            try:
+                v = float(c)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                closes.append(v)
+
+    if closes and len(closes) >= MIN_DAYS:
+        result = run_historical_close_backtest(
+            legs=legs, closes=closes, shock_pct=params["shock_pct"]
+        )
+    else:
+        result = run_model_backtest(
+            legs=legs,
+            spot=spot,
+            days=params["days"],
+            shock_pct=params["shock_pct"],
+            path_bias=params["path_bias"],
+        )
     if result is None:
         return {"ok": False, "error": "Model backtest failed."}
 
@@ -352,7 +423,7 @@ async def create_backtest(tenant_id: str, payload: dict[str, Any]) -> dict[str, 
     row = {
         "id": f"bt-{uuid.uuid4().hex[:12]}",
         "name": name[:120],
-        "fidelity": "model",
+        "fidelity": result.get("fidelity") or "model",
         "underlying_symbol": str(payload.get("underlying_symbol") or "").strip() or None,
         "underlying_label": str(payload.get("underlying_label") or "").strip() or None,
         "spot": spot,

@@ -1614,7 +1614,26 @@ class OptionsLabService:
             body["underlying_label"] = config.underlying_label
         if body.get("strike_step") is None:
             body["strike_step"] = config.strike_step
-        return await create_backtest(_tenant_key(self.context), body)
+        if body.get("use_historical") and not body.get("closes"):
+            closes = await self._fetch_daily_closes(
+                days=int(body.get("days") or 10),
+            )
+            if closes:
+                body["closes"] = closes
+            else:
+                body["use_historical"] = False
+                body.setdefault("warnings", [])
+                if isinstance(body["warnings"], list):
+                    body["warnings"].append(
+                        "Historical closes unavailable — fell back to synthetic √t path."
+                    )
+        out = await create_backtest(_tenant_key(self.context), body)
+        warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else None
+        if out.get("ok") and warnings:
+            out["warnings"] = warnings
+            if isinstance(out.get("backtest"), dict):
+                out["backtest"] = {**out["backtest"], "warnings": warnings}
+        return out
 
     async def get_backtest(self, backtest_id: str) -> dict[str, Any]:
         from app.domains.options_lab_backtests import get_backtest
@@ -1641,7 +1660,11 @@ class OptionsLabService:
         )
 
     async def run_model_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
-        from app.domains.options_lab_backtests import normalize_leg, run_model_backtest
+        from app.domains.options_lab_backtests import (
+            normalize_leg,
+            run_historical_close_backtest,
+            run_model_backtest,
+        )
 
         raw_legs = payload.get("legs") if isinstance(payload.get("legs"), list) else []
         legs: list[dict[str, Any]] = []
@@ -1656,6 +1679,29 @@ class OptionsLabService:
             spot = float(payload.get("spot"))
         except (TypeError, ValueError):
             return {"ok": False, "error": "spot is required."}
+
+        closes: list[float] = []
+        if isinstance(payload.get("closes"), list):
+            for c in payload["closes"]:
+                try:
+                    v = float(c)
+                except (TypeError, ValueError):
+                    continue
+                if v > 0:
+                    closes.append(v)
+        elif payload.get("use_historical"):
+            closes = await self._fetch_daily_closes(days=int(payload.get("days") or 10)) or []
+
+        if closes:
+            result = run_historical_close_backtest(
+                legs=legs,
+                closes=closes,
+                shock_pct=float(payload.get("shock_pct") or 2),
+            )
+            if result is None:
+                return {"ok": False, "error": "Historical model backtest failed."}
+            return {"ok": True, "fidelity": result.get("fidelity") or "model_hist", "result": result}
+
         result = run_model_backtest(
             legs=legs,
             spot=spot,
@@ -1666,6 +1712,71 @@ class OptionsLabService:
         if result is None:
             return {"ok": False, "error": "Model backtest failed."}
         return {"ok": True, "fidelity": "model", "result": result}
+
+    async def _fetch_daily_closes(self, *, days: int = 10) -> list[float] | None:
+        """Best-effort daily closes via bound get_historical_candles + underlying quote token."""
+        from app.domains.desk_snapshot import DESK_TEAM_SLUGS, invoke_tool
+        from app.domains.options_lab_trading import OptionsLabTradingService
+        from app.domains.signal_engine import _parse_historical_candles
+
+        config = await self._read_config()
+        if config.mock or not config.underlying_symbol:
+            return None
+        trading = OptionsLabTradingService(self.session, self.context)
+        quote_fn, _, _ = await trading._find_tool(
+            ("get_quote", "get_ltp"),
+            team_slugs=("paper-trading", "live-trading", *DESK_TEAM_SLUGS),
+        )
+        hist_fn, _, _ = await trading._find_tool(
+            ("get_historical_candles",),
+            team_slugs=("paper-trading", "live-trading", *DESK_TEAM_SLUGS),
+        )
+        if quote_fn is None or hist_fn is None:
+            return None
+        try:
+            raw_q = await invoke_tool(
+                quote_fn, {"instruments": config.underlying_symbol}
+            )
+        except Exception:
+            return None
+        token = 0
+        data = raw_q.get("data", raw_q) if isinstance(raw_q, dict) else raw_q
+        rows: list[Any] = []
+        if isinstance(data, dict):
+            rows = list(data.values()) if data else []
+        elif isinstance(data, list):
+            rows = data
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                token = int(row.get("instrument_token") or 0)
+            except (TypeError, ValueError):
+                token = 0
+            if token > 0:
+                break
+        if token <= 0:
+            return None
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        lookback = max(5, min(45, int(days or 10)) + 5)
+        from_dt = (now - timedelta(days=lookback)).strftime("%Y-%m-%d 09:15:00")
+        to_dt = now.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            hist = await invoke_tool(
+                hist_fn,
+                {
+                    "instrument_token": token,
+                    "interval": "day",
+                    "from_date": from_dt,
+                    "to_date": to_dt,
+                },
+            )
+        except Exception:
+            return None
+        _h, _l, closes = _parse_historical_candles(hist)
+        if len(closes) < 3:
+            return None
+        return closes[-max(3, min(45, int(days or 10))) :]
 
     async def list_bots(self) -> dict[str, Any]:
         from app.domains.options_lab_bots import list_bots
@@ -1727,6 +1838,7 @@ class OptionsLabService:
             days_to_expiry_from_fut,
             entry_conditions_ok,
             get_bot,
+            legs_from_placement,
             replace_bot,
             try_claim_bot_run,
         )
@@ -1894,13 +2006,23 @@ class OptionsLabService:
                 "tag": f"atlas-ol-bot-{(bot.get('id') or '')[:12]}",
             }
         )
-        ok = bool(placed.get("ok") or placed.get("partial") or placed.get("mock"))
+        # Book truth: only legs with status=submitted (or all legs on mock).
+        # Never fold partial into a full-book write — that doubles residual legs on exit.
+        filled_legs = legs_from_placement(legs, placed)
+        complete = bool(placed.get("ok") or placed.get("mock"))
+        partial = bool(placed.get("partial")) and bool(filled_legs)
+        any_fill = bool(placed.get("mock") or filled_legs)
         if placed.get("mock"):
             msg = "Mock run OK + draft saved."
-        elif ok:
+        elif complete:
             msg = (
                 f"Submitted via {placed.get('tool') or 'broker'} "
-                f"({placed.get('submitted_count') or '?'} legs)."
+                f"({placed.get('submitted_count') or len(filled_legs)} legs)."
+            )
+        elif partial:
+            msg = (
+                f"PARTIAL {len(filled_legs)}/{len(legs)} legs via "
+                f"{placed.get('tool') or 'broker'} — book tracks submitted only."
             )
         else:
             msg = str(
@@ -1909,24 +2031,174 @@ class OptionsLabService:
                 or "Run failed."
             )
         prefix = "Auto: " if auto else ""
-        bot = append_run_log(bot, ok=ok, message=prefix + msg, auto=auto)
+        # Partial keeps a residual book but disarms auto so the desk reviews.
+        bot = append_run_log(bot, ok=complete, message=prefix + msg, auto=auto)
+        if any_fill and filled_legs:
+            bot["open_position"] = {
+                "opened_at": int(bot.get("last_run_at") or 0),
+                "legs": filled_legs,
+                "fut_symbol": chain.get("fut_symbol") or config.fut_symbol,
+                "entry_dte": dte,
+                "underlying_symbol": underlying or config.underlying_symbol,
+                "partial": partial,
+            }
         await replace_bot(tenant_id, bot)
-        return {**placed, "ok": ok, "bot": bot, "message": prefix + msg}
+        return {
+            **placed,
+            "ok": complete,
+            "partial": partial,
+            "bot": bot,
+            "message": prefix + msg,
+        }
+
+    async def exit_bot_if_due(self, bot_id: str) -> dict[str, Any]:
+        """Flatten paper open_position when remaining DTE ≤ max_dte_hold."""
+        from app.domains.options_lab_bots import (
+            append_run_log,
+            days_to_expiry_from_fut,
+            dte_exit_due,
+            flip_legs_for_exit,
+            get_bot,
+            replace_bot,
+            residual_open_legs_after_exit,
+            try_claim_bot_run,
+        )
+        from app.domains.options_lab_templates import enrich_legs_from_chain
+        from app.domains.options_lab_trading import estimate_lot_size
+
+        tenant_id = _tenant_key(self.context)
+        got = await get_bot(tenant_id, bot_id)
+        if not got.get("ok"):
+            return got
+        bot = dict(got["bot"])
+        if bot.get("kill") or str(bot.get("mode") or "paper") != "paper":
+            return {"ok": False, "skipped": True, "error": "Exit only for paper bots."}
+        pos = bot.get("open_position") if isinstance(bot.get("open_position"), dict) else None
+        if not pos or not isinstance(pos.get("legs"), list) or not pos["legs"]:
+            return {"ok": False, "skipped": True, "error": "No open position."}
+
+        config = await self._read_config()
+        fut = pos.get("fut_symbol") or config.fut_symbol
+        dte = days_to_expiry_from_fut(fut)
+        due, reason = dte_exit_due(bot, dte=dte)
+        if not due:
+            return {"ok": False, "skipped": True, "error": reason}
+
+        cool = int(bot.get("cooldown_sec") or 300)
+        claimed = await try_claim_bot_run(
+            tenant_id, f"exit-{bot.get('id') or bot_id}", cooldown_sec=cool
+        )
+        if not claimed:
+            return {
+                "ok": False,
+                "skipped": True,
+                "error": "Exit already claimed by another worker/nudge.",
+            }
+
+        chain = await self.chain_snapshot(wings=DEFAULT_WINGS)
+        rows = chain.get("rows") if isinstance(chain.get("rows"), list) else []
+        open_legs = list(pos["legs"])
+        exit_legs = enrich_legs_from_chain(flip_legs_for_exit(open_legs), rows)
+        if not exit_legs or any(not leg.get("symbol") for leg in exit_legs):
+            exit_legs = flip_legs_for_exit(open_legs)
+        # Positional residual indexing assumes exit_legs aligns 1:1 with open book.
+        if len(exit_legs) != len(open_legs):
+            return {
+                "ok": False,
+                "skipped": True,
+                "error": (
+                    f"Exit leg count mismatch ({len(exit_legs)} vs {len(open_legs)}) — "
+                    "refusing place to protect residual book index."
+                ),
+            }
+        if any(not leg.get("symbol") for leg in exit_legs):
+            return {"ok": False, "skipped": True, "error": "Exit legs lack symbols."}
+
+        underlying = str(
+            pos.get("underlying_symbol")
+            or bot.get("underlying_symbol")
+            or config.underlying_symbol
+            or ""
+        )
+        placed = await self.place_strategy_orders(
+            {
+                "legs": exit_legs,
+                "confirm": True,
+                "live": False,
+                "lot_size": estimate_lot_size(underlying or config.underlying_label or ""),
+                "product": "NRML",
+                "order_type": "LIMIT",
+                "name": f"Exit {bot.get('name') or bot_id}",
+                "underlying_symbol": underlying or config.underlying_symbol,
+                "save_draft": True,
+                "mock": bool(chain.get("mock") or config.mock),
+                "tag": f"atlas-ol-bot-exit-{(bot.get('id') or '')[:10]}",
+            }
+        )
+        complete = bool(placed.get("ok") or placed.get("mock"))
+        residual = residual_open_legs_after_exit(list(pos["legs"]), placed)
+        partial_exit = bool(placed.get("partial")) or (
+            bool(residual) and len(residual) < len(pos["legs"])
+        )
+        if placed.get("mock") or complete:
+            msg = f"DTE exit flat ({reason})"
+        elif partial_exit and len(residual) < len(pos["legs"]):
+            msg = (
+                f"PARTIAL DTE exit ({reason}) — "
+                f"{len(pos['legs']) - len(residual)} closed, {len(residual)} residual."
+            )
+        else:
+            msg = str(placed.get("error") or "Exit place failed.")
+        bot = append_run_log(
+            bot,
+            ok=complete,
+            message=f"Auto exit: {msg}",
+            auto=True,
+            disarm_on_fail=False,
+            count_toward_daily=False,
+        )
+        if complete or placed.get("mock"):
+            bot["open_position"] = None
+        elif len(residual) < len(pos["legs"]):
+            bot["open_position"] = {**pos, "legs": residual, "partial": True}
+        # else: no legs closed — leave open_position unchanged
+        await replace_bot(tenant_id, bot)
+        return {
+            **placed,
+            "ok": complete,
+            "partial": partial_exit and not complete,
+            "bot": bot,
+            "message": msg,
+            "exit": True,
+            "residual_legs": len(residual) if not complete else 0,
+        }
 
     async def evaluate_armed_bots(self) -> dict[str, Any]:
-        """Run due armed paper bots for this tenant (worker / nudge)."""
+        """Run due DTE exits then due armed paper entries for this tenant."""
         from app.domains.options_lab_bots import bot_due_for_auto, load_bots
 
         results: list[dict[str, Any]] = []
-        for bot in await load_bots(_tenant_key(self.context)):
+        bots = await load_bots(_tenant_key(self.context))
+        for bot in bots:
+            if isinstance(bot.get("open_position"), dict) and bot["open_position"].get("legs"):
+                out = await self.exit_bot_if_due(str(bot["id"]))
+                results.append({"id": bot.get("id"), "phase": "exit", **out})
+        # Fresh snapshot after exits may have cleared open_position.
+        bots = await load_bots(_tenant_key(self.context))
+        for bot in bots:
             due, reason = bot_due_for_auto(bot)
             if not due:
                 results.append(
-                    {"id": bot.get("id"), "skipped": True, "reason": reason}
+                    {
+                        "id": bot.get("id"),
+                        "phase": "entry",
+                        "skipped": True,
+                        "reason": reason,
+                    }
                 )
                 continue
             out = await self.run_bot(str(bot["id"]), auto=True, confirm=True)
-            results.append({"id": bot.get("id"), **out})
+            results.append({"id": bot.get("id"), "phase": "entry", **out})
         return {"ok": True, "results": results, "count": len(results)}
 
     async def mark_portfolio(self, portfolio_id: str) -> dict[str, Any]:

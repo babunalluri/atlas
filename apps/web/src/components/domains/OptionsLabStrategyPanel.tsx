@@ -1438,8 +1438,8 @@ export function OptionsLabStrategyPanel({
   /** Sensibull-style action strip: one compact row — funds through Buy. */
   const tradeFooter = (
     <div className="rounded-lg border border-line bg-canvas/50 px-2.5 py-1.5">
-      <div className="flex flex-nowrap items-center gap-x-3 overflow-x-auto text-sm">
-        <div className="flex min-w-0 flex-1 flex-nowrap items-center justify-between gap-x-4">
+      <div className="flex items-center gap-x-3 text-sm">
+        <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-x-3 overflow-x-auto pb-0.5">
           <span className="shrink-0 text-slate-muted">
             Funds{" "}
             <span className="font-semibold tabular-nums text-ink">
@@ -1527,7 +1527,7 @@ export function OptionsLabStrategyPanel({
             </span>
           </span>
         </div>
-        <span className="flex shrink-0 items-center gap-2">
+        <span className="flex shrink-0 items-center gap-2 border-l border-line pl-3">
           {pnlTable && pnlTable.spots.length > 0 ? (
             <Button
               type="button"

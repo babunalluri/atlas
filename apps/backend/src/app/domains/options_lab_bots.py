@@ -18,6 +18,10 @@ from app.core.logging import get_logger
 from app.core.redis_client import get_redis, invalidate_redis
 from app.domains.options_lab_templates import TEMPLATE_IDS, GATED_TEMPLATES
 from app.domains.signal_engine_cache import get_session_value, set_session_value
+from app.domains.signal_engine_calendar import (
+    FOMC_MEETING_DATES,
+    days_until_next_fomc,
+)
 
 logger = get_logger(__name__)
 
@@ -28,6 +32,54 @@ MAX_LOG = 40
 DEFAULT_COOLDOWN_SEC = 300
 DEFAULT_MAX_RUNS_DAY = 3
 IST = ZoneInfo("Asia/Kolkata")
+
+# Static NSE trading holidays (India) — desk fallback when live holiday feed is offline.
+# 2026 sourced from NSE/CMTR circulars (via public calendars). 2027 is provisional
+# until the exchange publishes the official list — verify yearly.
+NSE_HOLIDAYS_STATIC: frozenset[date] = frozenset(
+    {
+        # 2026
+        date(2026, 1, 15),  # Municipal elections (Maharashtra)
+        date(2026, 1, 26),  # Republic Day
+        date(2026, 3, 3),  # Holi
+        date(2026, 3, 26),  # Shri Ram Navami
+        date(2026, 3, 31),  # Mahavir Jayanti
+        date(2026, 4, 3),  # Good Friday
+        date(2026, 4, 14),  # Ambedkar Jayanti
+        date(2026, 5, 1),  # Maharashtra Day
+        date(2026, 5, 28),  # Bakri Id
+        date(2026, 6, 26),  # Muharram
+        date(2026, 8, 15),  # Independence Day (Sat)
+        date(2026, 9, 14),  # Ganesh Chaturthi
+        date(2026, 10, 2),  # Gandhi Jayanti
+        date(2026, 10, 20),  # Dussehra
+        date(2026, 11, 8),  # Diwali Laxmi Pujan (Muhurat day)
+        date(2026, 11, 10),  # Diwali Balipratipada
+        date(2026, 11, 24),  # Guru Nanak Jayanti
+        date(2026, 12, 25),  # Christmas
+        # 2027 (provisional third-party calendar — replace when NSE circular lands)
+        date(2027, 1, 26),  # Republic Day
+        date(2027, 3, 6),  # Maha Shivaratri (Sat)
+        date(2027, 3, 10),  # Id-ul-Fitr
+        date(2027, 3, 22),  # Holi
+        date(2027, 3, 26),  # Good Friday
+        date(2027, 4, 14),  # Ambedkar Jayanti
+        date(2027, 4, 15),  # Ram Navami
+        date(2027, 4, 19),  # Mahavir Jayanti
+        date(2027, 5, 1),  # Maharashtra Day (Sat)
+        date(2027, 5, 17),  # Bakri Id
+        date(2027, 6, 15),  # Muharram
+        date(2027, 8, 15),  # Independence Day (Sun)
+        date(2027, 9, 4),  # Ganesh Chaturthi (Sat)
+        date(2027, 10, 2),  # Gandhi Jayanti (Sat)
+        date(2027, 10, 10),  # Dussehra (Sun)
+        date(2027, 10, 29),  # Diwali window
+        date(2027, 11, 14),  # Guru Nanak Jayanti (Sun)
+        date(2027, 12, 25),  # Christmas (Sat)
+    }
+)
+_HOLIDAY_THIN_WEEKDAY_MIN = 8
+_holiday_thin_years_warned: set[int] = set()
 MONTH_INDEX = {
     "JAN": 1,
     "FEB": 2,
@@ -59,6 +111,7 @@ def _now_ist() -> datetime:
 def reset_bots_armed_for_tests() -> None:
     _local_armed.clear()
     _local_claims.clear()
+    _holiday_thin_years_warned.clear()
 
 
 def _last_thursday(year: int, month: int) -> date:
@@ -114,6 +167,130 @@ def in_schedule(schedule: dict[str, Any] | None, *, now: datetime | None = None)
     eh, em = _parse_hhmm(str(sched.get("window_end") or "15:30"), "15:30")
     mins = ist.hour * 60 + ist.minute
     return (sh * 60 + sm) <= mins <= (eh * 60 + em)
+
+
+def _warn_holiday_coverage(ref: date) -> None:
+    """Log once per year when weekday holiday density looks thin or table is past max."""
+    if NSE_HOLIDAYS_STATIC:
+        max_known = max(NSE_HOLIDAYS_STATIC)
+        if ref > max_known:
+            logger.warning(
+                "options_lab_bots_holiday_table_stale",
+                ref=ref.isoformat(),
+                max_known=max_known.isoformat(),
+            )
+    year = ref.year
+    if year in _holiday_thin_years_warned:
+        return
+    weekdays = sum(
+        1 for d in NSE_HOLIDAYS_STATIC if d.year == year and d.weekday() < 5
+    )
+    if weekdays < _HOLIDAY_THIN_WEEKDAY_MIN:
+        _holiday_thin_years_warned.add(year)
+        logger.warning(
+            "options_lab_bots_holiday_table_thin",
+            year=year,
+            weekday_holidays=weekdays,
+            min_expected=_HOLIDAY_THIN_WEEKDAY_MIN,
+        )
+
+
+def event_avoid_reason(*, now: datetime | None = None) -> str | None:
+    """Why auto entry should skip today (IST). None = clear to enter."""
+    ist = (now or _now_ist()).astimezone(IST)
+    ref = ist.date()
+    _warn_holiday_coverage(ref)
+    if ref in NSE_HOLIDAYS_STATIC:
+        return f"NSE holiday ({ref.isoformat()})."
+    fomc = days_until_next_fomc(ref)
+    if fomc is not None and fomc == 0:
+        return "Fed / FOMC meeting day (macro event-avoid)."
+    if ref in FOMC_MEETING_DATES:
+        return "Fed / FOMC meeting day (macro event-avoid)."
+    return None
+
+
+def dte_exit_due(bot: dict[str, Any], *, dte: int | None) -> tuple[bool, str]:
+    """True when open position should flatten (remaining DTE <= max_dte_hold)."""
+    raw = bot.get("max_dte_hold")
+    if raw is None or raw == "":
+        return False, "No max_dte_hold."
+    try:
+        hold = int(raw)
+    except (TypeError, ValueError):
+        return False, "Invalid max_dte_hold."
+    if hold < 0:
+        return False, "max_dte_hold disabled."
+    if dte is None:
+        return False, "DTE unavailable."
+    if dte <= hold:
+        return True, f"DTE {dte} ≤ hold {hold}."
+    return False, "Within hold window."
+
+
+def flip_legs_for_exit(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reverse buy/sell to flatten a multi-leg book."""
+    out: list[dict[str, Any]] = []
+    for idx, leg in enumerate(legs):
+        if not isinstance(leg, dict):
+            continue
+        side = str(leg.get("side") or "buy").lower()
+        flipped = "sell" if side == "buy" else "buy"
+        out.append({**leg, "side": flipped, "id": str(leg.get("id") or f"exit-{idx}")})
+    return out
+
+
+def submitted_leg_indices(placed: dict[str, Any]) -> set[int] | None:
+    """Indices of legs the broker accepted.
+
+    Returns ``None`` for mock / unknown-all-ok (caller should treat as every leg).
+    Empty set means nothing submitted.
+    """
+    if placed.get("mock"):
+        return None
+    orders = placed.get("orders") if isinstance(placed.get("orders"), list) else None
+    if not orders:
+        # Full ok with no order rows — treat as all legs (defensive).
+        if placed.get("ok") and not placed.get("partial"):
+            return None
+        return set()
+    idxs: set[int] = set()
+    for row in orders:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") != "submitted":
+            continue
+        try:
+            idxs.add(int(row["leg_index"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return idxs
+
+
+def legs_from_placement(
+    legs: list[dict[str, Any]],
+    placed: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Subset of ``legs`` that were actually submitted (or all legs on mock/full-ok)."""
+    idxs = submitted_leg_indices(placed)
+    if idxs is None:
+        return [leg for leg in legs if isinstance(leg, dict)]
+    return [leg for i, leg in enumerate(legs) if i in idxs and isinstance(leg, dict)]
+
+
+def residual_open_legs_after_exit(
+    open_legs: list[dict[str, Any]],
+    placed: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Legs still open after an exit place (drop only successfully closed indices)."""
+    idxs = submitted_leg_indices(placed)
+    if idxs is None:
+        return []
+    return [
+        leg
+        for i, leg in enumerate(open_legs)
+        if i not in idxs and isinstance(leg, dict)
+    ]
 
 
 def entry_conditions_ok(
@@ -254,6 +431,22 @@ def normalize_bot(payload: dict[str, Any], *, existing: dict[str, Any] | None = 
         hi=90.0,
     )
 
+    avoid_events = bool(payload.get("avoid_events", base.get("avoid_events", False)))
+    max_dte_hold_raw = payload.get("max_dte_hold", base.get("max_dte_hold"))
+    max_dte_hold: int | None
+    if max_dte_hold_raw is None or max_dte_hold_raw == "":
+        max_dte_hold = None
+    else:
+        try:
+            max_dte_hold = max(0, min(30, int(max_dte_hold_raw)))
+        except (TypeError, ValueError):
+            max_dte_hold = None
+
+    # Operator escape hatch when exit is wedged (symbols off-chain, etc.).
+    open_position = base.get("open_position") if isinstance(base.get("open_position"), dict) else None
+    if payload.get("clear_open_position") is True:
+        open_position = None
+
     try:
         cooldown = int(payload.get("cooldown_sec", base.get("cooldown_sec") or DEFAULT_COOLDOWN_SEC))
     except (TypeError, ValueError):
@@ -292,6 +485,8 @@ def normalize_bot(payload: dict[str, Any], *, existing: dict[str, Any] | None = 
         "width_steps": width_steps_i,
         "profit_pct": profit_pct,
         "stop_pct": stop_pct,
+        "avoid_events": avoid_events,
+        "max_dte_hold": max_dte_hold,
         "schedule": _normalize_schedule(payload.get("schedule", base.get("schedule"))),
         "entry": _normalize_entry(payload.get("entry", base.get("entry"))),
         "cooldown_sec": cooldown,
@@ -300,6 +495,9 @@ def normalize_bot(payload: dict[str, Any], *, existing: dict[str, Any] | None = 
         "runs_today_date": base.get("runs_today_date"),
         "last_run_at": base.get("last_run_at"),
         "last_run_message": base.get("last_run_message"),
+        "open_position": open_position
+        if isinstance(open_position, dict)
+        else None,
         "log": list(base.get("log") or [])[:MAX_LOG] if isinstance(base.get("log"), list) else [],
         "created_at": int(base.get("created_at") or now),
         "updated_at": now,
@@ -317,6 +515,13 @@ def bot_due_for_auto(bot: dict[str, Any], *, now: datetime | None = None) -> tup
         return False, "Live never auto-fires."
     if not in_schedule(bot.get("schedule") if isinstance(bot.get("schedule"), dict) else None, now=now):
         return False, "Outside IST schedule window."
+    if bot.get("avoid_events"):
+        reason = event_avoid_reason(now=now)
+        if reason:
+            return False, reason
+    # One open book at a time for v1 DTE-exit tracking.
+    if isinstance(bot.get("open_position"), dict) and bot["open_position"].get("legs"):
+        return False, "Open position — waiting for DTE exit."
     day = _ist_day_key(now)
     runs = int(bot.get("runs_today") or 0)
     if bot.get("runs_today_date") != day:
@@ -388,14 +593,21 @@ def append_run_log(
     ok: bool,
     message: str,
     auto: bool,
+    disarm_on_fail: bool | None = None,
+    count_toward_daily: bool = True,
 ) -> dict[str, Any]:
-    """Update run counters + ring log after an attempt."""
+    """Update run counters + ring log after an attempt.
+
+    Entry auto-fails disarm by default. Exits should pass ``disarm_on_fail=False``
+    and ``count_toward_daily=False`` so a flat attempt does not kill arming or
+    burn the daily entry budget.
+    """
     now = _now_ts()
     day = _ist_day_key()
     runs = int(bot.get("runs_today") or 0)
     if bot.get("runs_today_date") != day:
         runs = 0
-    if ok:
+    if ok and count_toward_daily:
         runs += 1
     log = list(bot.get("log") or [])
     log.insert(
@@ -416,7 +628,8 @@ def append_run_log(
         "log": log[:MAX_LOG],
         "updated_at": now,
     }
-    if not ok and auto:
+    do_disarm = auto if disarm_on_fail is None else disarm_on_fail
+    if not ok and do_disarm:
         bot["enabled"] = False
     return bot
 
@@ -494,6 +707,8 @@ async def list_bots(tenant_id: str) -> dict[str, Any]:
                 "underlying_symbol": row.get("underlying_symbol"),
                 "profit_pct": row.get("profit_pct"),
                 "stop_pct": row.get("stop_pct"),
+                "avoid_events": bool(row.get("avoid_events")),
+                "max_dte_hold": row.get("max_dte_hold"),
                 "schedule": row.get("schedule"),
                 "entry": row.get("entry"),
                 "cooldown_sec": row.get("cooldown_sec"),
@@ -502,6 +717,10 @@ async def list_bots(tenant_id: str) -> dict[str, Any]:
                 "runs_today_date": row.get("runs_today_date"),
                 "last_run_at": row.get("last_run_at"),
                 "last_run_message": row.get("last_run_message"),
+                "open_position": bool(
+                    isinstance(row.get("open_position"), dict)
+                    and (row.get("open_position") or {}).get("legs")
+                ),
                 "log": (row.get("log") or [])[:8],
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),

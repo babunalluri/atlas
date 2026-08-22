@@ -11,6 +11,7 @@ from app.domains.options_lab_backtests import (
     get_backtest,
     list_backtests,
     portfolio_summary,
+    run_historical_close_backtest,
     run_model_backtest,
     strategy_pnl_at_spot,
     summarize_backtests,
@@ -102,3 +103,33 @@ async def test_portfolio_summary_averages_runs() -> None:
 
     direct = portfolio_summary([a["backtest"], b["backtest"]])
     assert direct["count"] == 2
+
+
+def test_run_historical_close_backtest_fidelity() -> None:
+    closes = [24500.0, 24550.0, 24480.0, 24600.0, 24520.0]
+    out = run_historical_close_backtest(legs=LEGS, closes=closes, shock_pct=2.0)
+    assert out is not None
+    assert out["fidelity"] == "model_hist"
+    assert out["path_bias"] == "historical"
+    assert out["days"] == 5
+    assert out["shocks"][0]["path_spot"] == 24500.0
+    assert out["shocks"][-1]["path_spot"] == 24520.0
+
+
+@pytest.mark.asyncio
+async def test_create_backtest_with_closes_is_model_hist() -> None:
+    created = await create_backtest(
+        "tenant-hist",
+        {
+            "name": "Hist path",
+            "legs": LEGS,
+            "spot": 24500,
+            "days": 5,
+            "closes": [24500, 24540, 24490, 24610, 24530],
+            "use_historical": True,
+            "underlying_symbol": "NSE:NIFTY 50",
+        },
+    )
+    assert created["ok"] is True
+    assert created["backtest"]["fidelity"] == "model_hist"
+    assert created["backtest"]["result"]["path_bias"] == "historical"

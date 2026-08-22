@@ -14,7 +14,10 @@ from app.domains.options_lab_bots import (
     create_bot,
     days_to_expiry_from_fut,
     delete_bot,
+    dte_exit_due,
     entry_conditions_ok,
+    event_avoid_reason,
+    flip_legs_for_exit,
     in_schedule,
     list_bots,
     normalize_bot,
@@ -165,3 +168,284 @@ def test_append_run_log_disarms_on_auto_fail() -> None:
     next_bot = append_run_log(bot, ok=False, message="boom", auto=True)
     assert next_bot["enabled"] is False
     assert next_bot["log"][0]["message"] == "boom"
+
+
+def test_append_run_log_exit_fail_keeps_armed() -> None:
+    bot = normalize_bot(
+        {"name": "x", "template": "long_straddle", "enabled": True, "mode": "paper"}
+    )
+    next_bot = append_run_log(
+        bot,
+        ok=False,
+        message="exit boom",
+        auto=True,
+        disarm_on_fail=False,
+        count_toward_daily=False,
+    )
+    assert next_bot["enabled"] is True
+    assert next_bot["runs_today"] == 0
+
+
+def test_append_run_log_exit_ok_does_not_burn_daily_cap() -> None:
+    bot = normalize_bot(
+        {"name": "x", "template": "long_straddle", "enabled": True, "mode": "paper"}
+    )
+    next_bot = append_run_log(
+        bot,
+        ok=True,
+        message="flat",
+        auto=True,
+        disarm_on_fail=False,
+        count_toward_daily=False,
+    )
+    assert next_bot["runs_today"] == 0
+
+
+def test_event_avoid_on_nse_holiday() -> None:
+    holiday = datetime(2026, 8, 15, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    reason = event_avoid_reason(now=holiday)
+    assert reason is not None
+    assert "holiday" in reason.lower()
+    plain = datetime(2026, 8, 21, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    assert event_avoid_reason(now=plain) is None
+
+
+def test_bot_due_skips_on_event_avoid() -> None:
+    bot = normalize_bot(
+        {
+            "name": "ev",
+            "template": "iron_condor",
+            "enabled": True,
+            "mode": "paper",
+            "avoid_events": True,
+        }
+    )
+    # Republic Day 2026 is Monday — inside default schedule, blocked by event-avoid.
+    holiday = datetime(2026, 1, 26, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    due, reason = bot_due_for_auto(bot, now=holiday)
+    assert due is False
+    assert "holiday" in reason.lower()
+
+
+def test_bot_due_skips_when_open_position() -> None:
+    bot = normalize_bot(
+        {
+            "name": "open",
+            "template": "iron_condor",
+            "enabled": True,
+            "mode": "paper",
+        },
+        existing={
+            "open_position": {
+                "legs": [{"side": "buy", "type": "CE", "strike": 24500, "qty": 1}],
+            },
+        },
+    )
+    fri = datetime(2026, 8, 21, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    due, reason = bot_due_for_auto(bot, now=fri)
+    assert due is False
+    assert "open" in reason.lower()
+
+
+def test_dte_exit_due_and_flip_legs() -> None:
+    bot = normalize_bot(
+        {"name": "x", "template": "iron_condor", "max_dte_hold": 1}
+    )
+    due, _ = dte_exit_due(bot, dte=1)
+    assert due is True
+    not_due, _ = dte_exit_due(bot, dte=5)
+    assert not_due is False
+    flipped = flip_legs_for_exit(
+        [
+            {"side": "sell", "type": "CE", "strike": 24500, "qty": 1, "premium": 100},
+            {"side": "buy", "type": "CE", "strike": 24600, "qty": 1, "premium": 40},
+        ]
+    )
+    assert [leg["side"] for leg in flipped] == ["buy", "sell"]
+
+
+def test_partial_placement_tracks_submitted_legs_only() -> None:
+    from app.domains.options_lab_bots import (
+        legs_from_placement,
+        residual_open_legs_after_exit,
+    )
+
+    legs = [
+        {"side": "buy", "type": "PE", "strike": 24800, "qty": 1},
+        {"side": "sell", "type": "PE", "strike": 24600, "qty": 1},
+        {"side": "sell", "type": "CE", "strike": 25400, "qty": 1},
+        {"side": "buy", "type": "CE", "strike": 25200, "qty": 1},
+    ]
+    # Buys-first safety skipped sells → partial
+    placed = {
+        "ok": False,
+        "partial": True,
+        "orders": [
+            {"leg_index": 0, "status": "submitted"},
+            {"leg_index": 3, "status": "submitted"},
+            {"leg_index": 1, "status": "skipped"},
+            {"leg_index": 2, "status": "skipped"},
+        ],
+    }
+    filled = legs_from_placement(legs, placed)
+    assert len(filled) == 2
+    assert [leg["strike"] for leg in filled] == [24800, 25200]
+
+    # Exit closes only the two shorts that exist — residual stays tracked
+    open_book = filled
+    exit_placed = {
+        "ok": False,
+        "partial": True,
+        "orders": [
+            {"leg_index": 0, "status": "submitted"},
+            {"leg_index": 1, "status": "failed"},
+        ],
+    }
+    residual = residual_open_legs_after_exit(open_book, exit_placed)
+    assert len(residual) == 1
+    assert residual[0]["strike"] == 25200
+
+    # Full mock exit clears
+    assert residual_open_legs_after_exit(open_book, {"mock": True, "ok": True}) == []
+
+
+@pytest.mark.asyncio
+async def test_clear_open_position_via_update() -> None:
+    created = await create_bot(
+        "tenant-clear",
+        {"name": "c", "template": "iron_condor", "mode": "paper"},
+    )
+    assert created["ok"]
+    bot_id = created["bot"]["id"]
+    from app.domains.options_lab_bots import replace_bot
+
+    bot = dict(created["bot"])
+    bot["open_position"] = {
+        "legs": [{"side": "buy", "type": "CE", "strike": 24500, "qty": 1}],
+    }
+    await replace_bot("tenant-clear", bot)
+    cleared = await update_bot("tenant-clear", bot_id, {"clear_open_position": True})
+    assert cleared["ok"] is True
+    assert cleared["bot"].get("open_position") is None
+
+
+def test_event_avoid_stale_table_logs_but_does_not_block() -> None:
+    far = datetime(2030, 1, 26, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    assert event_avoid_reason(now=far) is None
+
+
+def test_nse_holiday_table_has_weekday_density() -> None:
+    from app.domains.options_lab_bots import NSE_HOLIDAYS_STATIC
+
+    for year in (2026, 2027):
+        weekdays = sum(
+            1 for d in NSE_HOLIDAYS_STATIC if d.year == year and d.weekday() < 5
+        )
+        assert weekdays >= 8, f"{year} weekday holidays={weekdays}"
+
+
+@pytest.mark.asyncio
+async def test_exit_bot_skips_on_enrich_leg_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard: shorter enrich result must not reach place (residual index safety)."""
+    from types import SimpleNamespace
+
+    from app.domains.options_lab import OptionsLabConfig, OptionsLabService
+    from app.domains.options_lab_bots import create_bot, get_bot, replace_bot
+
+    tenant = "tenant-exit-mismatch"
+    created = await create_bot(
+        tenant,
+        {
+            "name": "mismatch",
+            "template": "iron_condor",
+            "mode": "paper",
+            "enabled": True,
+            "max_dte_hold": 30,
+        },
+    )
+    assert created["ok"]
+    bot = dict(created["bot"])
+    open_legs = [
+        {
+            "side": "buy",
+            "type": "PE",
+            "strike": 24600,
+            "qty": 1,
+            "symbol": "NFO:PE24600",
+        },
+        {
+            "side": "buy",
+            "type": "CE",
+            "strike": 25400,
+            "qty": 1,
+            "symbol": "NFO:CE25400",
+        },
+    ]
+    bot["open_position"] = {
+        "legs": open_legs,
+        "fut_symbol": "NFO:NIFTY26AUGFUT",
+        "underlying_symbol": "NSE:NIFTY 50",
+    }
+    await replace_bot(tenant, bot)
+
+    context = SimpleNamespace(
+        tenant_id="11111111-1111-1111-1111-111111111111",
+        user_id="user-a",
+    )
+    session = SimpleNamespace(info={"tenant_id": context.tenant_id})
+    # Force tenant key used by OptionsLabService helpers.
+    monkeypatch.setattr(
+        "app.domains.options_lab._tenant_key",
+        lambda _ctx: tenant,
+    )
+    service = OptionsLabService(session=session, context=context)  # type: ignore[arg-type]
+
+    async def _cfg() -> OptionsLabConfig:
+        return OptionsLabConfig(
+            underlying_symbol="NSE:NIFTY 50",
+            fut_symbol="NFO:NIFTY26AUGFUT",
+            strike_step=50,
+            mock=True,
+        )
+
+    async def _chain(**_kwargs: object) -> dict:
+        return {"ok": True, "mock": True, "rows": [], "fut_symbol": "NFO:NIFTY26AUGFUT"}
+
+    async def _claim(*_a: object, **_k: object) -> bool:
+        return True
+
+    def _enrich(legs: list, _rows: list) -> list:
+        # Drop one leg but keep a symbol so fallback flip does not restore length.
+        assert len(legs) == 2
+        return [{**legs[0], "symbol": "NFO:PE24600"}]
+
+    async def _place(*_a: object, **_k: object) -> dict:
+        raise AssertionError("place_strategy_orders must not run on count mismatch")
+
+    monkeypatch.setattr(service, "_read_config", _cfg)
+    monkeypatch.setattr(service, "chain_snapshot", _chain)
+    monkeypatch.setattr(service, "place_strategy_orders", _place)
+    monkeypatch.setattr(
+        "app.domains.options_lab_bots.try_claim_bot_run",
+        _claim,
+    )
+    monkeypatch.setattr(
+        "app.domains.options_lab_templates.enrich_legs_from_chain",
+        _enrich,
+    )
+    monkeypatch.setattr(
+        "app.domains.options_lab_bots.days_to_expiry_from_fut",
+        lambda *_a, **_k: 1,
+    )
+
+    out = await service.exit_bot_if_due(str(bot["id"]))
+    assert out.get("skipped") is True
+    assert "mismatch" in str(out.get("error") or "").lower()
+
+    got = await get_bot(tenant, str(bot["id"]))
+    assert got["ok"] is True
+    pos = got["bot"].get("open_position")
+    assert isinstance(pos, dict)
+    assert len(pos.get("legs") or []) == 2

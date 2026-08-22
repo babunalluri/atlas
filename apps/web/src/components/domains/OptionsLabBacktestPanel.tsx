@@ -16,6 +16,11 @@ import {
 } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
+function pnlTone(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value === 0) return "text-ink";
+  return value > 0 ? "text-teal" : "text-rose";
+}
+
 /**
  * Model backtest overlay — expiry payoff vs synthetic spot path.
  * Saves runs to tenant session store for Wave 2 bot handoff.
@@ -60,6 +65,7 @@ export function OptionsLabBacktestPanel({
   const [calibratedOnce, setCalibratedOnce] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [useHistorical, setUseHistorical] = useState(false);
   const [saved, setSaved] = useState<OptionsLabBacktestSummaryRow[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [summary, setSummary] = useState<Awaited<
@@ -197,13 +203,18 @@ export function OptionsLabBacktestPanel({
         strike_step: strikeStep,
         underlying_symbol: underlyingSymbol,
         underlying_label: underlyingLabel,
+        use_historical: useHistorical,
       });
       if (!res.ok || !res.backtest) {
         setMessage(res.error ?? "Save failed");
         return;
       }
       setSaveName("");
-      setMessage(`Saved “${res.backtest.name}” (${res.backtest.id}) · fidelity model`);
+      const fidelity = res.backtest.fidelity ?? (useHistorical ? "model_hist" : "model");
+      const warnBits = res.warnings?.length ? ` · ${res.warnings.join(" ")}` : "";
+      setMessage(
+        `Saved “${res.backtest.name}” (${res.backtest.id}) · fidelity ${fidelity}${warnBits}`,
+      );
       await refreshSaved();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Save failed");
@@ -236,6 +247,8 @@ export function OptionsLabBacktestPanel({
       enabled: false,
       profit_pct: 50,
       stop_pct: 40,
+      avoid_events: true,
+      max_dte_hold: 1,
       underlying_symbol: row.underlying_symbol ?? underlyingSymbol,
       source: "backtest",
     });
@@ -293,14 +306,15 @@ export function OptionsLabBacktestPanel({
       ) : null}
       <p className="text-xs text-slate-muted">
         Model estimate (expiry payoff vs spot path) — not historical option tick replay. Shock % is
-        a daily proxy; path moves scale with √t. Fidelity:{" "}
+        a daily proxy; path moves scale with √t. Preview fidelity:{" "}
         <span className="font-semibold text-ink">
           {ivCalibrated ? "model · IV-calibrated" : "model"}
         </span>
         {ivCalibrated
           ? ` · ATM IV ${ivCalibrated.latest.toFixed(1)}% (${ivCalibrated.samples} samples)`
           : null}
-        . Saved runs are available for Wave 2 bot handoff.
+        . Prefer historical closes on save for fidelity{" "}
+        <span className="font-semibold text-ink">model_hist</span> (still expiry-intrinsic P&amp;L).
       </p>
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-xs text-slate-muted">
@@ -331,12 +345,21 @@ export function OptionsLabBacktestPanel({
           <select
             value={pathBias}
             onChange={(e) => setPathBias(e.target.value as "up" | "down" | "flat")}
-            className="ml-1 rounded border border-line bg-canvas px-2 py-1 text-sm"
+            disabled={useHistorical}
+            className="ml-1 rounded border border-line bg-canvas px-2 py-1 text-sm disabled:opacity-50"
           >
             <option value="flat">flat (oscillate)</option>
             <option value="up">bullish</option>
             <option value="down">bearish</option>
           </select>
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-slate-muted">
+          <input
+            type="checkbox"
+            checked={useHistorical}
+            onChange={(e) => setUseHistorical(e.target.checked)}
+          />
+          Prefer historical closes
         </label>
         {ivCalibrated ? (
           <Button
@@ -377,28 +400,50 @@ export function OptionsLabBacktestPanel({
           <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
             <div className="rounded border border-line px-2 py-2">
               <p className="th-label">Model hit rate</p>
-              <p className="font-semibold tabular-nums">{(result.winRate * 100).toFixed(0)}%</p>
+              <p
+                className={cn(
+                  "font-semibold tabular-nums",
+                  result.winRate >= 0.5 ? "text-teal" : "text-rose",
+                )}
+              >
+                {(result.winRate * 100).toFixed(0)}%
+              </p>
               <p className="mt-0.5 text-[10px] text-slate-muted">
                 Up/down expiry samples with P&amp;L&gt;0 — not trade win rate
               </p>
             </div>
             <div className="rounded border border-line px-2 py-2">
               <p className="th-label">Avg P&amp;L</p>
-              <p className="font-semibold tabular-nums">{result.avg.toFixed(1)}</p>
+              <p className={cn("font-semibold tabular-nums", pnlTone(result.avg))}>
+                {result.avg.toFixed(1)}
+              </p>
             </div>
             <div className="rounded border border-line px-2 py-2">
               <p className="th-label">Path trough</p>
-              <p className="font-semibold tabular-nums">{result.maxDd.toFixed(1)}</p>
+              <p className={cn("font-semibold tabular-nums", pnlTone(result.maxDd))}>
+                {result.maxDd.toFixed(1)}
+              </p>
             </div>
             <div className="rounded border border-line px-2 py-2">
               <p className="th-label">Path peak</p>
-              <p className="font-semibold tabular-nums">{result.peak.toFixed(1)}</p>
+              <p className={cn("font-semibold tabular-nums", pnlTone(result.peak))}>
+                {result.peak.toFixed(1)}
+              </p>
             </div>
           </div>
 
           <div className="rounded border border-line px-2 py-2">
             <p className="th-label mb-1">Model equity (path P&amp;L by day)</p>
-            <svg viewBox="0 0 320 72" className="h-16 w-full text-teal" aria-hidden>
+            <svg
+              viewBox="0 0 320 72"
+              className={cn(
+                "h-16 w-full",
+                result.equity.length && result.equity[result.equity.length - 1]!.equity >= 0
+                  ? "text-teal"
+                  : "text-rose",
+              )}
+              aria-hidden
+            >
               <polyline
                 fill="none"
                 stroke="currentColor"
@@ -430,12 +475,18 @@ export function OptionsLabBacktestPanel({
               <tbody>
                 {result.shocks.map((s) => (
                   <tr key={s.day} className="border-t border-line">
-                    <td className="px-2 py-1 tabular-nums">{s.day}</td>
+                    <td className="px-2 py-1 tabular-nums text-slate-muted">{s.day}</td>
                     <td className="px-2 py-1 tabular-nums">{s.up.toFixed(0)}</td>
-                    <td className="px-2 py-1 tabular-nums">{s.pnlUp.toFixed(1)}</td>
+                    <td className={cn("px-2 py-1 tabular-nums font-medium", pnlTone(s.pnlUp))}>
+                      {s.pnlUp.toFixed(1)}
+                    </td>
                     <td className="px-2 py-1 tabular-nums">{s.down.toFixed(0)}</td>
-                    <td className="px-2 py-1 tabular-nums">{s.pnlDown.toFixed(1)}</td>
-                    <td className="px-2 py-1 tabular-nums">{s.pnlPath.toFixed(1)}</td>
+                    <td className={cn("px-2 py-1 tabular-nums font-medium", pnlTone(s.pnlDown))}>
+                      {s.pnlDown.toFixed(1)}
+                    </td>
+                    <td className={cn("px-2 py-1 tabular-nums font-semibold", pnlTone(s.pnlPath))}>
+                      {s.pnlPath.toFixed(1)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -467,9 +518,15 @@ export function OptionsLabBacktestPanel({
                     />
                     <span className="truncate font-medium text-ink">{row.name}</span>
                     <span className="text-slate-muted">
-                      {row.stats
-                        ? `hit ${(row.stats.hit_rate * 100).toFixed(0)}% · avg ${row.stats.avg_pnl.toFixed(0)}`
-                        : row.fidelity}
+                      {row.fidelity ? `${row.fidelity} · ` : ""}
+                      {row.stats ? (
+                        <>
+                          hit {(row.stats.hit_rate * 100).toFixed(0)}% · avg{" "}
+                          <span className={pnlTone(row.stats.avg_pnl)}>
+                            {row.stats.avg_pnl.toFixed(0)}
+                          </span>
+                        </>
+                      ) : null}
                     </span>
                   </label>
                   <div className="flex items-center gap-2">
@@ -508,17 +565,31 @@ export function OptionsLabBacktestPanel({
             </div>
             <div>
               <p className="text-slate-muted">Avg P&amp;L</p>
-              <p className="font-semibold tabular-nums">{summary.stats.avg_pnl.toFixed(1)}</p>
+              <p className={cn("font-semibold tabular-nums", pnlTone(summary.stats.avg_pnl))}>
+                {summary.stats.avg_pnl.toFixed(1)}
+              </p>
             </div>
             <div>
               <p className="text-slate-muted">Avg trough</p>
-              <p className="font-semibold tabular-nums">
+              <p
+                className={cn(
+                  "font-semibold tabular-nums",
+                  pnlTone(summary.stats.avg_path_trough),
+                )}
+              >
                 {summary.stats.avg_path_trough.toFixed(1)}
               </p>
             </div>
             <div>
               <p className="text-slate-muted">Avg peak</p>
-              <p className="font-semibold tabular-nums">{summary.stats.avg_path_peak.toFixed(1)}</p>
+              <p
+                className={cn(
+                  "font-semibold tabular-nums",
+                  pnlTone(summary.stats.avg_path_peak),
+                )}
+              >
+                {summary.stats.avg_path_peak.toFixed(1)}
+              </p>
             </div>
           </div>
           {(summary.correlations ?? []).length > 0 ? (

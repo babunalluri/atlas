@@ -367,6 +367,8 @@ class OptionsLabBacktestCreateIn(BaseModel):
     strike_step: int | None = None
     underlying_symbol: str | None = None
     underlying_label: str | None = None
+    use_historical: bool = False
+    closes: list[float] | None = Field(default=None, max_length=400)
 
 
 class OptionsLabBacktestRunIn(BaseModel):
@@ -375,6 +377,8 @@ class OptionsLabBacktestRunIn(BaseModel):
     days: int = 10
     shock_pct: float = 2.0
     path_bias: str = "flat"
+    use_historical: bool = False
+    closes: list[float] | None = Field(default=None, max_length=400)
 
 
 class OptionsLabBacktestSummaryIn(BaseModel):
@@ -473,6 +477,9 @@ class OptionsLabBotCreateIn(BaseModel):
     width_steps: int | None = None
     profit_pct: float | None = None
     stop_pct: float | None = None
+    avoid_events: bool | None = None
+    max_dte_hold: int | None = None
+    clear_open_position: bool | None = None
     schedule: OptionsLabBotScheduleIn | None = None
     entry: OptionsLabBotEntryIn | None = None
     cooldown_sec: int | None = None

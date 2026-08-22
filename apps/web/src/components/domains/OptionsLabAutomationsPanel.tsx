@@ -72,6 +72,8 @@ export function OptionsLabAutomationsPanel() {
       template: "iron_condor",
       profit_pct: 50,
       stop_pct: 40,
+      avoid_events: true,
+      max_dte_hold: 1,
     });
     if (!res.ok) {
       setNote(res.error ?? "Create failed.");
@@ -140,7 +142,8 @@ export function OptionsLabAutomationsPanel() {
         ) : (
           <span className="text-rose">is off</span>
         )}
-        — or use Evaluate now. Live never auto-fires. Default SL 40%.
+        — or use Evaluate now (exits first, then entries). Live never auto-fires.
+        Default SL 40%. New bots default to event-avoid + DTE flat at 1d.
       </p>
       {note ? (
         <p className="rounded-md border border-line bg-canvas/50 px-2 py-1.5 text-xs text-slate-muted">
@@ -181,6 +184,9 @@ export function OptionsLabAutomationsPanel() {
                 <p className="text-xs text-slate-muted">
                   {bot.template || bot.backtest_id || "legs"} · TP {bot.profit_pct}% · SL{" "}
                   {bot.stop_pct}% · {bot.mode}
+                  {bot.avoid_events ? " · event-avoid" : ""}
+                  {bot.max_dte_hold != null ? ` · flat≤${bot.max_dte_hold}d` : ""}
+                  {bot.open_position ? " · OPEN" : ""}
                   {bot.kill
                     ? " · KILL"
                     : bot.enabled
@@ -225,6 +231,56 @@ export function OptionsLabAutomationsPanel() {
                     </option>
                   ))}
                 </select>
+                <button
+                  type="button"
+                  className={cn(
+                    "rounded px-2 py-1 text-xs font-medium",
+                    bot.avoid_events ? "bg-teal/20 text-teal" : "bg-fog text-slate-muted",
+                  )}
+                  onClick={() =>
+                    void patchBot(bot.id, { avoid_events: !bot.avoid_events })
+                  }
+                >
+                  {bot.avoid_events ? "Avoid evt" : "Any day"}
+                </button>
+                <label className="flex items-center gap-1 text-xs text-slate-muted">
+                  Flat≤
+                  <input
+                    type="number"
+                    min={0}
+                    max={30}
+                    defaultValue={bot.max_dte_hold ?? ""}
+                    key={`${bot.id}-dte-${bot.max_dte_hold ?? "x"}`}
+                    placeholder="—"
+                    onBlur={(e) => {
+                      const raw = e.target.value.trim();
+                      const next = raw === "" ? null : Number(raw);
+                      if (next === bot.max_dte_hold) return;
+                      if (next != null && !Number.isFinite(next)) return;
+                      void patchBot(bot.id, { max_dte_hold: next });
+                    }}
+                    className="w-12 rounded border border-line bg-canvas px-1 py-0.5 text-ink"
+                  />
+                  d
+                </label>
+                {bot.open_position ? (
+                  <button
+                    type="button"
+                    className="rounded px-2 py-1 text-xs font-medium bg-rose/15 text-rose"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          `Clear tracked OPEN book for “${bot.name}”?\n\nOnly clears Lab tracking — does not place broker exits.`,
+                        )
+                      ) {
+                        return;
+                      }
+                      void patchBot(bot.id, { clear_open_position: true });
+                    }}
+                  >
+                    Clear OPEN
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className={cn(

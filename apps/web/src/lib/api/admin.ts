@@ -4355,8 +4355,15 @@ export async function createOptionsLabBacktest(
     strike_step?: number;
     underlying_symbol?: string;
     underlying_label?: string;
+    use_historical?: boolean;
+    closes?: number[];
   },
-): Promise<{ ok: boolean; backtest?: OptionsLabBacktestRecord; error?: string }> {
+): Promise<{
+  ok: boolean;
+  backtest?: OptionsLabBacktestRecord;
+  error?: string;
+  warnings?: string[];
+}> {
   return apiFetch(`/admin/options-lab/backtests`, {
     accessToken,
     method: "POST",
@@ -4447,6 +4454,8 @@ export interface OptionsLabBot {
   underlying_symbol?: string | null;
   profit_pct?: number;
   stop_pct?: number;
+  avoid_events?: boolean;
+  max_dte_hold?: number | null;
   schedule?: OptionsLabBotSchedule;
   entry?: OptionsLabBotEntry;
   cooldown_sec?: number;
@@ -4455,6 +4464,7 @@ export interface OptionsLabBot {
   runs_today_date?: string | null;
   last_run_at?: number | null;
   last_run_message?: string | null;
+  open_position?: boolean;
   log?: Array<{ ts: number; ok: boolean; auto?: boolean; message: string }>;
   created_at?: number;
   updated_at?: number;
@@ -4473,6 +4483,9 @@ export type OptionsLabBotInput = {
   width_steps?: number;
   profit_pct?: number;
   stop_pct?: number;
+  avoid_events?: boolean;
+  max_dte_hold?: number | null;
+  clear_open_position?: boolean;
   schedule?: OptionsLabBotSchedule;
   entry?: OptionsLabBotEntry;
   cooldown_sec?: number;
