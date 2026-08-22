@@ -26,7 +26,9 @@ This file is the **Kite Connect** adapter only. Teams and agents stay vendor-agn
    - `get_login_url` → open in browser
    - User logs in → redirect returns `request_token`
    - `create_session(request_token=...)` → store `access_token` (expires ~06:00 IST)
-5. Validate → Publish. Mark mutating: `place_order`, `modify_order`, `cancel_order`, `convert_position`, `invalidate_session`.
+5. Validate → Publish. Mark mutating: `place_order`, `modify_order`, `cancel_order`, `convert_position`, `invalidate_session`, `place_gtt`, `delete_gtt`.
+
+**Options Lab (Live desk):** also bind read `list_gtts` / `get_gtt` / `get_basket_margins` and mutating `place_gtt` / `delete_gtt` on the live trading team (and/or Signals if that team is where Lab tools resolve). Without these, SL/Tgt exits and Books → GTT list/cancel stay unavailable.
 
 Requires sandbox image/backend that supports **form-urlencoded** HttpProxy (`form` body) — Kite orders use form POST, not JSON.
 
@@ -42,10 +44,13 @@ Requires sandbox image/backend that supports **form-urlencoded** HttpProxy (`for
 | `convert_position` | **yes** | MIS↔NRML etc. |
 | `place_order` / `modify_order` / `cancel_order` | **yes** | Orders |
 | `list_orders` / `get_order_history` / `list_trades` / `get_order_trades` | no | Order book |
-| `get_order_margins` | no | Pre-trade margin (JSON) |
+| `get_order_margins` | no | Pre-trade margin per order (JSON) |
+| `get_basket_margins` | no | SPAN/spread basket margin (JSON) |
 | `get_instruments` | no | CSV dump (`exchange=NFO`) for F&O underlyings |
 | `get_quote` / `get_ltp` / `get_ohlc` | no | Market data |
 | `get_historical_candles` | no | ADX / trend (15m candles) |
+| `place_gtt` / `delete_gtt` | **yes** | GTT create / cancel (form-urlencoded) |
+| `list_gtts` / `get_gtt` | no | GTT book / single trigger |
 
 \*Sensitive auth helper.
 

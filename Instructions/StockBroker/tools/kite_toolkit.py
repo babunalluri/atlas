@@ -11,7 +11,8 @@ Auth:
 Authorization header: `token {api_key}:{access_token}`
 Kite Version header: X-Kite-Version: 3
 
-Mutating (HITL): place_order, modify_order, cancel_order, convert_position, invalidate_session.
+Mutating (HITL): place_order, modify_order, cancel_order, convert_position,
+invalidate_session, place_gtt, delete_gtt.
 
 Coverage: equity (NSE/BSE), F&O (NFO/BFO), currency (CDS), commodity (MCX) —
 whatever exchanges are enabled on the Kite user profile.
@@ -20,6 +21,7 @@ whatever exchanges are enabled on the Kite user profile.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -406,6 +408,45 @@ async def get_order_margins(
     return _unwrap(body, "get_order_margins")
 
 
+async def get_basket_margins(
+    ctx,
+    orders: list[dict[str, Any]] | None = None,
+    consider_positions: bool = True,
+    mode: str = "",
+) -> Any:
+    """POST /margins/basket — SPAN/spread margin for a multi-leg order list (JSON).
+
+    Kite has no atomic basket *place* API; use this for pre-trade margin, then
+    place legs (buys then sells). `orders` items match order-margin fields.
+    """
+    payload = list(orders or [])
+    cleaned: list[dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        item: dict[str, Any] = {
+            "exchange": str(row.get("exchange") or "NFO").upper(),
+            "tradingsymbol": str(row.get("tradingsymbol") or "").upper(),
+            "transaction_type": str(row.get("transaction_type") or "BUY").upper(),
+            "variety": str(row.get("variety") or "regular").lower(),
+            "product": str(row.get("product") or "NRML").upper(),
+            "order_type": str(row.get("order_type") or "MARKET").upper(),
+            "quantity": int(row.get("quantity") or 0),
+            "price": float(row.get("price") or 0),
+            "trigger_price": float(row.get("trigger_price") or 0),
+        }
+        cleaned.append(item)
+    query: dict[str, Any] = {
+        "consider_positions": "true" if consider_positions else "false",
+    }
+    if mode:
+        query["mode"] = str(mode)
+    url = f"{_base_url(ctx)}/margins/basket?{urlencode(query)}"
+    headers = {**_auth_headers(ctx), "Content-Type": "application/json"}
+    body = await ctx.http.post(url, json=cleaned, headers=headers)
+    return _unwrap(body, "get_basket_margins")
+
+
 # --- Live data (read) ---
 
 _QUOTE_BATCH_SIZE = 200
@@ -593,3 +634,71 @@ async def get_historical_candles(
         query["to"] = to_date
     path = f"/instruments/historical/{int(instrument_token)}/{bucket}"
     return await _get(ctx, path, "get_historical_candles", query=query)
+
+
+async def place_gtt(
+    ctx,
+    tradingsymbol: str,
+    exchange: str,
+    trigger_type: str,
+    trigger_values: list[float] | None = None,
+    last_price: float = 0,
+    orders: list[dict[str, Any]] | None = None,
+) -> Any:
+    """POST /gtt/triggers — create GTT (mutating).
+
+    Kite expects form fields: type, condition (JSON string), orders (JSON string).
+    trigger_type: single | two-leg
+    orders: list of order dicts (transaction_type, quantity, order_type, product, price)
+    """
+    exch = exchange.upper()
+    symbol = str(tradingsymbol).strip().upper()
+    values = [float(v) for v in (trigger_values or [])]
+    condition = {
+        "exchange": exch,
+        "tradingsymbol": symbol,
+        "trigger_values": values,
+        "last_price": float(last_price or 0),
+    }
+    enriched: list[dict[str, Any]] = []
+    for row in orders or []:
+        if not isinstance(row, dict):
+            continue
+        order = {
+            "exchange": str(row.get("exchange") or exch).upper(),
+            "tradingsymbol": str(row.get("tradingsymbol") or symbol).upper(),
+            "transaction_type": str(row.get("transaction_type") or "").upper(),
+            "quantity": int(row.get("quantity") or 0),
+            "order_type": str(row.get("order_type") or "LIMIT").upper(),
+            "product": str(row.get("product") or "NRML").upper(),
+            "price": float(row.get("price") or 0),
+        }
+        enriched.append(order)
+    form = {
+        "type": (trigger_type or "single").lower(),
+        "condition": json.dumps(condition),
+        "orders": json.dumps(enriched),
+    }
+    return await _form(ctx, "POST", "/gtt/triggers", form, "place_gtt")
+
+
+async def list_gtts(ctx) -> Any:
+    """GET /gtt/triggers."""
+    return await _get(ctx, "/gtt/triggers", "list_gtts")
+
+
+async def get_gtt(ctx, trigger_id: str | int) -> Any:
+    """GET /gtt/triggers/{id}."""
+    return await _get(ctx, f"/gtt/triggers/{int(trigger_id)}", "get_gtt")
+
+
+async def delete_gtt(ctx, trigger_id: str | int) -> Any:
+    """DELETE /gtt/triggers/{id} (mutating)."""
+    return await _form(
+        ctx,
+        "DELETE",
+        f"/gtt/triggers/{int(trigger_id)}",
+        {},
+        "delete_gtt",
+    )
+
