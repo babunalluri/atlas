@@ -303,6 +303,14 @@ class Settings(BaseSettings):
             "Default off; enable in desk Compose / env."
         ),
     )
+    options_lab_bots_enabled: bool = Field(
+        default=False,
+        validation_alias="OPTIONS_LAB_BOTS_ENABLED",
+        description=(
+            "Evaluate armed Options Lab paper bots ~once/minute. "
+            "Live never auto-fires. Default off; enable in desk Compose / env."
+        ),
+    )
     kite_ticker_enabled: bool = Field(
         default=False,
         validation_alias="KITE_TICKER_ENABLED",

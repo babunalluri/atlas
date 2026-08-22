@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from app.core.logging import get_logger
 from app.core.settings import Settings, get_settings
 from app.domains.kite_ticker_hub import KiteTickerHub, get_kite_ticker_hub
+from app.domains.options_lab_bots_worker import OptionsLabBotsWorker
 from app.domains.options_lab_worker import OptionsLabWorker
 from app.domains.signal_engine_worker import SignalEngineWorker
 
@@ -34,6 +35,9 @@ class DomainServices:
 
     signal_worker: SignalEngineWorker = field(default_factory=SignalEngineWorker)
     options_lab_worker: OptionsLabWorker = field(default_factory=OptionsLabWorker)
+    options_lab_bots_worker: OptionsLabBotsWorker = field(
+        default_factory=OptionsLabBotsWorker
+    )
     kite_hub: KiteTickerHub = field(default_factory=get_kite_ticker_hub)
     # Names of services actually started by the last ``start()`` (stop only these).
     _active: list[str] = field(default_factory=list, init=False, repr=False)
@@ -65,10 +69,25 @@ class DomainServices:
             self.options_lab_worker.start()
             self._active.append("options_lab")
             logger.info("domain_service_started", service="options_lab_worker")
+        if settings.options_lab_bots_enabled:
+            workers = web_concurrency()
+            if workers > 1:
+                # Unattended place path — refuse multi-process until a leader lock exists.
+                logger.error(
+                    "options_lab_bots_refused_multi_worker",
+                    web_concurrency=workers,
+                    hint="set WEB_CONCURRENCY=1 or disable OPTIONS_LAB_BOTS_ENABLED",
+                )
+            else:
+                self.options_lab_bots_worker.start()
+                self._active.append("options_lab_bots")
+                logger.info("domain_service_started", service="options_lab_bots_worker")
 
     async def stop(self) -> None:
         # Reverse of start; only tear down what this instance actually started so
         # test-env no-op starts do not disable the shared Kite hub singleton.
+        if "options_lab_bots" in self._active:
+            await self.options_lab_bots_worker.stop()
         if "options_lab" in self._active:
             await self.options_lab_worker.stop()
         if "signal" in self._active:

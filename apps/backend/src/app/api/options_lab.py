@@ -344,3 +344,227 @@ async def options_lab_place_strategy_orders(
     return await OptionsLabService(session, context).place_strategy_orders(
         body.model_dump(exclude_none=True)
     )
+
+
+class OptionsLabBacktestLegIn(BaseModel):
+    id: str | None = None
+    side: str
+    type: str
+    strike: int | float
+    qty: float = 1
+    premium: float | None = None
+    entry_premium: float | None = None
+    symbol: str | None = None
+
+
+class OptionsLabBacktestCreateIn(BaseModel):
+    name: str | None = None
+    legs: list[OptionsLabBacktestLegIn]
+    spot: float
+    days: int = 10
+    shock_pct: float = 2.0
+    path_bias: str = "flat"
+    strike_step: int | None = None
+    underlying_symbol: str | None = None
+    underlying_label: str | None = None
+
+
+class OptionsLabBacktestRunIn(BaseModel):
+    legs: list[OptionsLabBacktestLegIn]
+    spot: float
+    days: int = 10
+    shock_pct: float = 2.0
+    path_bias: str = "flat"
+
+
+class OptionsLabBacktestSummaryIn(BaseModel):
+    ids: list[str] | None = None
+    limit: int = 5
+
+
+@router.get("/backtests")
+async def list_options_lab_backtests(
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """List saved model backtests for this tenant."""
+    return await OptionsLabService(session, context).list_backtests()
+
+
+@router.post("/backtests")
+async def create_options_lab_backtest(
+    body: OptionsLabBacktestCreateIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Run + persist a model backtest (session store)."""
+    return await OptionsLabService(session, context).create_backtest(
+        body.model_dump(exclude_none=True)
+    )
+
+
+@router.post("/backtests/run")
+async def run_options_lab_backtest(
+    body: OptionsLabBacktestRunIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Run a model backtest without saving."""
+    return await OptionsLabService(session, context).run_model_backtest(
+        body.model_dump(exclude_none=True)
+    )
+
+
+@router.post("/backtests/summary")
+async def summarize_options_lab_backtests(
+    body: OptionsLabBacktestSummaryIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Multi-run portfolio summary of saved model backtests."""
+    return await OptionsLabService(session, context).summarize_backtests(
+        ids=body.ids,
+        limit=body.limit,
+    )
+
+
+@router.get("/backtests/{backtest_id}")
+async def get_options_lab_backtest(
+    backtest_id: str,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Fetch one saved backtest including shocks / equity."""
+    return await OptionsLabService(session, context).get_backtest(backtest_id)
+
+
+@router.delete("/backtests/{backtest_id}")
+async def delete_options_lab_backtest(
+    backtest_id: str,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Delete a saved model backtest."""
+    return await OptionsLabService(session, context).delete_backtest(backtest_id)
+
+
+class OptionsLabBotEntryIn(BaseModel):
+    min_ivp: float | None = None
+    max_ivp: float | None = None
+    min_pcr: float | None = None
+    max_pcr: float | None = None
+    max_dte: float | None = None
+
+
+class OptionsLabBotScheduleIn(BaseModel):
+    days: list[int] | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+
+
+class OptionsLabBotCreateIn(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    kill: bool | None = None
+    mode: str | None = None
+    template: str | None = None
+    backtest_id: str | None = None
+    underlying_symbol: str | None = None
+    width_steps: int | None = None
+    profit_pct: float | None = None
+    stop_pct: float | None = None
+    schedule: OptionsLabBotScheduleIn | None = None
+    entry: OptionsLabBotEntryIn | None = None
+    cooldown_sec: int | None = None
+    max_runs_per_day: int | None = None
+    source: str | None = None
+
+
+class OptionsLabBotUpdateIn(OptionsLabBotCreateIn):
+    pass
+
+
+class OptionsLabBotRunIn(BaseModel):
+    confirm: bool = False
+    auto: bool = False
+
+
+@router.get("/bots")
+async def list_options_lab_bots(
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """List persisted Options Lab bots for this tenant."""
+    from app.core.settings import get_settings
+
+    out = await OptionsLabService(session, context).list_bots()
+    out["worker_enabled"] = bool(get_settings().options_lab_bots_enabled)
+    return out
+
+
+@router.post("/bots")
+async def create_options_lab_bot(
+    body: OptionsLabBotCreateIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Create a bot (optional backtest_id handoff)."""
+    payload = body.model_dump(exclude_none=True)
+    payload.setdefault("enabled", False)
+    payload.setdefault("kill", False)
+    payload.setdefault("mode", "paper")
+    return await OptionsLabService(session, context).create_bot(payload)
+
+
+@router.post("/bots/evaluate")
+async def evaluate_options_lab_bots(
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Nudge: evaluate due armed paper bots for this tenant."""
+    return await OptionsLabService(session, context).evaluate_armed_bots()
+
+
+@router.get("/bots/{bot_id}")
+async def get_options_lab_bot(
+    bot_id: str,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    return await OptionsLabService(session, context).get_bot(bot_id)
+
+
+@router.patch("/bots/{bot_id}")
+async def update_options_lab_bot(
+    bot_id: str,
+    body: OptionsLabBotUpdateIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    return await OptionsLabService(session, context).update_bot(
+        bot_id, body.model_dump(exclude_unset=True)
+    )
+
+
+@router.delete("/bots/{bot_id}")
+async def delete_options_lab_bot(
+    bot_id: str,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    return await OptionsLabService(session, context).delete_bot(bot_id)
+
+
+@router.post("/bots/{bot_id}/run")
+async def run_options_lab_bot(
+    bot_id: str,
+    body: OptionsLabBotRunIn,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Run once (HITL). Live requires confirm; auto flag is for worker/tests."""
+    return await OptionsLabService(session, context).run_bot(
+        bot_id,
+        auto=bool(body.auto),
+        confirm=bool(body.confirm),
+    )

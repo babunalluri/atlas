@@ -4270,6 +4270,294 @@ export async function postOptionsLabOrders(
   });
 }
 
+export interface OptionsLabBacktestLegInput {
+  id?: string;
+  side: "buy" | "sell";
+  type: "CE" | "PE";
+  strike: number;
+  qty?: number;
+  premium?: number;
+  entry_premium?: number;
+  symbol?: string;
+}
+
+export interface OptionsLabBacktestStats {
+  hit_rate: number;
+  avg_pnl: number;
+  path_trough: number;
+  path_peak: number;
+}
+
+export interface OptionsLabBacktestResult {
+  fidelity: string;
+  days: number;
+  shock_pct: number;
+  path_bias: string;
+  spot: number;
+  shocks: Array<{
+    day: number;
+    up: number;
+    down: number;
+    path_spot: number;
+    pnl_up: number;
+    pnl_down: number;
+    pnl_path: number;
+  }>;
+  equity: Array<{ day: number; equity: number }>;
+  stats: OptionsLabBacktestStats;
+}
+
+export interface OptionsLabBacktestSummaryRow {
+  id?: string;
+  name?: string;
+  created_at?: number;
+  updated_at?: number;
+  fidelity?: string;
+  underlying_symbol?: string | null;
+  params?: {
+    days?: number;
+    shock_pct?: number;
+    path_bias?: string;
+    strike_step?: number | null;
+  };
+  stats?: OptionsLabBacktestStats;
+  leg_count?: number;
+}
+
+export interface OptionsLabBacktestRecord extends OptionsLabBacktestSummaryRow {
+  spot?: number;
+  legs?: OptionsLabBacktestLegInput[];
+  result?: OptionsLabBacktestResult;
+  underlying_label?: string | null;
+  source?: string;
+}
+
+export async function listOptionsLabBacktests(
+  accessToken: string,
+): Promise<{
+  ok: boolean;
+  backtests?: OptionsLabBacktestSummaryRow[];
+  count?: number;
+  error?: string;
+}> {
+  return apiFetch(`/admin/options-lab/backtests`, { accessToken });
+}
+
+export async function createOptionsLabBacktest(
+  accessToken: string,
+  payload: {
+    name?: string;
+    legs: OptionsLabBacktestLegInput[];
+    spot: number;
+    days?: number;
+    shock_pct?: number;
+    path_bias?: string;
+    strike_step?: number;
+    underlying_symbol?: string;
+    underlying_label?: string;
+  },
+): Promise<{ ok: boolean; backtest?: OptionsLabBacktestRecord; error?: string }> {
+  return apiFetch(`/admin/options-lab/backtests`, {
+    accessToken,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function getOptionsLabBacktest(
+  accessToken: string,
+  backtestId: string,
+): Promise<{ ok: boolean; backtest?: OptionsLabBacktestRecord; error?: string }> {
+  return apiFetch(`/admin/options-lab/backtests/${encodeURIComponent(backtestId)}`, {
+    accessToken,
+  });
+}
+
+export async function deleteOptionsLabBacktest(
+  accessToken: string,
+  backtestId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return apiFetch(`/admin/options-lab/backtests/${encodeURIComponent(backtestId)}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
+export async function summarizeOptionsLabBacktests(
+  accessToken: string,
+  payload?: { ids?: string[]; limit?: number },
+): Promise<{
+  ok: boolean;
+  count?: number;
+  runs?: Array<{
+    id?: string;
+    name?: string;
+    hit_rate?: number;
+    avg_pnl?: number;
+    path_trough?: number;
+    path_peak?: number;
+    days?: number;
+    fidelity?: string;
+  }>;
+  stats?: {
+    avg_hit_rate: number;
+    avg_pnl: number;
+    avg_path_trough: number;
+    avg_path_peak: number;
+  } | null;
+  correlations?: Array<{
+    a?: string;
+    b?: string;
+    a_name?: string;
+    b_name?: string;
+    corr?: number;
+  }>;
+  note?: string;
+  error?: string;
+}> {
+  return apiFetch(`/admin/options-lab/backtests/summary`, {
+    accessToken,
+    method: "POST",
+    body: payload ?? {},
+  });
+}
+
+export interface OptionsLabBotEntry {
+  min_ivp?: number | null;
+  max_ivp?: number | null;
+  min_pcr?: number | null;
+  max_pcr?: number | null;
+  max_dte?: number | null;
+}
+
+export interface OptionsLabBotSchedule {
+  days?: number[];
+  window_start?: string;
+  window_end?: string;
+}
+
+export interface OptionsLabBot {
+  id: string;
+  name: string;
+  enabled: boolean;
+  kill?: boolean;
+  mode: "paper" | "live";
+  template?: string | null;
+  backtest_id?: string | null;
+  underlying_symbol?: string | null;
+  profit_pct?: number;
+  stop_pct?: number;
+  schedule?: OptionsLabBotSchedule;
+  entry?: OptionsLabBotEntry;
+  cooldown_sec?: number;
+  max_runs_per_day?: number;
+  runs_today?: number;
+  runs_today_date?: string | null;
+  last_run_at?: number | null;
+  last_run_message?: string | null;
+  log?: Array<{ ts: number; ok: boolean; auto?: boolean; message: string }>;
+  created_at?: number;
+  updated_at?: number;
+  source?: string;
+  leg_count?: number;
+}
+
+export type OptionsLabBotInput = {
+  name?: string;
+  enabled?: boolean;
+  kill?: boolean;
+  mode?: "paper" | "live";
+  template?: string | null;
+  backtest_id?: string | null;
+  underlying_symbol?: string | null;
+  width_steps?: number;
+  profit_pct?: number;
+  stop_pct?: number;
+  schedule?: OptionsLabBotSchedule;
+  entry?: OptionsLabBotEntry;
+  cooldown_sec?: number;
+  max_runs_per_day?: number;
+  source?: string;
+};
+
+export async function listOptionsLabBots(accessToken: string): Promise<{
+  ok: boolean;
+  bots?: OptionsLabBot[];
+  count?: number;
+  armed_paper?: number;
+  worker_enabled?: boolean;
+  error?: string;
+}> {
+  return apiFetch(`/admin/options-lab/bots`, { accessToken });
+}
+
+export async function createOptionsLabBot(
+  accessToken: string,
+  payload: OptionsLabBotInput,
+): Promise<{ ok: boolean; bot?: OptionsLabBot; error?: string }> {
+  return apiFetch(`/admin/options-lab/bots`, {
+    accessToken,
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function updateOptionsLabBot(
+  accessToken: string,
+  botId: string,
+  payload: OptionsLabBotInput,
+): Promise<{ ok: boolean; bot?: OptionsLabBot; error?: string }> {
+  return apiFetch(`/admin/options-lab/bots/${encodeURIComponent(botId)}`, {
+    accessToken,
+    method: "PATCH",
+    body: payload,
+  });
+}
+
+export async function deleteOptionsLabBot(
+  accessToken: string,
+  botId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return apiFetch(`/admin/options-lab/bots/${encodeURIComponent(botId)}`, {
+    accessToken,
+    method: "DELETE",
+  });
+}
+
+export async function runOptionsLabBot(
+  accessToken: string,
+  botId: string,
+  payload?: { confirm?: boolean; auto?: boolean },
+): Promise<{
+  ok: boolean;
+  skipped?: boolean;
+  message?: string;
+  error?: string;
+  bot?: OptionsLabBot;
+  mock?: boolean;
+  tool?: string;
+  submitted_count?: number;
+}> {
+  return apiFetch(`/admin/options-lab/bots/${encodeURIComponent(botId)}/run`, {
+    accessToken,
+    method: "POST",
+    body: payload ?? { confirm: true },
+  });
+}
+
+export async function evaluateOptionsLabBots(accessToken: string): Promise<{
+  ok: boolean;
+  results?: Array<Record<string, unknown>>;
+  count?: number;
+  error?: string;
+}> {
+  return apiFetch(`/admin/options-lab/bots/evaluate`, {
+    accessToken,
+    method: "POST",
+    body: {},
+  });
+}
+
 export async function getCustomerDesk(
   accessToken: string,
   deskSnapshot = false,

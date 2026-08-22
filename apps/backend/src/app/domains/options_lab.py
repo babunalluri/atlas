@@ -1598,6 +1598,337 @@ class OptionsLabService:
         tenant_id = _tenant_key(self.context)
         return await delete_portfolio(tenant_id, portfolio_id)
 
+    async def list_backtests(self) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import list_backtests
+
+        return await list_backtests(_tenant_key(self.context))
+
+    async def create_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import create_backtest
+
+        config = await self._read_config()
+        body = dict(payload)
+        if not body.get("underlying_symbol"):
+            body["underlying_symbol"] = config.underlying_symbol
+        if not body.get("underlying_label"):
+            body["underlying_label"] = config.underlying_label
+        if body.get("strike_step") is None:
+            body["strike_step"] = config.strike_step
+        return await create_backtest(_tenant_key(self.context), body)
+
+    async def get_backtest(self, backtest_id: str) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import get_backtest
+
+        return await get_backtest(_tenant_key(self.context), backtest_id)
+
+    async def delete_backtest(self, backtest_id: str) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import delete_backtest
+
+        return await delete_backtest(_tenant_key(self.context), backtest_id)
+
+    async def summarize_backtests(
+        self,
+        *,
+        ids: list[str] | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import summarize_backtests
+
+        return await summarize_backtests(
+            _tenant_key(self.context),
+            ids=ids,
+            limit=limit,
+        )
+
+    async def run_model_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import normalize_leg, run_model_backtest
+
+        raw_legs = payload.get("legs") if isinstance(payload.get("legs"), list) else []
+        legs: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw_legs):
+            if isinstance(item, dict):
+                leg = normalize_leg(item, index=idx)
+                if leg:
+                    legs.append(leg)
+        if not legs:
+            return {"ok": False, "error": "At least one valid leg required."}
+        try:
+            spot = float(payload.get("spot"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "spot is required."}
+        result = run_model_backtest(
+            legs=legs,
+            spot=spot,
+            days=int(payload.get("days") or 10),
+            shock_pct=float(payload.get("shock_pct") or 2),
+            path_bias=str(payload.get("path_bias") or "flat"),
+        )
+        if result is None:
+            return {"ok": False, "error": "Model backtest failed."}
+        return {"ok": True, "fidelity": "model", "result": result}
+
+    async def list_bots(self) -> dict[str, Any]:
+        from app.domains.options_lab_bots import list_bots
+
+        return await list_bots(_tenant_key(self.context))
+
+    async def get_bot(self, bot_id: str) -> dict[str, Any]:
+        from app.domains.options_lab_bots import get_bot
+
+        return await get_bot(_tenant_key(self.context), bot_id)
+
+    async def create_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.domains.options_lab_backtests import get_backtest
+        from app.domains.options_lab_bots import create_bot
+
+        body = dict(payload)
+        tenant_id = _tenant_key(self.context)
+        config = await self._read_config()
+        if not body.get("underlying_symbol"):
+            body["underlying_symbol"] = config.underlying_symbol
+        bt_id = body.get("backtest_id")
+        if bt_id and not body.get("legs"):
+            got = await get_backtest(tenant_id, str(bt_id))
+            if not got.get("ok"):
+                return {"ok": False, "error": got.get("error") or "Backtest not found."}
+            bt = got["backtest"]
+            body["legs"] = bt.get("legs") or []
+            if not body.get("name"):
+                body["name"] = f"Bot · {bt.get('name') or bt_id}"
+            if not body.get("underlying_symbol"):
+                body["underlying_symbol"] = bt.get("underlying_symbol")
+            body.setdefault("source", "backtest")
+            # Keep operator SL/TP defaults — path_trough is ₹ PnL, not a %.
+        return await create_bot(tenant_id, body)
+
+    async def update_bot(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.domains.options_lab_bots import update_bot
+
+        return await update_bot(_tenant_key(self.context), bot_id, payload)
+
+    async def delete_bot(self, bot_id: str) -> dict[str, Any]:
+        from app.domains.options_lab_bots import delete_bot
+
+        return await delete_bot(_tenant_key(self.context), bot_id)
+
+    async def run_bot(
+        self,
+        bot_id: str,
+        *,
+        auto: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Execute one bot once. Auto path is paper-only + schedule/gates."""
+        from app.domains.options_lab_backtests import get_backtest, normalize_leg
+        from app.domains.options_lab_bots import (
+            append_run_log,
+            bot_due_for_auto,
+            claim_run_slot,
+            days_to_expiry_from_fut,
+            entry_conditions_ok,
+            get_bot,
+            replace_bot,
+            try_claim_bot_run,
+        )
+        from app.domains.options_lab_templates import (
+            build_template_legs,
+            enrich_legs_from_chain,
+        )
+        from app.domains.options_lab_trading import estimate_lot_size
+
+        tenant_id = _tenant_key(self.context)
+        got = await get_bot(tenant_id, bot_id)
+        if not got.get("ok"):
+            return got
+        bot = dict(got["bot"])
+
+        if bot.get("kill"):
+            return {"ok": False, "error": "Kill switch on — bot cannot run."}
+        if auto:
+            due, reason = bot_due_for_auto(bot)
+            if not due:
+                return {"ok": False, "skipped": True, "error": reason}
+
+        live = str(bot.get("mode") or "paper") == "live"
+        if auto and live:
+            return {"ok": False, "error": "Live never auto-fires."}
+        if live and not confirm:
+            return {"ok": False, "error": "Live run requires confirm=true (HITL)."}
+        if not live and not confirm and not auto:
+            return {"ok": False, "error": "confirm=true required."}
+
+        config = await self._read_config()
+        underlying = str(
+            bot.get("underlying_symbol") or config.underlying_symbol or ""
+        ).strip()
+        if (
+            bot.get("underlying_symbol")
+            and config.underlying_symbol
+            and str(bot["underlying_symbol"]).strip() != str(config.underlying_symbol).strip()
+        ):
+            msg = (
+                f"Bot underlying {bot['underlying_symbol']} ≠ Lab "
+                f"{config.underlying_symbol}."
+            )
+            # Soft skip on auto — Lab underlying may change; do not disarm.
+            if auto:
+                return {"ok": False, "skipped": True, "error": msg}
+            return {"ok": False, "error": msg}
+
+        chain = await self.chain_snapshot(wings=DEFAULT_WINGS)
+        if not chain.get("ok"):
+            msg = str(chain.get("error") or "Chain unavailable.")
+            if auto:
+                return {"ok": False, "skipped": True, "error": msg}
+            return {"ok": False, "error": msg}
+
+        summary = chain.get("summary") if isinstance(chain.get("summary"), dict) else {}
+        ivp = summary.get("ivp")
+        pcr = summary.get("pcr")
+        try:
+            ivp_f = float(ivp) if ivp is not None else None
+        except (TypeError, ValueError):
+            ivp_f = None
+        try:
+            pcr_f = float(pcr) if pcr is not None else None
+        except (TypeError, ValueError):
+            pcr_f = None
+        dte = days_to_expiry_from_fut(chain.get("fut_symbol") or config.fut_symbol)
+        ok_entry, entry_reason = entry_conditions_ok(
+            bot, ivp=ivp_f, pcr=pcr_f, dte=dte
+        )
+        if not ok_entry:
+            if auto:
+                # Gate miss is not a hard fail — leave armed.
+                return {"ok": False, "skipped": True, "error": entry_reason}
+            return {"ok": False, "error": entry_reason}
+
+        rows = chain.get("rows") if isinstance(chain.get("rows"), list) else []
+        atm = chain.get("atm")
+        try:
+            atm_f = float(atm) if atm is not None else float(chain.get("spot") or 0)
+        except (TypeError, ValueError):
+            atm_f = 0.0
+        strike_step = float(
+            chain.get("strike_step") or config.strike_step or 50
+        )
+
+        raw_legs: list[dict[str, Any]] = []
+        if bot.get("backtest_id"):
+            bt = await get_backtest(tenant_id, str(bot["backtest_id"]))
+            if bt.get("ok"):
+                raw_legs = list((bt.get("backtest") or {}).get("legs") or [])
+        if not raw_legs and isinstance(bot.get("legs"), list):
+            raw_legs = list(bot["legs"])
+        if not raw_legs and bot.get("template"):
+            raw_legs = build_template_legs(
+                str(bot["template"]),
+                atm=atm_f,
+                strike_step=strike_step,
+                width_steps=int(bot.get("width_steps") or 1),
+            )
+        # Prefer live ATM template when stored legs sit outside current wings
+        # (common after a backtest handoff once spot has moved).
+        legs_norm: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw_legs):
+            if isinstance(item, dict):
+                leg = normalize_leg(item, index=idx)
+                if leg:
+                    legs_norm.append(leg)
+        legs = enrich_legs_from_chain(legs_norm, rows)
+        if (not legs or any(not leg.get("symbol") for leg in legs)) and bot.get("template"):
+            rebuilt = build_template_legs(
+                str(bot["template"]),
+                atm=atm_f,
+                strike_step=strike_step,
+                width_steps=int(bot.get("width_steps") or 1),
+            )
+            if rebuilt:
+                legs = enrich_legs_from_chain(rebuilt, rows)
+        if not legs:
+            msg = "No legs resolved (template/backtest/chain)."
+            if auto:
+                return {"ok": False, "skipped": True, "error": msg}
+            bot = append_run_log(bot, ok=False, message=msg, auto=False)
+            await replace_bot(tenant_id, bot)
+            return {"ok": False, "error": msg}
+        if any(not leg.get("symbol") for leg in legs):
+            msg = "Some legs lack symbols — widen wings or pick another template."
+            if auto:
+                return {"ok": False, "skipped": True, "error": msg}
+            bot = append_run_log(bot, ok=False, message=msg, auto=False)
+            await replace_bot(tenant_id, bot)
+            return {"ok": False, "error": msg}
+
+        # Auto / evaluate: claim before broker round-trip so multi-process
+        # workers and concurrent Evaluate nudges cannot double-place.
+        if auto:
+            cool = int(bot.get("cooldown_sec") or 300)
+            claimed = await try_claim_bot_run(
+                tenant_id, str(bot.get("id") or bot_id), cooldown_sec=cool
+            )
+            if not claimed:
+                return {
+                    "ok": False,
+                    "skipped": True,
+                    "error": "Already claimed by another worker/nudge.",
+                }
+            bot = claim_run_slot(bot)
+            await replace_bot(tenant_id, bot)
+
+        order_type = "MARKET" if live and (bot.get("stop_pct") or bot.get("profit_pct")) else "LIMIT"
+        placed = await self.place_strategy_orders(
+            {
+                "legs": legs,
+                "confirm": True,
+                "live": live,
+                "lot_size": estimate_lot_size(underlying or config.underlying_label or ""),
+                "product": "NRML",
+                "order_type": order_type,
+                "name": bot.get("name"),
+                "underlying_symbol": underlying or config.underlying_symbol,
+                "save_draft": True,
+                "mock": bool(chain.get("mock") or config.mock),
+                "stop_loss_pct": bot.get("stop_pct"),
+                "target_pct": bot.get("profit_pct"),
+                "tag": f"atlas-ol-bot-{(bot.get('id') or '')[:12]}",
+            }
+        )
+        ok = bool(placed.get("ok") or placed.get("partial") or placed.get("mock"))
+        if placed.get("mock"):
+            msg = "Mock run OK + draft saved."
+        elif ok:
+            msg = (
+                f"Submitted via {placed.get('tool') or 'broker'} "
+                f"({placed.get('submitted_count') or '?'} legs)."
+            )
+        else:
+            msg = str(
+                placed.get("error")
+                or "; ".join(placed.get("errors") or [])
+                or "Run failed."
+            )
+        prefix = "Auto: " if auto else ""
+        bot = append_run_log(bot, ok=ok, message=prefix + msg, auto=auto)
+        await replace_bot(tenant_id, bot)
+        return {**placed, "ok": ok, "bot": bot, "message": prefix + msg}
+
+    async def evaluate_armed_bots(self) -> dict[str, Any]:
+        """Run due armed paper bots for this tenant (worker / nudge)."""
+        from app.domains.options_lab_bots import bot_due_for_auto, load_bots
+
+        results: list[dict[str, Any]] = []
+        for bot in await load_bots(_tenant_key(self.context)):
+            due, reason = bot_due_for_auto(bot)
+            if not due:
+                results.append(
+                    {"id": bot.get("id"), "skipped": True, "reason": reason}
+                )
+                continue
+            out = await self.run_bot(str(bot["id"]), auto=True, confirm=True)
+            results.append({"id": bot.get("id"), **out})
+        return {"ok": True, "results": results, "count": len(results)}
+
     async def mark_portfolio(self, portfolio_id: str) -> dict[str, Any]:
         from app.domains.options_lab_portfolios import (
             canonical_broker_option_symbol,

@@ -1145,6 +1145,9 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                   spot={snapshot?.spot ?? null}
                   strikeStep={config?.strike_step ?? snapshot?.strike_step ?? 50}
                   ivPoints={charts?.iv?.points}
+                  getAccessToken={getAccessToken}
+                  underlyingSymbol={config?.underlying_symbol ?? snapshot?.underlying_symbol}
+                  underlyingLabel={config?.underlying_label ?? snapshot?.underlying_label}
                 />
               ) : overlay === "flows" ? (
                 <OptionsLabFlowsPanel
