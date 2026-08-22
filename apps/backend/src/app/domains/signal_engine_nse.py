@@ -43,26 +43,47 @@ def _nse_get(path: str, session: Any) -> Any | None:
         return None
 
 
-def _parse_fii_dii(body: Any) -> float | None:
+def _parse_fii_dii_nets(body: Any) -> dict[str, float]:
+    """Parse FII/FPI and DII net values (₹ Cr) from NSE fiidii payloads."""
+    out: dict[str, float] = {}
     if not isinstance(body, dict):
-        return None
+        return out
     rows = body.get("data")
     if not isinstance(rows, list):
-        return None
+        return out
     for row in rows:
         if not isinstance(row, dict):
             continue
         cat = str(row.get("category") or row.get("Category") or "").upper()
-        if "FII" in cat or "FPI" in cat:
-            for key in ("netValue", "fiiNetValue", "Net Value (₹ Crores)", "net"):
-                val = row.get(key)
-                if val is None or val == "":
-                    continue
-                try:
-                    return round(float(str(val).replace(",", "")), 2)
-                except (TypeError, ValueError):
-                    continue
-    return None
+        preferred: tuple[str, ...]
+        if "DII" in cat:
+            preferred = ("diiNetValue", "netValue", "Net Value (₹ Crores)", "net")
+        elif "FII" in cat or "FPI" in cat:
+            preferred = ("fiiNetValue", "netValue", "Net Value (₹ Crores)", "net")
+        else:
+            continue
+        net: float | None = None
+        for key in preferred:
+            val = row.get(key)
+            if val is None or val == "":
+                continue
+            try:
+                net = round(float(str(val).replace(",", "")), 2)
+                break
+            except (TypeError, ValueError):
+                continue
+        if net is None:
+            continue
+        if "DII" in cat:
+            out["dii_net"] = net
+        else:
+            out["fii_net"] = net
+    return out
+
+
+def _parse_fii_dii(body: Any) -> float | None:
+    nets = _parse_fii_dii_nets(body)
+    return nets.get("fii_net")
 
 
 def _unwrap_nse_rows(body: Any) -> list[Any] | None:
@@ -119,9 +140,12 @@ def fetch_nse_slow_fields(*, force: bool = False) -> dict[str, float]:
             "/api/fiidiiTradeData",
         ):
             body = _nse_get(path, session)
-            fii = _parse_fii_dii(body)
-            if fii is not None:
-                payload["fii_net"] = fii
+            nets = _parse_fii_dii_nets(body)
+            if "fii_net" in nets:
+                payload["fii_net"] = nets["fii_net"]
+            if "dii_net" in nets:
+                payload["dii_net"] = nets["dii_net"]
+            if "fii_net" in payload:
                 break
 
         indices = _nse_get("/api/allIndices", session)
@@ -154,6 +178,7 @@ def mock_nse_fields() -> dict[str, float]:
 
     return {
         "fii_net": 850.0,
+        "dii_net": -120.0,
         "advance_decline_ratio": 1.15,
         **mock_calendar_fields(),
     }

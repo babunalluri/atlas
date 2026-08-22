@@ -9,7 +9,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
@@ -113,6 +113,33 @@ async def get_options_screener(
     return await OptionsLabService(session, context).screener_snapshot(universe=universe)
 
 
+@router.get("/flows")
+async def get_options_lab_flows(
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """FII/DII net flows for Options Lab (no Signal Engine Start required)."""
+    return await OptionsLabService(session, context).flows_snapshot()
+
+
+@router.get("/gtts")
+async def list_options_lab_gtts(
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """List open GTTs via bound kite list_gtts (Live/Signals)."""
+    return await OptionsLabService(session, context).list_gtts()
+
+
+@router.delete("/gtts/{trigger_id}")
+async def delete_options_lab_gtt(
+    trigger_id: str,
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Cancel a GTT via bound kite delete_gtt (mutating)."""
+    return await OptionsLabService(session, context).delete_gtt(trigger_id)
+
 @router.get("/chain")
 async def get_options_chain(
     context: AdminContext,
@@ -214,6 +241,7 @@ class OptionsLabMarginsIn(BaseModel):
     underlying_symbol: str | None = None
     heuristic: dict[str, Any] | None = None
     mock: bool | None = None
+    basket: bool = False
 
 
 class OptionsLabOrdersIn(BaseModel):
@@ -228,6 +256,9 @@ class OptionsLabOrdersIn(BaseModel):
     save_draft: bool = True
     mock: bool | None = None
     tag: str | None = None
+    stop_loss_pct: float | None = Field(default=None, ge=0.5, le=90)
+    target_pct: float | None = Field(default=None, ge=0.5, le=200)
+    basket: bool = False
 
 
 @router.get("/portfolios")
