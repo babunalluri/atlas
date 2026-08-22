@@ -388,6 +388,12 @@ def normalize_leg(raw: dict[str, Any], *, index: int) -> dict[str, Any] | None:
         return None
     if strike <= 0 or qty == 0:
         return None
+    # Backtest P&L treats qty as a plain lots multiplier — reject share qty.
+    unit = str(raw.get("unit") or "lots").lower()
+    if unit == "shares":
+        return None
+    if unit not in {"lots", "shares"}:
+        unit = "lots"
     return {
         "id": str(raw.get("id") or f"leg-{index}"),
         "side": side,
@@ -396,6 +402,7 @@ def normalize_leg(raw: dict[str, Any], *, index: int) -> dict[str, Any] | None:
         "qty": qty,
         "premium": premium,
         "symbol": str(raw.get("symbol") or "").strip() or None,
+        "unit": "lots",
     }
 
 

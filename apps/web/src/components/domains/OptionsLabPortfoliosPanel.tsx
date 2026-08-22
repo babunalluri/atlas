@@ -13,6 +13,7 @@ import {
   createOptionsPortfolio,
   deleteOptionsLabGtt,
   deleteOptionsPortfolio,
+  getOptionsLabBrokerReconcile,
   importOptionsPortfolioFromKite,
   listOptionsLabGtts,
   listOptionsPortfolios,
@@ -34,6 +35,13 @@ function formatNum(value: number | null | undefined, digits = 2) {
 function formatTime(ts: number | null | undefined) {
   if (ts == null) return "—";
   return new Date(ts * 1000).toLocaleTimeString();
+}
+
+/** Qty unit shown to operators — stamped leg unit or portfolio source default. */
+function portfolioQtyUnit(row: OptionsPortfolio): "lots" | "shares" {
+  const stamped = row.legs.find((leg) => leg.unit === "lots" || leg.unit === "shares")?.unit;
+  if (stamped === "lots" || stamped === "shares") return stamped;
+  return row.source === "kite_import" ? "shares" : "lots";
 }
 
 export function OptionsLabPortfoliosPanel({
@@ -75,6 +83,8 @@ export function OptionsLabPortfoliosPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileNote, setReconcileNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [newName, setNewName] = useState("");
   const [bookMode, setBookMode] = useState<"drafts" | "paper">("drafts");
@@ -272,6 +282,51 @@ export function OptionsLabPortfoliosPanel({
     }
   }
 
+  async function onReconcileBroker() {
+    setReconciling(true);
+    setReconcileNote(null);
+    setError(null);
+    try {
+      const token = await getAccessToken();
+      if (!token) return;
+      const res = await getOptionsLabBrokerReconcile(token);
+      if (!res.ok) {
+        setError(res.error ?? "Reconcile failed");
+        return;
+      }
+      const s = res.diff?.summary;
+      if (!s) {
+        setError("Reconcile returned no summary");
+        return;
+      }
+      const cash =
+        res.margin?.available_cash != null
+          ? ` · avail ₹${res.margin.available_cash.toLocaleString()}`
+          : "";
+      const used =
+        res.margin?.used_margin != null
+          ? ` · used ₹${res.margin.used_margin.toLocaleString()}`
+          : "";
+      const util =
+        res.margin?.utilization_pct != null
+          ? ` · ${res.margin.utilization_pct}% util`
+          : "";
+      if (s.in_sync) {
+        setReconcileNote(
+          `Broker book in sync (${s.matched} symbols, lots)${cash}${used}${util}`,
+        );
+      } else {
+        setReconcileNote(
+          `${s.broker_only} broker-only · ${s.lab_only} lab-only · ${s.qty_mismatch} qty mismatch · ${s.matched} matched (lots)${cash}${used}${util}`,
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Reconcile failed");
+    } finally {
+      setReconciling(false);
+    }
+  }
+
   async function onDelete(portfolioId: string) {
     const token = await getAccessToken();
     if (!token) return;
@@ -319,7 +374,7 @@ export function OptionsLabPortfoliosPanel({
           <p className="text-sm text-slate-muted">
             {bookMode === "paper"
               ? "Paper book — auto-tagged “Paper …” after place_paper_order; rename drafts the same way."
-              : "Draft portfolios with live mark-to-market. Save from Builder or import open F&O options from Kite."}
+              : "Draft portfolios with live mark-to-market. Qty is lots (Builder) or shares (Kite import) — Reconcile compares in lots."}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -333,6 +388,16 @@ export function OptionsLabPortfoliosPanel({
             title={mock ? "Disable mock for Kite import" : undefined}
           >
             {importing ? "Importing…" : "Import from Kite"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={reconciling || mock}
+            onClick={() => void onReconcileBroker()}
+            title={mock ? "Disable mock for broker reconcile" : undefined}
+          >
+            {reconciling ? "Checking…" : "Reconcile"}
           </Button>
           <Button
             type="button"
@@ -378,6 +443,11 @@ export function OptionsLabPortfoliosPanel({
           {error}
         </div>
       ) : null}
+      {reconcileNote ? (
+        <div className="rounded-lg border border-line bg-canvas/50 px-3 py-2 text-sm text-slate-muted">
+          {reconcileNote}
+        </div>
+      ) : null}
 
       <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
         <div className="overflow-auto rounded-lg border border-line">
@@ -403,7 +473,8 @@ export function OptionsLabPortfoliosPanel({
                   >
                     <span className="text-sm font-medium text-ink">{row.name}</span>
                     <span className="text-[11px] text-slate-muted">
-                      {row.legs.length} legs · {row.source.replace("_", " ")}
+                      {row.legs.length} legs · {row.source.replace("_", " ")} · qty in{" "}
+                      {portfolioQtyUnit(row)}
                     </span>
                   </button>
                 </li>
@@ -422,8 +493,8 @@ export function OptionsLabPortfoliosPanel({
                   <h3 className="font-display text-base font-semibold text-ink">{selected.name}</h3>
                   <p className="mt-0.5 text-xs text-slate-muted">
                     {selected.underlying_label || selected.underlying_symbol || "—"} ·{" "}
-                    {selected.fut_symbol || "No FUT"} · updated{" "}
-                    {formatTime(selected.updated_at)}
+                    {selected.fut_symbol || "No FUT"} · qty in {portfolioQtyUnit(selected)} ·
+                    updated {formatTime(selected.updated_at)}
                   </p>
                 </div>
                 <Button

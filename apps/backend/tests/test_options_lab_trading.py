@@ -12,6 +12,7 @@ from app.domains.options_lab_trading import (
     _margin_total_from_order_payload,
     _split_exchange_symbol,
     estimate_lot_size,
+    margins_snapshot_from_payload,
 )
 
 
@@ -34,6 +35,48 @@ def test_margin_payload_parsers() -> None:
     )
     assert init == 96504.9
     assert final == 34786.7
+
+
+def test_margins_snapshot_available_and_used() -> None:
+    snap = margins_snapshot_from_payload(
+        {
+            "data": {
+                "equity": {
+                    "net": 150_000,
+                    "available": {"live_balance": 80_000, "cash": 70_000},
+                    "utilised": {
+                        "debits": 70_000,
+                        "span": 55_000,
+                        "exposure": 10_000,
+                        "option_premium": 5_000,
+                    },
+                }
+            }
+        }
+    )
+    assert snap["ok"] is True
+    assert snap["available_cash"] == 80_000
+    assert snap["used_margin"] == 70_000
+    assert snap["span"] == 55_000
+    assert snap["exposure"] == 10_000
+    assert snap["option_premium"] == 5_000
+    assert snap["net"] == 150_000
+    assert snap["utilization_pct"] == 46.67  # 70k / (70k+80k)
+
+
+def test_margins_snapshot_sums_span_when_debits_missing() -> None:
+    snap = margins_snapshot_from_payload(
+        {
+            "data": {
+                "equity": {
+                    "available": {"live_balance": 50_000},
+                    "utilised": {"span": 20_000, "exposure": 5_000, "option_premium": 2_500},
+                }
+            }
+        }
+    )
+    assert snap["used_margin"] == 27_500
+    assert snap["utilization_pct"] == 35.48
 
 
 @pytest.mark.asyncio

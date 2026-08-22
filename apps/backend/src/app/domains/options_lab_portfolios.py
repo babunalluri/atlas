@@ -235,7 +235,12 @@ def infer_fut_symbol_from_legs(legs: list[dict[str, Any]]) -> str:
     return ""
 
 
-def normalize_portfolio_leg(raw: dict[str, Any], *, index: int) -> dict[str, Any] | None:
+def normalize_portfolio_leg(
+    raw: dict[str, Any],
+    *,
+    index: int,
+    default_unit: str = "lots",
+) -> dict[str, Any] | None:
     side = str(raw.get("side") or "").lower()
     opt_type = str(raw.get("type") or raw.get("option_type") or "").upper()
     if side not in {"buy", "sell"} or opt_type not in {"CE", "PE"}:
@@ -250,6 +255,9 @@ def normalize_portfolio_leg(raw: dict[str, Any], *, index: int) -> dict[str, Any
         return None
     leg_id = str(raw.get("id") or f"leg-{index}")
     symbol = canonical_broker_option_symbol(str(raw.get("symbol") or ""))
+    unit = str(raw.get("unit") or "").lower()
+    if unit not in {"lots", "shares"}:
+        unit = default_unit if default_unit in {"lots", "shares"} else "lots"
     return {
         "id": leg_id,
         "side": side,
@@ -258,6 +266,7 @@ def normalize_portfolio_leg(raw: dict[str, Any], *, index: int) -> dict[str, Any
         "qty": qty,
         "entry_premium": round(entry, 4),
         "symbol": symbol,
+        "unit": unit,
     }
 
 
@@ -270,20 +279,21 @@ def normalize_portfolio(raw: dict[str, Any]) -> dict[str, Any] | None:
     legs_in = raw.get("legs")
     if not isinstance(legs_in, list) or not legs_in:
         return None
+    source = str(raw.get("source") or "manual")
+    if source not in {"manual", "builder", "kite_import"}:
+        source = "manual"
+    default_unit = "shares" if source == "kite_import" else "lots"
     legs: list[dict[str, Any]] = []
     for idx, item in enumerate(legs_in):
         if not isinstance(item, dict):
             continue
-        leg = normalize_portfolio_leg(item, index=idx)
+        leg = normalize_portfolio_leg(item, index=idx, default_unit=default_unit)
         if leg:
             legs.append(leg)
     if not legs:
         return None
     now = _now_ts()
     portfolio_id = str(raw.get("id") or uuid.uuid4().hex[:12])
-    source = str(raw.get("source") or "manual")
-    if source not in {"manual", "builder", "kite_import"}:
-        source = "manual"
     return {
         "id": portfolio_id,
         "name": name[:120],
@@ -359,10 +369,15 @@ async def update_portfolio(
         if name:
             current["name"] = name[:120]
     if "legs" in patch and isinstance(patch["legs"], list):
+        default_unit = (
+            "shares" if str(current.get("source") or "") == "kite_import" else "lots"
+        )
         legs: list[dict[str, Any]] = []
         for leg_idx, item in enumerate(patch["legs"]):
             if isinstance(item, dict):
-                leg = normalize_portfolio_leg(item, index=leg_idx)
+                leg = normalize_portfolio_leg(
+                    item, index=leg_idx, default_unit=default_unit
+                )
                 if leg:
                     legs.append(leg)
         if not legs:
@@ -532,9 +547,23 @@ def positions_to_portfolio_legs(positions: list[dict[str, Any]]) -> list[dict[st
                 "qty": qty_abs,
                 "entry_premium": round(max(0.0, entry), 4),
                 "symbol": canonical_broker_option_symbol(symbol),
+                "unit": "shares",
             }
         )
     return legs
+
+
+def stamp_legs_unit(legs: list[dict[str, Any]], unit: str) -> list[dict[str, Any]]:
+    """Copy legs with an explicit qty unit (lots | shares)."""
+    u = unit if unit in {"lots", "shares"} else "lots"
+    out: list[dict[str, Any]] = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        row = dict(leg)
+        row["unit"] = u
+        out.append(row)
+    return out
 
 
 def kite_positions_payload(raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
@@ -554,3 +583,297 @@ def kite_positions_payload(raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
     if not legs:
         warnings.append("No open F&O option positions found in broker book.")
     return legs, warnings
+
+
+def _signed_qty_from_leg(leg: dict[str, Any]) -> tuple[str, float] | None:
+    symbol = canonical_broker_option_symbol(str(leg.get("symbol") or ""))
+    if not symbol:
+        return None
+    try:
+        qty = float(leg.get("qty") if leg.get("qty") is not None else 0)
+    except (TypeError, ValueError):
+        return None
+    if qty == 0:
+        return None
+    side = str(leg.get("side") or "").lower()
+    signed = qty if side == "buy" else -qty if side == "sell" else qty
+    return symbol, signed
+
+
+def lot_size_for_option_symbol(symbol: str) -> int:
+    """Best-effort lot size from option symbol root (NIFTY/BANKNIFTY/…)."""
+    from app.domains.options_lab_trading import estimate_lot_size
+
+    parsed = parse_option_symbol(symbol)
+    if parsed is not None:
+        return estimate_lot_size(root=str(parsed.get("root") or ""))
+    return estimate_lot_size(underlying=symbol)
+
+
+def signed_lots_from_leg(
+    leg: dict[str, Any],
+    *,
+    source: str,
+    default_unit: str = "lots",
+) -> dict[str, Any] | None:
+    """Normalize a leg to signed lots.
+
+    Broker positions are always shares. Lab legs trust stamped ``unit``
+    (``lots`` from Builder/bots, ``shares`` from Kite import). Unstamped
+    legacy rows use ``default_unit`` from portfolio source — never guess
+    from qty multiples of lot size.
+    """
+    parsed = _signed_qty_from_leg(leg)
+    if parsed is None:
+        return None
+    symbol, signed_raw = parsed
+    lot_size = lot_size_for_option_symbol(symbol)
+    stamped = str(leg.get("unit") or "").lower()
+    if source == "broker":
+        unit = "shares"
+    elif stamped in {"lots", "shares"}:
+        unit = stamped
+    elif default_unit in {"lots", "shares"}:
+        unit = default_unit
+    else:
+        unit = "lots"
+
+    if unit == "shares":
+        signed_lots = signed_raw / lot_size if lot_size else signed_raw
+    else:
+        signed_lots = signed_raw
+    return {
+        "symbol": symbol,
+        "signed_lots": round(signed_lots, 6),
+        "signed_shares": round(signed_lots * lot_size, 6),
+        "raw_qty": signed_raw,
+        "unit": unit,
+        "lot_size": lot_size,
+    }
+
+
+def aggregate_signed_lots(
+    legs: list[dict[str, Any]],
+    *,
+    source: str,
+    default_unit: str = "lots",
+) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+    """Map symbol → signed lots; per-symbol unit meta (mixed → ``mixed``)."""
+    out: dict[str, float] = {}
+    meta: dict[str, dict[str, Any]] = {}
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        row = signed_lots_from_leg(leg, source=source, default_unit=default_unit)
+        if row is None:
+            continue
+        symbol = str(row["symbol"])
+        out[symbol] = round(out.get(symbol, 0.0) + float(row["signed_lots"]), 6)
+        prev = meta.get(symbol)
+        if prev is None:
+            meta[symbol] = {
+                "lot_size": row["lot_size"],
+                "unit": row["unit"],
+                "source": source,
+            }
+        elif prev.get("unit") != row["unit"]:
+            meta[symbol] = {
+                **prev,
+                "unit": "mixed",
+                "lot_size": row["lot_size"],
+            }
+    out = {k: v for k, v in out.items() if abs(v) > 1e-9}
+    return out, meta
+
+
+def aggregate_signed_qty(
+    legs: list[dict[str, Any]],
+) -> dict[str, float]:
+    """Map exchange:tradingsymbol → signed raw qty (buy +, sell −). Legacy helper."""
+    out: dict[str, float] = {}
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        parsed = _signed_qty_from_leg(leg)
+        if parsed is None:
+            continue
+        symbol, signed = parsed
+        out[symbol] = round(out.get(symbol, 0.0) + signed, 6)
+    return {k: v for k, v in out.items() if abs(v) > 1e-9}
+
+
+def lab_exposure_from_books_and_bots(
+    *,
+    portfolios: list[dict[str, Any]],
+    bots: list[dict[str, Any]],
+) -> tuple[dict[str, float], list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Aggregate Lab draft books + bot open positions into signed lots by symbol."""
+    by_symbol: dict[str, float] = {}
+    unit_meta: dict[str, dict[str, Any]] = {}
+    book_rows: list[dict[str, Any]] = []
+    bot_rows: list[dict[str, Any]] = []
+
+    for portfolio in portfolios:
+        if not isinstance(portfolio, dict):
+            continue
+        legs = portfolio.get("legs") if isinstance(portfolio.get("legs"), list) else []
+        default_unit = (
+            "shares" if str(portfolio.get("source") or "") == "kite_import" else "lots"
+        )
+        contrib, meta = aggregate_signed_lots(
+            legs, source="lab", default_unit=default_unit
+        )
+        for sym, qty in contrib.items():
+            by_symbol[sym] = round(by_symbol.get(sym, 0.0) + qty, 6)
+            prev = unit_meta.get(sym)
+            nxt = meta.get(sym)
+            if prev is None and nxt is not None:
+                unit_meta[sym] = nxt
+            elif prev is not None and nxt is not None and prev.get("unit") != nxt.get("unit"):
+                unit_meta[sym] = {**prev, "unit": "mixed"}
+        book_rows.append(
+            {
+                "id": portfolio.get("id"),
+                "name": portfolio.get("name"),
+                "source": portfolio.get("source"),
+                "leg_count": len(legs),
+                "qty_unit": default_unit,
+                "symbols": sorted(contrib.keys()),
+            }
+        )
+
+    for bot in bots:
+        if not isinstance(bot, dict):
+            continue
+        open_pos = bot.get("open_position")
+        if not isinstance(open_pos, dict):
+            continue
+        legs = open_pos.get("legs") if isinstance(open_pos.get("legs"), list) else []
+        if not legs:
+            continue
+        contrib, meta = aggregate_signed_lots(legs, source="lab", default_unit="lots")
+        for sym, qty in contrib.items():
+            by_symbol[sym] = round(by_symbol.get(sym, 0.0) + qty, 6)
+            prev = unit_meta.get(sym)
+            nxt = meta.get(sym)
+            if prev is None and nxt is not None:
+                unit_meta[sym] = nxt
+            elif prev is not None and nxt is not None and prev.get("unit") != nxt.get("unit"):
+                unit_meta[sym] = {**prev, "unit": "mixed"}
+        bot_rows.append(
+            {
+                "id": bot.get("id"),
+                "name": bot.get("name"),
+                "mode": bot.get("mode"),
+                "leg_count": len(legs),
+                "qty_unit": "lots",
+                "symbols": sorted(contrib.keys()),
+            }
+        )
+
+    by_symbol = {k: v for k, v in by_symbol.items() if abs(v) > 1e-9}
+    return by_symbol, book_rows, bot_rows, unit_meta
+
+
+def reconcile_broker_vs_lab(
+    *,
+    broker_legs: list[dict[str, Any]],
+    portfolios: list[dict[str, Any]],
+    bots: list[dict[str, Any]],
+    qty_tolerance: float = 0.01,
+) -> dict[str, Any]:
+    """Read-only diff of broker F&O options vs Lab books + bot opens.
+
+    Comparison is in **lots** (signed). Broker qty is always shares ÷ lot size.
+    Lab qty uses stamped ``unit`` when present; otherwise portfolio
+    ``source`` (``kite_import`` → shares, else lots). No qty-multiple heuristic.
+    """
+    broker_map, broker_meta = aggregate_signed_lots(broker_legs, source="broker")
+    lab_map, book_rows, bot_rows, lab_meta = lab_exposure_from_books_and_bots(
+        portfolios=portfolios, bots=bots
+    )
+    symbols = sorted(set(broker_map) | set(lab_map))
+    matched: list[dict[str, Any]] = []
+    broker_only: list[dict[str, Any]] = []
+    lab_only: list[dict[str, Any]] = []
+    qty_mismatch: list[dict[str, Any]] = []
+
+    def _row(symbol: str, broker_lots: float, lab_lots: float) -> dict[str, Any]:
+        lot_size = int(
+            (broker_meta.get(symbol) or lab_meta.get(symbol) or {}).get("lot_size")
+            or lot_size_for_option_symbol(symbol)
+        )
+        return {
+            "symbol": symbol,
+            "broker_qty": broker_lots,
+            "lab_qty": lab_lots,
+            "broker_lots": broker_lots,
+            "lab_lots": lab_lots,
+            "broker_shares": round(broker_lots * lot_size, 4),
+            "lab_shares": round(lab_lots * lot_size, 4),
+            "lot_size": lot_size,
+            "qty_unit": "lots",
+            "lab_unit": (lab_meta.get(symbol) or {}).get("unit"),
+            "lab_unit_guess": (lab_meta.get(symbol) or {}).get("unit"),
+        }
+
+    for symbol in symbols:
+        bq = broker_map.get(symbol)
+        lq = lab_map.get(symbol)
+        if bq is None and lq is not None:
+            lab_only.append(_row(symbol, 0.0, lq))
+            continue
+        if lq is None and bq is not None:
+            broker_only.append(_row(symbol, bq, 0.0))
+            continue
+        if bq is None or lq is None:
+            continue
+        if abs(bq - lq) <= qty_tolerance:
+            row = _row(symbol, bq, lq)
+            matched.append({"symbol": symbol, "qty": bq, **{k: row[k] for k in (
+                "broker_lots",
+                "lab_lots",
+                "broker_shares",
+                "lab_shares",
+                "lot_size",
+                "qty_unit",
+            )}})
+        else:
+            row = _row(symbol, bq, lq)
+            qty_mismatch.append(
+                {
+                    **row,
+                    "delta": round(bq - lq, 6),
+                }
+            )
+
+    return {
+        "matched": matched,
+        "broker_only": broker_only,
+        "lab_only": lab_only,
+        "qty_mismatch": qty_mismatch,
+        "qty_unit": "lots",
+        "summary": {
+            "broker_symbols": len(broker_map),
+            "lab_symbols": len(lab_map),
+            "matched": len(matched),
+            "broker_only": len(broker_only),
+            "lab_only": len(lab_only),
+            "qty_mismatch": len(qty_mismatch),
+            "in_sync": not broker_only and not lab_only and not qty_mismatch,
+            "qty_unit": "lots",
+        },
+        "books": book_rows,
+        "bots_open": bot_rows,
+        "broker_legs": [
+            {
+                "symbol": canonical_broker_option_symbol(str(leg.get("symbol") or "")),
+                "side": leg.get("side"),
+                "qty": leg.get("qty"),
+                "type": leg.get("type"),
+                "strike": leg.get("strike"),
+            }
+            for leg in broker_legs
+            if isinstance(leg, dict)
+        ],
+    }

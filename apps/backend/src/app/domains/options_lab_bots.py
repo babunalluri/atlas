@@ -169,10 +169,10 @@ def in_schedule(schedule: dict[str, Any] | None, *, now: datetime | None = None)
     return (sh * 60 + sm) <= mins <= (eh * 60 + em)
 
 
-def _warn_holiday_coverage(ref: date) -> None:
+def _warn_holiday_coverage(ref: date, holidays: frozenset[date]) -> None:
     """Log once per year when weekday holiday density looks thin or table is past max."""
-    if NSE_HOLIDAYS_STATIC:
-        max_known = max(NSE_HOLIDAYS_STATIC)
+    if holidays:
+        max_known = max(holidays)
         if ref > max_known:
             logger.warning(
                 "options_lab_bots_holiday_table_stale",
@@ -182,9 +182,7 @@ def _warn_holiday_coverage(ref: date) -> None:
     year = ref.year
     if year in _holiday_thin_years_warned:
         return
-    weekdays = sum(
-        1 for d in NSE_HOLIDAYS_STATIC if d.year == year and d.weekday() < 5
-    )
+    weekdays = sum(1 for d in holidays if d.year == year and d.weekday() < 5)
     if weekdays < _HOLIDAY_THIN_WEEKDAY_MIN:
         _holiday_thin_years_warned.add(year)
         logger.warning(
@@ -195,12 +193,42 @@ def _warn_holiday_coverage(ref: date) -> None:
         )
 
 
-def event_avoid_reason(*, now: datetime | None = None) -> str | None:
-    """Why auto entry should skip today (IST). None = clear to enter."""
+def nse_holidays_effective(*, live: frozenset[date] | set[date] | None = None) -> frozenset[date]:
+    """Static desk table ∪ optional live NSE dates (caller supplies live; no network here)."""
+    if live is None:
+        return NSE_HOLIDAYS_STATIC
+    return frozenset(NSE_HOLIDAYS_STATIC | set(live))
+
+
+async def load_nse_holidays_effective() -> frozenset[date]:
+    """Fetch live holiday-master off the event loop, then union with static table."""
+    import asyncio
+
+    live: frozenset[date] = frozenset()
+    try:
+        from app.domains.signal_engine_nse import fetch_nse_holiday_dates
+
+        live = await asyncio.to_thread(fetch_nse_holiday_dates)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("options_lab_bots_nse_holiday_live_unavailable err=%s", exc)
+    return nse_holidays_effective(live=live)
+
+
+def event_avoid_reason(
+    *,
+    now: datetime | None = None,
+    holidays: frozenset[date] | None = None,
+) -> str | None:
+    """Why auto entry should skip today (IST). None = clear to enter.
+
+    Pass ``holidays`` from ``load_nse_holidays_effective()`` on async paths.
+    Default is static-only (never blocks on NSE HTTP).
+    """
     ist = (now or _now_ist()).astimezone(IST)
     ref = ist.date()
-    _warn_holiday_coverage(ref)
-    if ref in NSE_HOLIDAYS_STATIC:
+    hol = holidays if holidays is not None else NSE_HOLIDAYS_STATIC
+    _warn_holiday_coverage(ref, hol)
+    if ref in hol:
         return f"NSE holiday ({ref.isoformat()})."
     fomc = days_until_next_fomc(ref)
     if fomc is not None and fomc == 0:
@@ -505,7 +533,12 @@ def normalize_bot(payload: dict[str, Any], *, existing: dict[str, Any] | None = 
     }
 
 
-def bot_due_for_auto(bot: dict[str, Any], *, now: datetime | None = None) -> tuple[bool, str]:
+def bot_due_for_auto(
+    bot: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    holidays: frozenset[date] | None = None,
+) -> tuple[bool, str]:
     """Whether an armed paper bot may auto-fire now."""
     if bot.get("kill"):
         return False, "Kill switch on."
@@ -516,7 +549,7 @@ def bot_due_for_auto(bot: dict[str, Any], *, now: datetime | None = None) -> tup
     if not in_schedule(bot.get("schedule") if isinstance(bot.get("schedule"), dict) else None, now=now):
         return False, "Outside IST schedule window."
     if bot.get("avoid_events"):
-        reason = event_avoid_reason(now=now)
+        reason = event_avoid_reason(now=now, holidays=holidays)
         if reason:
             return False, reason
     # One open book at a time for v1 DTE-exit tracking.

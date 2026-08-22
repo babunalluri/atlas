@@ -210,6 +210,21 @@ def test_event_avoid_on_nse_holiday() -> None:
     assert event_avoid_reason(now=plain) is None
 
 
+def test_event_avoid_merges_live_nse_holidays() -> None:
+    from datetime import date
+
+    from app.domains.options_lab_bots import NSE_HOLIDAYS_STATIC
+
+    live_day = date(2026, 8, 21)  # Friday — not in static table
+    holidays = frozenset({*NSE_HOLIDAYS_STATIC, live_day})
+    blocked = datetime(2026, 8, 21, 11, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+    reason = event_avoid_reason(now=blocked, holidays=holidays)
+    assert reason is not None
+    assert "2026-08-21" in reason
+    # Without injection, static-only path does not block this day.
+    assert event_avoid_reason(now=blocked) is None
+
+
 def test_bot_due_skips_on_event_avoid() -> None:
     bot = normalize_bot(
         {

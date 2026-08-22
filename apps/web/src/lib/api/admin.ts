@@ -4019,6 +4019,7 @@ export interface OptionsPortfolioLeg {
   qty: number;
   entry_premium: number;
   symbol?: string;
+  unit?: "lots" | "shares";
   current_premium?: number | null;
   mtm?: number | null;
   entry_cash?: number;
@@ -4158,6 +4159,111 @@ export async function importOptionsPortfolioFromKite(
     method: "POST",
     body: name ? { name } : {},
   });
+}
+
+export type OptionsLabBrokerReconcileResponse = {
+  ok: boolean;
+  error?: string;
+  broker_ready?: boolean;
+  mock?: boolean;
+  margin?: {
+    available_cash?: number | null;
+    used_margin?: number | null;
+    net?: number | null;
+    span?: number | null;
+    exposure?: number | null;
+    option_premium?: number | null;
+    utilization_pct?: number | null;
+    source?: string | null;
+    ok?: boolean;
+  };
+  diff?: {
+    qty_unit?: string;
+    matched?: Array<{
+      symbol: string;
+      qty: number;
+      broker_lots?: number;
+      lab_lots?: number;
+      broker_shares?: number;
+      lab_shares?: number;
+      lot_size?: number;
+      qty_unit?: string;
+    }>;
+    broker_only?: Array<{
+      symbol: string;
+      broker_qty: number;
+      lab_qty: number;
+      broker_lots?: number;
+      lab_lots?: number;
+      broker_shares?: number;
+      lab_shares?: number;
+      lot_size?: number;
+      qty_unit?: string;
+    }>;
+    lab_only?: Array<{
+      symbol: string;
+      lab_qty: number;
+      broker_qty: number;
+      broker_lots?: number;
+      lab_lots?: number;
+      broker_shares?: number;
+      lab_shares?: number;
+      lot_size?: number;
+      qty_unit?: string;
+    }>;
+    qty_mismatch?: Array<{
+      symbol: string;
+      broker_qty: number;
+      lab_qty: number;
+      delta: number;
+      broker_lots?: number;
+      lab_lots?: number;
+      broker_shares?: number;
+      lab_shares?: number;
+      lot_size?: number;
+      qty_unit?: string;
+      lab_unit?: string;
+      lab_unit_guess?: string;
+    }>;
+    summary?: {
+      broker_symbols: number;
+      lab_symbols: number;
+      matched: number;
+      broker_only: number;
+      lab_only: number;
+      qty_mismatch: number;
+      in_sync: boolean;
+      qty_unit?: string;
+    };
+    books?: Array<{
+      id?: string;
+      name?: string;
+      source?: string;
+      leg_count?: number;
+      symbols?: string[];
+    }>;
+    bots_open?: Array<{
+      id?: string;
+      name?: string;
+      mode?: string;
+      leg_count?: number;
+      symbols?: string[];
+    }>;
+    broker_legs?: Array<{
+      symbol?: string;
+      side?: string;
+      qty?: number;
+      type?: string;
+      strike?: number;
+    }>;
+  };
+  warnings?: string[];
+};
+
+export async function getOptionsLabBrokerReconcile(
+  accessToken: string,
+): Promise<OptionsLabBrokerReconcileResponse> {
+  return apiFetch("/admin/options-lab/broker-reconcile", { accessToken });
 }
 
 export type OptionsLabMarginResponse = {

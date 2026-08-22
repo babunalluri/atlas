@@ -1856,6 +1856,7 @@ class OptionsLabService:
         *,
         auto: bool = False,
         confirm: bool = False,
+        holidays: frozenset[date] | None = None,
     ) -> dict[str, Any]:
         """Execute one bot once. Auto path is paper-only + schedule/gates."""
         from app.domains.options_lab_backtests import get_backtest, normalize_leg
@@ -1867,6 +1868,7 @@ class OptionsLabService:
             entry_conditions_ok,
             get_bot,
             legs_from_placement,
+            load_nse_holidays_effective,
             replace_bot,
             try_claim_bot_run,
         )
@@ -1885,7 +1887,12 @@ class OptionsLabService:
         if bot.get("kill"):
             return {"ok": False, "error": "Kill switch on — bot cannot run."}
         if auto:
-            due, reason = bot_due_for_auto(bot)
+            hol = (
+                frozenset(holidays)
+                if holidays is not None
+                else await load_nse_holidays_effective()
+            )
+            due, reason = bot_due_for_auto(bot, holidays=hol)
             if not due:
                 return {"ok": False, "skipped": True, "error": reason}
 
@@ -2062,9 +2069,11 @@ class OptionsLabService:
         # Partial keeps a residual book but disarms auto so the desk reviews.
         bot = append_run_log(bot, ok=complete, message=prefix + msg, auto=auto)
         if any_fill and filled_legs:
+            from app.domains.options_lab_portfolios import stamp_legs_unit
+
             bot["open_position"] = {
                 "opened_at": int(bot.get("last_run_at") or 0),
-                "legs": filled_legs,
+                "legs": stamp_legs_unit(filled_legs, "lots"),
                 "fut_symbol": chain.get("fut_symbol") or config.fut_symbol,
                 "entry_dte": dte,
                 "underlying_symbol": underlying or config.underlying_symbol,
@@ -2203,7 +2212,11 @@ class OptionsLabService:
 
     async def evaluate_armed_bots(self) -> dict[str, Any]:
         """Run due DTE exits then due armed paper entries for this tenant."""
-        from app.domains.options_lab_bots import bot_due_for_auto, load_bots
+        from app.domains.options_lab_bots import (
+            bot_due_for_auto,
+            load_bots,
+            load_nse_holidays_effective,
+        )
 
         results: list[dict[str, Any]] = []
         bots = await load_bots(_tenant_key(self.context))
@@ -2212,9 +2225,11 @@ class OptionsLabService:
                 out = await self.exit_bot_if_due(str(bot["id"]))
                 results.append({"id": bot.get("id"), "phase": "exit", **out})
         # Fresh snapshot after exits may have cleared open_position.
+        # Resolve holidays once per cycle off the event loop (NSE HTTP can take tens of seconds).
+        holidays = await load_nse_holidays_effective()
         bots = await load_bots(_tenant_key(self.context))
         for bot in bots:
-            due, reason = bot_due_for_auto(bot)
+            due, reason = bot_due_for_auto(bot, holidays=holidays)
             if not due:
                 results.append(
                     {
@@ -2225,7 +2240,9 @@ class OptionsLabService:
                     }
                 )
                 continue
-            out = await self.run_bot(str(bot["id"]), auto=True, confirm=True)
+            out = await self.run_bot(
+                str(bot["id"]), auto=True, confirm=True, holidays=holidays
+            )
             results.append({"id": bot.get("id"), "phase": "entry", **out})
         return {"ok": True, "results": results, "count": len(results)}
 
@@ -2329,6 +2346,90 @@ class OptionsLabService:
             "ok": True,
             "portfolio": created["portfolio"],
             "mark": marked if marked.get("ok") else None,
+            "warnings": warnings,
+        }
+
+    async def broker_reconcile(self) -> dict[str, Any]:
+        """Read-only Kite positions + available margin vs Lab books / bot opens."""
+        from app.domains.desk_snapshot import DESK_TEAM_SLUGS, invoke_tool
+        from app.domains.options_lab_bots import load_bots
+        from app.domains.options_lab_portfolios import (
+            kite_positions_payload,
+            list_portfolios,
+            reconcile_broker_vs_lab,
+        )
+        from app.domains.options_lab_trading import (
+            OptionsLabTradingService,
+            margins_snapshot_from_payload,
+        )
+        from app.domains.signal_engine import SIGNAL_TEAM_SLUG
+
+        config = await self._read_config()
+        _, has_broker, team_ready = await self.engine._load_setup()
+        warnings: list[str] = []
+        if not team_ready:
+            warnings.append("Publish the Signals ops team and bind Kite toolkit.")
+        if config.mock:
+            warnings.append("Lab mock is on — broker reconcile uses live tools when bound.")
+
+        margin: dict[str, Any] = {
+            "available_cash": None,
+            "used_margin": None,
+            "net": None,
+            "span": None,
+            "exposure": None,
+            "option_premium": None,
+            "utilization_pct": None,
+            "source": None,
+            "ok": False,
+        }
+        broker_legs: list[dict[str, Any]] = []
+        broker_ready = bool(has_broker)
+
+        if not has_broker:
+            warnings.append("Kite (or broker) not bound on Signals ops team.")
+        else:
+            raw_pos = await self.engine._invoke_broker_tool("get_positions", {})
+            broker_legs, pos_warnings = kite_positions_payload(raw_pos)
+            warnings.extend(pos_warnings)
+
+            trading = OptionsLabTradingService(self.session, self.context)
+            avail_fn, avail_name, _ = await trading._find_tool(
+                ("get_user_margins", "get_user_margin", "get_funds", "get_margins"),
+                team_slugs=(SIGNAL_TEAM_SLUG, *DESK_TEAM_SLUGS),
+            )
+            if avail_fn is not None:
+                try:
+                    raw_m = await invoke_tool(avail_fn, {})
+                    snap = margins_snapshot_from_payload(raw_m)
+                    margin = {
+                        **snap,
+                        "source": avail_name,
+                    }
+                    if not snap.get("ok"):
+                        warnings.append(
+                            f"{avail_name or 'margins'} returned no usable available/used margin."
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"Available margins failed: {exc}")
+            else:
+                warnings.append("No get_margins / get_funds tool bound.")
+
+        tenant_id = _tenant_key(self.context)
+        books = await list_portfolios(tenant_id)
+        portfolios = list(books.get("portfolios") or []) if books.get("ok") else []
+        bots = await load_bots(tenant_id)
+        diff = reconcile_broker_vs_lab(
+            broker_legs=broker_legs,
+            portfolios=portfolios,
+            bots=bots,
+        )
+        return {
+            "ok": True,
+            "broker_ready": broker_ready,
+            "mock": bool(config.mock),
+            "margin": margin,
+            "diff": diff,
             "warnings": warnings,
         }
 

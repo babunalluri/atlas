@@ -51,6 +51,7 @@ def _leg(
         "premium": 0.0,
         "entry_premium": 0.0,
         "symbol": None,
+        "unit": "lots",
     }
 
 
@@ -211,6 +212,9 @@ def enrich_legs_from_chain(
             prem_f = float(premium or 0)
         except (TypeError, ValueError):
             prem_f = 0.0
+        unit = str(leg.get("unit") or "lots").lower()
+        if unit not in {"lots", "shares"}:
+            unit = "lots"
         out.append(
             {
                 "id": str(leg.get("id") or f"leg-{idx}"),
@@ -221,6 +225,7 @@ def enrich_legs_from_chain(
                 "premium": prem_f,
                 "entry_premium": prem_f,
                 "symbol": str(symbol).strip() if symbol else None,
+                "unit": unit,
             }
         )
     return out

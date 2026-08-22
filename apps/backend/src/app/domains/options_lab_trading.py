@@ -230,26 +230,79 @@ def _leg_qty_lots(leg: dict[str, Any]) -> float | None:
 
 
 def _available_from_margins_payload(raw: Any) -> float | None:
+    snap = margins_snapshot_from_payload(raw)
+    return snap.get("available_cash")
+
+
+def margins_snapshot_from_payload(raw: Any) -> dict[str, Any]:
+    """Parse Kite-style margins into available + used (and optional SPAN parts)."""
+    empty: dict[str, Any] = {
+        "available_cash": None,
+        "used_margin": None,
+        "net": None,
+        "span": None,
+        "exposure": None,
+        "option_premium": None,
+        "utilization_pct": None,
+        "ok": False,
+    }
     if raw is None:
-        return None
-    if isinstance(raw, dict):
-        data = raw.get("data", raw)
-        # Kite: equity.available.live_balance / net
-        for segment in ("equity", "commodity"):
-            seg = data.get(segment) if isinstance(data, dict) else None
-            if isinstance(seg, dict):
-                avail = seg.get("available") if isinstance(seg.get("available"), dict) else seg
-                val = _pick_number(
-                    avail,
-                    "live_balance",
-                    "cash",
-                    "net",
-                    "available_balance",
-                    "available_margin",
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    data = raw.get("data", raw)
+    if not isinstance(data, dict):
+        return empty
+
+    available_cash: float | None = None
+    used_margin: float | None = None
+    net: float | None = None
+    span: float | None = None
+    exposure: float | None = None
+    option_premium: float | None = None
+
+    for segment in ("equity", "commodity"):
+        seg = data.get(segment)
+        if not isinstance(seg, dict):
+            continue
+        avail = seg.get("available") if isinstance(seg.get("available"), dict) else seg
+        utilised = seg.get("utilised") if isinstance(seg.get("utilised"), dict) else None
+        if available_cash is None:
+            available_cash = _pick_number(
+                avail,
+                "live_balance",
+                "cash",
+                "net",
+                "available_balance",
+                "available_margin",
+            )
+        if isinstance(utilised, dict):
+            if used_margin is None:
+                used_margin = _pick_number(
+                    utilised,
+                    "debits",
+                    "used",
+                    "used_margin",
+                    "total",
                 )
-                if val is not None:
-                    return val
-        return _pick_number(
+            if span is None:
+                span = _pick_number(utilised, "span")
+            if exposure is None:
+                exposure = _pick_number(utilised, "exposure")
+            if option_premium is None:
+                option_premium = _pick_number(utilised, "option_premium")
+            if used_margin is None and any(v is not None for v in (span, exposure, option_premium)):
+                used_margin = round(
+                    (span or 0.0) + (exposure or 0.0) + (option_premium or 0.0),
+                    2,
+                )
+        if net is None:
+            net = _pick_number(seg, "net")
+        if available_cash is not None or used_margin is not None:
+            break
+
+    if available_cash is None:
+        available_cash = _pick_number(
             data,
             "live_balance",
             "cash",
@@ -258,7 +311,36 @@ def _available_from_margins_payload(raw: Any) -> float | None:
             "available_margin",
             "available",
         )
-    return None
+    if used_margin is None:
+        used_margin = _pick_number(
+            data,
+            "used",
+            "used_margin",
+            "utilised",
+            "debits",
+        )
+
+    utilization_pct: float | None = None
+    if (
+        used_margin is not None
+        and available_cash is not None
+        and (used_margin + available_cash) > 0
+    ):
+        utilization_pct = round(100.0 * used_margin / (used_margin + available_cash), 2)
+    elif used_margin is not None and net is not None and net > 0:
+        utilization_pct = round(100.0 * used_margin / net, 2)
+
+    ok = available_cash is not None or used_margin is not None
+    return {
+        "available_cash": available_cash,
+        "used_margin": used_margin,
+        "net": net,
+        "span": span,
+        "exposure": exposure,
+        "option_premium": option_premium,
+        "utilization_pct": utilization_pct,
+        "ok": ok,
+    }
 
 
 def _split_exchange_symbol(symbol: str) -> tuple[str, str]:

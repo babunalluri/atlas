@@ -12,14 +12,22 @@ import {
   createOptionsLabBot,
   deleteOptionsLabBot,
   evaluateOptionsLabBots,
+  getOptionsLabBrokerReconcile,
+  getOptionsLabConfig,
   listOptionsLabBots,
   runOptionsLabBot,
   updateOptionsLabBot,
   type OptionsLabBot,
+  type OptionsLabBrokerReconcileResponse,
 } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
 const TEMPLATE_CHOICES = STRATEGY_TEMPLATES.filter((t) => !t.gated);
+
+function formatCash(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return `₹${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
 
 /**
  * Automations desk tab — server-persisted bots.
@@ -34,6 +42,11 @@ export function OptionsLabAutomationsPanel() {
   const [workerEnabled, setWorkerEnabled] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [labMock, setLabMock] = useState(false);
+  const [reconcile, setReconcile] = useState<OptionsLabBrokerReconcileResponse | null>(
+    null,
+  );
+  const [reconcileBusy, setReconcileBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -42,13 +55,19 @@ export function OptionsLabAutomationsPanel() {
         setNote("Sign in to load bots.");
         return;
       }
-      const res = await listOptionsLabBots(token);
+      const [res, cfg] = await Promise.all([
+        listOptionsLabBots(token),
+        getOptionsLabConfig(token),
+      ]);
       if (!res.ok) {
         setNote(res.error ?? "Failed to load bots.");
         return;
       }
       setBots(res.bots ?? []);
       setWorkerEnabled(Boolean(res.worker_enabled));
+      if (cfg.ok) {
+        setLabMock(Boolean(cfg.config?.mock));
+      }
     } catch (err) {
       setNote(err instanceof Error ? err.message : "Failed to load bots.");
     } finally {
@@ -131,6 +150,28 @@ export function OptionsLabAutomationsPanel() {
     await refresh();
   }
 
+  async function refreshReconcile() {
+    setReconcileBusy(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        setNote("Sign in to reconcile broker book.");
+        return;
+      }
+      const res = await getOptionsLabBrokerReconcile(token);
+      setReconcile(res);
+      if (!res.ok) {
+        setNote(res.error ?? "Reconcile failed.");
+      }
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "Reconcile failed.");
+    } finally {
+      setReconcileBusy(false);
+    }
+  }
+
+  const diffSummary = reconcile?.diff?.summary;
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-3">
       <p className="text-sm text-slate-muted">
@@ -150,6 +191,98 @@ export function OptionsLabAutomationsPanel() {
           {note}
         </p>
       ) : null}
+      <div className="rounded-lg border border-line bg-canvas/40 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-medium text-ink">Broker book (read-only)</p>
+            <p className="text-xs text-slate-muted">
+              Positions (lots) + available / used margin vs Lab books and bot OPEN legs.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={reconcileBusy || labMock}
+            title={labMock ? "Disable Lab mock for broker reconcile" : undefined}
+            onClick={() => void refreshReconcile()}
+          >
+            {reconcileBusy ? "Checking…" : "Reconcile"}
+          </Button>
+        </div>
+        {reconcile ? (
+          <div className="mt-2 space-y-1.5 text-xs text-slate-muted">
+            <p>
+              Avail{" "}
+              <span className="font-medium text-ink">
+                {formatCash(reconcile.margin?.available_cash)}
+              </span>
+              {" · used "}
+              <span className="font-medium text-ink">
+                {formatCash(reconcile.margin?.used_margin)}
+              </span>
+              {reconcile.margin?.utilization_pct != null
+                ? ` · ${reconcile.margin.utilization_pct}% util`
+                : ""}
+              {reconcile.margin?.source ? ` · ${reconcile.margin.source}` : ""}
+              {reconcile.broker_ready === false ? " · broker not bound" : ""}
+              {diffSummary ? (
+                <>
+                  {" "}
+                  ·{" "}
+                  {diffSummary.in_sync ? (
+                    <span className="text-teal">in sync</span>
+                  ) : (
+                    <span className="text-rose">
+                      {diffSummary.broker_only +
+                        diffSummary.lab_only +
+                        diffSummary.qty_mismatch}{" "}
+                      mismatch
+                      {diffSummary.matched
+                        ? ` · ${diffSummary.matched} matched`
+                        : ""}
+                    </span>
+                  )}
+                  {" · qty in lots"}
+                </>
+              ) : null}
+            </p>
+            {(reconcile.diff?.broker_only?.length ||
+              reconcile.diff?.lab_only?.length ||
+              reconcile.diff?.qty_mismatch?.length) ? (
+              <ul className="max-h-28 space-y-0.5 overflow-auto font-mono text-[11px]">
+                {(reconcile.diff?.broker_only ?? []).map((row) => (
+                  <li key={`b-${row.symbol}`}>
+                    broker-only {row.symbol} {row.broker_lots ?? row.broker_qty} lot
+                    {row.broker_shares != null ? ` (${row.broker_shares} sh)` : ""}
+                  </li>
+                ))}
+                {(reconcile.diff?.lab_only ?? []).map((row) => (
+                  <li key={`l-${row.symbol}`}>
+                    lab-only {row.symbol} {row.lab_lots ?? row.lab_qty} lot
+                    {row.lab_shares != null ? ` (${row.lab_shares} sh)` : ""}
+                  </li>
+                ))}
+                {(reconcile.diff?.qty_mismatch ?? []).map((row) => (
+                  <li key={`q-${row.symbol}`}>
+                    qty {row.symbol} broker {row.broker_lots ?? row.broker_qty} vs lab{" "}
+                    {row.lab_lots ?? row.lab_qty} lots
+                    {row.lot_size != null ? ` · lot ${row.lot_size}` : ""}
+                    {row.lab_unit_guess || row.lab_unit
+                      ? ` · lab ${row.lab_unit_guess ?? row.lab_unit}`
+                      : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {reconcile.warnings?.length ? (
+              <p className="text-[11px] text-slate-muted/80">
+                {reconcile.warnings.slice(0, 2).join(" · ")}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
       <div className="flex flex-wrap items-end gap-2">
         <label className="text-xs text-slate-muted">
           Name

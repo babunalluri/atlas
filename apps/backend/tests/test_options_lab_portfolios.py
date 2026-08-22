@@ -16,6 +16,7 @@ from app.domains.options_lab_portfolios import (
     mark_portfolio_legs,
     parse_option_symbol,
     positions_to_portfolio_legs,
+    reconcile_broker_vs_lab,
     update_portfolio,
 )
 
@@ -224,3 +225,255 @@ def test_kite_positions_import_includes_weekly_options() -> None:
     symbols = {leg["symbol"] for leg in legs}
     assert "NFO:NIFTY26AUG24300CE" in symbols
     assert "NFO:NIFTY2580724500CE" in symbols
+
+
+def test_reconcile_broker_vs_lab_diffs() -> None:
+    # Broker qty is shares (Kite); Lab qty is lots unless it looks like shares.
+    broker_legs = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 75,  # 1 lot
+            "type": "CE",
+            "strike": 24500,
+        },
+        {
+            "symbol": "NFO:NIFTY26AUG24400PE",
+            "side": "buy",
+            "qty": 75,  # 1 lot
+            "type": "PE",
+            "strike": 24400,
+        },
+    ]
+    portfolios = [
+        {
+            "id": "p1",
+            "name": "Draft",
+            "legs": [
+                {
+                    "symbol": "NFO:NIFTY26AUG24500CE",
+                    "side": "sell",
+                    "qty": 1,
+                    "type": "CE",
+                    "strike": 24500,
+                },
+                {
+                    "symbol": "NFO:NIFTY26AUG24600CE",
+                    "side": "buy",
+                    "qty": 1,
+                    "type": "CE",
+                    "strike": 24600,
+                },
+            ],
+        }
+    ]
+    bots = [
+        {
+            "id": "b1",
+            "name": "Bot",
+            "mode": "paper",
+            "open_position": {
+                "legs": [
+                    {
+                        "symbol": "NFO:NIFTY26AUG24400PE",
+                        "side": "buy",
+                        "qty": 2,
+                        "type": "PE",
+                        "strike": 24400,
+                    }
+                ]
+            },
+        }
+    ]
+    diff = reconcile_broker_vs_lab(
+        broker_legs=broker_legs, portfolios=portfolios, bots=bots
+    )
+    assert diff["summary"]["qty_unit"] == "lots"
+    assert diff["summary"]["matched"] == 1  # 24500CE sell
+    assert any(r["symbol"] == "NFO:NIFTY26AUG24600CE" for r in diff["lab_only"])
+    assert any(
+        r["symbol"] == "NFO:NIFTY26AUG24400PE" and r["delta"] == -1.0
+        for r in diff["qty_mismatch"]
+    )
+    assert diff["summary"]["in_sync"] is False
+
+
+def test_reconcile_shares_vs_lots_in_sync() -> None:
+    broker_legs = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 75,
+            "type": "CE",
+            "strike": 24500,
+        }
+    ]
+    lab_lots = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 1,
+            "type": "CE",
+            "strike": 24500,
+            "unit": "lots",
+        }
+    ]
+    lab_shares_import = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 75,
+            "type": "CE",
+            "strike": 24500,
+            "unit": "shares",
+        }
+    ]
+    assert reconcile_broker_vs_lab(
+        broker_legs=broker_legs,
+        portfolios=[{"id": "p", "name": "lots", "source": "builder", "legs": lab_lots}],
+        bots=[],
+    )["summary"]["in_sync"]
+    assert reconcile_broker_vs_lab(
+        broker_legs=broker_legs,
+        portfolios=[
+            {"id": "p", "name": "import", "source": "kite_import", "legs": lab_shares_import}
+        ],
+        bots=[],
+    )["summary"]["in_sync"]
+
+
+def test_reconcile_sensex_ten_lots_not_misread_as_shares() -> None:
+    """10 SENSEX lots (lot_size=10) must not be guessed as 1 lot of shares."""
+    from app.domains.options_lab_portfolios import signed_lots_from_leg
+
+    row = signed_lots_from_leg(
+        {
+            "symbol": "BFO:SENSEX26AUG80000CE",
+            "side": "buy",
+            "qty": 10,
+            "unit": "lots",
+        },
+        source="lab",
+    )
+    assert row is not None
+    assert row["signed_lots"] == 10.0
+    assert row["lot_size"] == 10
+    # Unstamped builder default must also keep 10 lots (no heuristic).
+    row2 = signed_lots_from_leg(
+        {
+            "symbol": "BFO:SENSEX26AUG80000CE",
+            "side": "buy",
+            "qty": 10,
+        },
+        source="lab",
+        default_unit="lots",
+    )
+    assert row2 is not None
+    assert row2["signed_lots"] == 10.0
+
+
+def test_normalize_stamps_unit_by_source() -> None:
+    from app.domains.options_lab_portfolios import normalize_portfolio
+
+    built = normalize_portfolio(
+        {
+            "name": "builder",
+            "source": "builder",
+            "legs": [
+                {
+                    "side": "buy",
+                    "type": "CE",
+                    "strike": 24500,
+                    "qty": 2,
+                    "entry_premium": 100,
+                    "symbol": "NFO:NIFTY26AUG24500CE",
+                }
+            ],
+        }
+    )
+    assert built is not None
+    assert built["legs"][0]["unit"] == "lots"
+
+    imported = normalize_portfolio(
+        {
+            "name": "kite",
+            "source": "kite_import",
+            "legs": [
+                {
+                    "side": "sell",
+                    "type": "CE",
+                    "strike": 24500,
+                    "qty": 75,
+                    "entry_premium": 100,
+                    "symbol": "NFO:NIFTY26AUG24500CE",
+                }
+            ],
+        }
+    )
+    assert imported is not None
+    assert imported["legs"][0]["unit"] == "shares"
+
+
+def test_reconcile_via_kite_positions_payload_units_to_lots() -> None:
+    """Regression: real Kite quantity is units (75), Lab draft is lots (1)."""
+    raw = {
+        "net": [
+            {
+                "tradingsymbol": "NIFTY26AUG24500CE",
+                "quantity": -75.0,
+                "average_price": 118.5,
+            }
+        ]
+    }
+    broker_legs, warnings = kite_positions_payload(raw)
+    assert not warnings
+    assert broker_legs[0]["qty"] == 75.0
+    assert broker_legs[0]["side"] == "sell"
+    lab_legs = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 1.0,
+            "type": "CE",
+            "strike": 24500,
+        }
+    ]
+    diff = reconcile_broker_vs_lab(
+        broker_legs=broker_legs,
+        portfolios=[{"id": "p", "name": "draft", "legs": lab_legs}],
+        bots=[],
+    )
+    assert diff["summary"]["in_sync"] is True
+    assert diff["summary"]["matched"] == 1
+    assert abs(diff["matched"][0]["broker_lots"]) == 1.0
+    assert abs(diff["matched"][0]["broker_shares"]) == 75.0
+
+
+def test_reconcile_in_sync_when_books_match_broker() -> None:
+    broker_legs = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 75,
+            "type": "CE",
+            "strike": 24500,
+        }
+    ]
+    lab_legs = [
+        {
+            "symbol": "NFO:NIFTY26AUG24500CE",
+            "side": "sell",
+            "qty": 1,
+            "type": "CE",
+            "strike": 24500,
+        }
+    ]
+    diff = reconcile_broker_vs_lab(
+        broker_legs=broker_legs,
+        portfolios=[{"id": "p", "name": "x", "legs": lab_legs}],
+        bots=[],
+    )
+    assert diff["summary"]["in_sync"] is True
+    assert diff["summary"]["matched"] == 1
+    assert diff["matched"][0]["broker_shares"] == -75
+    assert diff["matched"][0]["broker_lots"] == -1.0

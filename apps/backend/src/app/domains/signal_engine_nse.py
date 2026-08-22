@@ -17,7 +17,13 @@ NSE_COOLDOWN_SECONDS = 1_800
 NSE_BASE = "https://www.nseindia.com"
 
 _cache: dict[str, Any] = {"fetched_at": 0.0, "payload": {}, "cooldown_until": 0.0}
+_holiday_cache: dict[str, Any] = {
+    "fetched_at": 0.0,
+    "dates": frozenset(),
+    "cooldown_until": 0.0,
+}
 _lock = threading.Lock()
+_holiday_lock = threading.Lock()
 
 
 def _session():
@@ -162,6 +168,16 @@ def fetch_nse_slow_fields(*, force: bool = False) -> dict[str, float]:
                 ref=date.today(),
             )
         )
+        # Seed holiday date cache so bot cycles need not re-hit holiday-master.
+        if holidays is not None:
+            from app.domains.signal_engine_calendar import parse_nse_holiday_dates
+
+            dates = frozenset(parse_nse_holiday_dates(holidays))
+            if dates:
+                with _holiday_lock:
+                    _holiday_cache["dates"] = dates
+                    _holiday_cache["fetched_at"] = ts
+                    _holiday_cache["cooldown_until"] = 0.0
 
         if payload:
             _cache["payload"] = payload
@@ -184,6 +200,35 @@ def mock_nse_fields() -> dict[str, float]:
     }
 
 
+def fetch_nse_holiday_dates(*, force: bool = False) -> frozenset[date]:
+    """Live NSE trading holidays (holiday-master). Cached ~1 h; empty on failure."""
+    from app.domains.signal_engine_calendar import parse_nse_holiday_dates
+
+    ts = time.monotonic()
+    with _holiday_lock:
+        if not force and _holiday_cache["cooldown_until"] > ts:
+            return frozenset(_holiday_cache["dates"])
+        age = ts - float(_holiday_cache["fetched_at"] or 0)
+        if not force and _holiday_cache["dates"] and age < NSE_CACHE_TTL_SECONDS:
+            return frozenset(_holiday_cache["dates"])
+
+        session = _session()
+        body = _nse_get("/api/holiday-master?type=trading", session)
+        dates = frozenset(parse_nse_holiday_dates(body)) if body is not None else frozenset()
+        if dates:
+            _holiday_cache["dates"] = dates
+            _holiday_cache["fetched_at"] = ts
+            _holiday_cache["cooldown_until"] = 0.0
+        else:
+            _holiday_cache["cooldown_until"] = ts + NSE_COOLDOWN_SECONDS
+        return frozenset(_holiday_cache["dates"])
+
+
 def reset_nse_cache_for_tests() -> None:
-    global _cache
+    global _cache, _holiday_cache
     _cache = {"fetched_at": 0.0, "payload": {}, "cooldown_until": 0.0}
+    _holiday_cache = {
+        "fetched_at": 0.0,
+        "dates": frozenset(),
+        "cooldown_until": 0.0,
+    }

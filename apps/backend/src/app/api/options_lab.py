@@ -322,6 +322,15 @@ async def import_options_portfolio_from_kite(
     return await OptionsLabService(session, context).import_kite_portfolio(name=body.name)
 
 
+@router.get("/broker-reconcile")
+async def options_lab_broker_reconcile(
+    context: AdminContext,
+    session: TenantSession,
+) -> dict[str, Any]:
+    """Read-only broker positions + available margin vs Lab books and bot opens."""
+    return await OptionsLabService(session, context).broker_reconcile()
+
+
 @router.post("/margins")
 async def options_lab_strategy_margins(
     body: OptionsLabMarginsIn,

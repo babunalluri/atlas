@@ -134,7 +134,8 @@ def _iter_nse_holiday_rows(body: Any) -> list[Any]:
     return rows
 
 
-def _parse_nse_holiday_dates(body: Any) -> set[date]:
+def parse_nse_holiday_dates(body: Any) -> set[date]:
+    """Parse NSE holiday-master (or similar) JSON into calendar dates."""
     out: set[date] = set()
     for row in _iter_nse_holiday_rows(body):
         if not isinstance(row, dict):
@@ -146,6 +147,10 @@ def _parse_nse_holiday_dates(body: Any) -> set[date]:
         if parsed is not None:
             out.add(parsed)
     return out
+
+
+def _parse_nse_holiday_dates(body: Any) -> set[date]:
+    return parse_nse_holiday_dates(body)
 
 
 def _parse_nse_corp_events(body: Any, *, ref: date) -> int:
