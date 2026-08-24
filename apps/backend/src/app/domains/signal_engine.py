@@ -50,14 +50,15 @@ from app.domains.signal_engine_levels import (
 )
 from app.domains.signal_engine_nse import fetch_nse_slow_fields, mock_nse_fields
 from app.domains.signal_engine_yahoo import (
-    ALL_YAHOO_TICKERS,
     CRYPTO_YAHOO_TICKERS,
+    GLOBAL_YAHOO_TICKERS,
     INDEX_KITE_SYMBOLS,
     STOCK_KITE_SYMBOLS,
     TIMING_YAHOO_TICKERS,
     USD_INR_KITE_SYMBOL,
     crypto_max_abs_change,
     fetch_yahoo_changes,
+    fetch_yahoo_session_changes,
     mock_yahoo_changes,
 )
 from app.domains.trade_desk_checklist import CHECKLIST_CATEGORIES, DEFAULT_METRICS, normalize_metrics
@@ -693,10 +694,10 @@ async def _merge_yahoo_slow_tier(
         feed.update(cached)
         return
     if mock:
-        payload = mock_yahoo_changes(ALL_YAHOO_TICKERS)
+        payload = mock_yahoo_changes(GLOBAL_YAHOO_TICKERS)
         crypto = mock_yahoo_changes(CRYPTO_YAHOO_TICKERS)
     else:
-        payload = fetch_yahoo_changes(ALL_YAHOO_TICKERS)
+        payload = fetch_yahoo_changes(GLOBAL_YAHOO_TICKERS)
         crypto = fetch_yahoo_changes(CRYPTO_YAHOO_TICKERS)
     payload.update(crypto)
     # Compute from the merged payload so BTC (from GLOBAL) is included.
@@ -709,6 +710,26 @@ async def _merge_yahoo_slow_tier(
     if payload:
         feed.update(payload)
         await _cache_set(tenant_id, "yahoo_global", "slow", payload)
+
+
+async def _merge_yahoo_timing_tier(
+    tenant_id: str,
+    feed: dict[str, Any],
+    *,
+    mock: bool,
+) -> None:
+    """Gold / silver / US·EU futures — session % refreshed ~every minute while trading."""
+    cached = await _cache_get(tenant_id, "yahoo_timing")
+    if cached is not None:
+        feed.update(cached)
+        return
+    if mock:
+        payload = mock_yahoo_changes(TIMING_YAHOO_TICKERS)
+    else:
+        payload = fetch_yahoo_session_changes(TIMING_YAHOO_TICKERS)
+    if payload:
+        feed.update(payload)
+        await _cache_set(tenant_id, "yahoo_timing", "medium", payload)
 
 
 def _extract_candle_rows(result: Any) -> list[Any]:
@@ -783,10 +804,7 @@ async def _merge_levels_tier(
         now = _ist_now()
         daily_from = (now - timedelta(days=LEVELS_DAILY_HISTORY_DAYS)).strftime("%Y-%m-%d")
         daily_to = now.strftime("%Y-%m-%d")
-        intra_from = now.replace(hour=9, minute=15, second=0, microsecond=0).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        intra_to = now.strftime("%Y-%m-%d %H:%M:%S")
+        session_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
         daily_hist = await service._invoke_broker_tool(
             "get_historical_candles",
             {
@@ -796,24 +814,31 @@ async def _merge_levels_tier(
                 "to_date": daily_to,
             },
         )
-        intra_hist = await service._invoke_broker_tool(
-            "get_historical_candles",
-            {
-                "instrument_token": token,
-                "interval": "5minute",
-                "from_date": intra_from,
-                "to_date": intra_to,
-            },
-        )
-        minute_hist = await service._invoke_broker_tool(
-            "get_historical_candles",
-            {
-                "instrument_token": token,
-                "interval": "minute",
-                "from_date": intra_from,
-                "to_date": intra_to,
-            },
-        )
+        # Pre-open (before 09:15 IST): skip same-day intraday — Kite 400s when from>to.
+        if now > session_open:
+            intra_from = session_open.strftime("%Y-%m-%d %H:%M:%S")
+            intra_to = now.strftime("%Y-%m-%d %H:%M:%S")
+            intra_hist = await service._invoke_broker_tool(
+                "get_historical_candles",
+                {
+                    "instrument_token": token,
+                    "interval": "5minute",
+                    "from_date": intra_from,
+                    "to_date": intra_to,
+                },
+            )
+            minute_hist = await service._invoke_broker_tool(
+                "get_historical_candles",
+                {
+                    "instrument_token": token,
+                    "interval": "minute",
+                    "from_date": intra_from,
+                    "to_date": intra_to,
+                },
+            )
+        else:
+            intra_hist = {}
+            minute_hist = {}
         hour_from = (now - timedelta(days=5)).strftime("%Y-%m-%d")
         hour_hist = await service._invoke_broker_tool(
             "get_historical_candles",
@@ -1011,7 +1036,7 @@ def _mock_feed(config: SignalEngineConfig) -> dict[str, Any]:
         "nifty_points_move": 35.0,
         "sensex_points_move": 120.0,
         "ist_hour": 9.5,
-        **mock_yahoo_changes(ALL_YAHOO_TICKERS),
+        **mock_yahoo_changes(GLOBAL_YAHOO_TICKERS),
         **mock_yahoo_changes(TIMING_YAHOO_TICKERS),
         **mock_levels(24312.5),
         **mock_nse_fields(),
@@ -1907,6 +1932,7 @@ class SignalEngineService:
                 await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
 
         await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
+        await _merge_yahoo_timing_tier(tenant_id, feed, mock=False)
         if feed.get("ce") is not None and feed.get("pe") is not None:
             feed["straddle"] = round(float(feed["ce"]) + float(feed["pe"]), 2)
         await _apply_straddle_decay(tenant_id, feed)

@@ -37,11 +37,17 @@ End users open **`/t/{slug}/chat`** and get those chats when the teams are assig
 Instructions/StockBroker/
   README.md
   SKILL.md
+  OPTIONS_LAB_GUIDE.md   # Operator guide for Options Lab
   teams/          learning.md  paper_trading.md  live_trading.md  research.md  signals_ops.md
   agents/         learning_guide.md  paper_trader.md  live_trader.md  signal_operator.md
   workflows/
   tools/          stock_broker_toolkit.py  research_toolkit.py  signal_engine_toolkit.py  groww_toolkit.py  kite_toolkit.py
+                  KITE.md  SIGNAL_ENGINE.md  …
 ```
+
+**Options Lab (operators):**
+- Markdown: [`OPTIONS_LAB_GUIDE.md`](./OPTIONS_LAB_GUIDE.md)
+- Static HTML (screenshots): [`guides/options-lab/index.html`](./guides/options-lab/index.html) — open in a browser
 
 ## Auto-provision mapping (domain: `stock_broker`)
 

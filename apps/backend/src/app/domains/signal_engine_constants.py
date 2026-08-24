@@ -23,7 +23,8 @@ TICKER_IDLE_POLL_SECONDS = 2.0
 WATCH_TTL_SECONDS = 2
 # Redis keeps last-good longer than the badge "fresh" window so SSE can serve
 # stale frames (snapshot_stale=true) instead of missing and cold-recomputing.
-SNAPSHOT_FRESH_MS = 2_000  # ~16 stream ticks
+# 5s: feed ticks often take 2–4s with broker + Yahoo; 2s made "STALE" during open market.
+SNAPSHOT_FRESH_MS = 5_000
 SNAPSHOT_TTL_MS = 15_000
 # Short lock TTL so a killed worker self-heals quickly; holders must heartbeat.
 LOCK_TTL_MS = 10_000

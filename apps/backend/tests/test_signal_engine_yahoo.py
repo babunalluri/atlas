@@ -103,3 +103,31 @@ def test_crypto_max_abs_change_includes_bitcoin_from_global_feed() -> None:
     assert yahoo.crypto_max_abs_change(
         {"global_bitcoin_chg": -2.5, "global_eth_chg": 1.1},
     ) == 2.5
+
+
+def test_session_fetch_uses_short_ttl_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    yahoo.reset_yahoo_cache_for_tests()
+    calls = {"n": 0}
+
+    def fake_raw(tickers: dict[str, str]) -> tuple[dict[str, float], str | None]:
+        calls["n"] += 1
+        return {"gold_chg": -0.31}, None
+
+    monkeypatch.setattr(yahoo, "_fetch_raw_session_changes", fake_raw)
+    t0 = 2000.0
+    first = yahoo.fetch_yahoo_session_changes({"gold_chg": "GC=F"}, now=t0, force=True)
+    second = yahoo.fetch_yahoo_session_changes({"gold_chg": "GC=F"}, now=t0 + 60)
+    third = yahoo.fetch_yahoo_session_changes({"gold_chg": "GC=F"}, now=t0 + 601)
+    assert first == {"gold_chg": -0.31}
+    assert second == first
+    assert third == first
+    assert calls["n"] == 2
+
+
+def test_prev_session_close_prefers_prior_day() -> None:
+    import pandas as pd
+
+    closes = pd.Series([100.0, 110.0, 108.0])
+    assert yahoo._prev_session_close(closes) == 110.0
+    assert yahoo._last_close(closes) == 108.0
+    assert yahoo._pct_change(108.0, 110.0) == pytest.approx(-1.818, abs=0.001)

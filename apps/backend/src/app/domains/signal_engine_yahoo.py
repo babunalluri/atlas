@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 YAHOO_CACHE_TTL_SECONDS = 3_600
 YAHOO_RATE_LIMIT_COOLDOWN_SECONDS = 1_800
 YAHOO_MIN_FETCH_INTERVAL_SECONDS = 3_600
+# Timing (gold/silver/futures): session % vs prior close — 10 min (within 5–15; avoids Yahoo 429s).
+YAHOO_TIMING_CACHE_TTL_SECONDS = 600
 YAHOO_CHUNK_SIZE = 8
 YAHOO_CHUNK_PAUSE_SECONDS = 2.0
 
@@ -141,6 +143,12 @@ def _yahoo_session() -> Any | None:
         return None
 
 
+def _pct_change(last: float, prev: float) -> float | None:
+    if prev == 0:
+        return None
+    return round((last - prev) / prev * 100, 3)
+
+
 def _change_from_closes(closes: Any) -> float | None:
     try:
         series = closes.dropna()
@@ -153,9 +161,36 @@ def _change_from_closes(closes: Any) -> float | None:
         prev = float(series.iloc[-2])
     except (TypeError, ValueError, IndexError):
         return None
-    if prev == 0:
+    return _pct_change(last, prev)
+
+
+def _last_close(closes: Any) -> float | None:
+    try:
+        series = closes.dropna()
+    except Exception:
         return None
-    return round((last - prev) / prev * 100, 3)
+    if series is None or len(series) < 1:
+        return None
+    try:
+        return float(series.iloc[-1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _prev_session_close(closes: Any) -> float | None:
+    """Prior completed daily close (skip incomplete last bar when 2+ days present)."""
+    try:
+        series = closes.dropna()
+    except Exception:
+        return None
+    if series is None or len(series) < 1:
+        return None
+    try:
+        if len(series) >= 2:
+            return float(series.iloc[-2])
+        return float(series.iloc[-1])
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def _parse_download_frame(data: Any, symbols: list[str]) -> dict[str, float | None]:
@@ -233,6 +268,77 @@ def _fetch_raw_changes(tickers: dict[str, str]) -> tuple[dict[str, float], str |
     return out, None
 
 
+def _closes_by_symbol(data: Any, symbols: list[str]) -> dict[str, Any]:
+    """Extract per-symbol Close series from a yfinance download frame."""
+    out: dict[str, Any] = {}
+    if data is None:
+        return out
+    try:
+        if data.empty:  # type: ignore[attr-defined]
+            return out
+    except Exception:
+        pass
+    columns = getattr(data, "columns", None)
+    if columns is not None and hasattr(columns, "levels") and len(getattr(columns, "levels", ())) >= 2:
+        for sym in symbols:
+            if sym not in data.columns.get_level_values(0):  # type: ignore[union-attr]
+                continue
+            out[sym] = data[sym]["Close"]  # type: ignore[index]
+        return out
+    if "Close" in getattr(data, "columns", ()) and len(symbols) == 1:
+        out[symbols[0]] = data["Close"]
+    return out
+
+
+def _fetch_raw_session_changes(tickers: dict[str, str]) -> tuple[dict[str, float], str | None]:
+    """Session % = last trade vs prior daily close (moves while the contract is trading)."""
+    import yfinance as yf
+
+    if not tickers:
+        return {}, None
+
+    unique = list(dict.fromkeys(tickers.values()))
+    session = _yahoo_session()
+    kwargs: dict[str, Any] = {
+        "progress": False,
+        "threads": False,
+        "group_by": "ticker",
+    }
+    if session is not None:
+        kwargs["session"] = session
+
+    daily = yf.download(" ".join(unique), period="5d", interval="1d", **kwargs)
+    # Short intraday window for last print; falls back to daily last if empty.
+    try:
+        intra = yf.download(" ".join(unique), period="1d", interval="5m", **kwargs)
+    except Exception as exc:
+        if _is_rate_limit_error(exc):
+            raise
+        logger.warning("yahoo_timing_intraday_failed: %s", exc)
+        intra = None
+
+    daily_closes = _closes_by_symbol(daily, unique)
+    intra_closes = _closes_by_symbol(intra, unique) if intra is not None else {}
+
+    by_symbol: dict[str, float | None] = {}
+    for sym in unique:
+        prev = _prev_session_close(daily_closes.get(sym))
+        last = _last_close(intra_closes.get(sym))
+        if last is None:
+            last = _last_close(daily_closes.get(sym))
+        if last is None or prev is None:
+            by_symbol[sym] = None
+            continue
+        by_symbol[sym] = _pct_change(last, prev)
+
+    out: dict[str, float] = {}
+    for feed_key, sym in tickers.items():
+        val = by_symbol.get(sym)
+        if val is not None:
+            out[feed_key] = val
+    return out, None
+
+
 def fetch_yahoo_changes(
     tickers: dict[str, str] | None = None,
     *,
@@ -280,6 +386,49 @@ def fetch_yahoo_changes(
             return dict(cache.values)
 
 
+def fetch_yahoo_session_changes(
+    tickers: dict[str, str] | None = None,
+    *,
+    force: bool = False,
+    now: float | None = None,
+) -> dict[str, float]:
+    """Intraday session % (last vs prior close). Medium-tier (~10 min) for gold/silver/futures."""
+    tickers = tickers or TIMING_YAHOO_TICKERS
+    ts = now if now is not None else time.monotonic()
+    # Separate cache bucket from slow day-over-day so TTLs do not collide.
+    bucket_tickers = {f"session:{k}": v for k, v in tickers.items()}
+    bucket_key = _ticker_cache_key(bucket_tickers)
+
+    with _fetch_lock:
+        cache = _cache_for(bucket_tickers)
+        if not force and cache.cooldown_until > ts:
+            return dict(cache.values)
+
+        age = ts - cache.fetched_at
+        if not force and cache.values and age < YAHOO_TIMING_CACHE_TTL_SECONDS:
+            return dict(cache.values)
+
+        try:
+            fresh, _ = _fetch_raw_session_changes(tickers)
+            cache.values = fresh
+            cache.fetched_at = ts
+            cache.cooldown_until = 0.0
+            cache.last_error = None
+            return dict(fresh)
+        except Exception as exc:
+            cache.last_error = str(exc)
+            if _is_rate_limit_error(exc):
+                cache.cooldown_until = ts + YAHOO_RATE_LIMIT_COOLDOWN_SECONDS
+                logger.warning(
+                    "yahoo_timing_rate_limited bucket=%s — serving stale for %ss",
+                    bucket_key,
+                    YAHOO_RATE_LIMIT_COOLDOWN_SECONDS,
+                )
+            else:
+                logger.warning("yahoo_timing_fetch_failed bucket=%s: %s", bucket_key, exc)
+            return dict(cache.values)
+
+
 def yahoo_cache_status() -> dict[str, Any]:
     """Expose cache age / cooldown for admin warnings."""
     ts = time.monotonic()
@@ -299,6 +448,7 @@ def yahoo_cache_status() -> dict[str, Any]:
         "buckets": entries,
         "bucket_count": len(_caches),
         "ttl_seconds": YAHOO_CACHE_TTL_SECONDS,
+        "timing_ttl_seconds": YAHOO_TIMING_CACHE_TTL_SECONDS,
     }
 
 

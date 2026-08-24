@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atlas Options Lab — Step-by-step operator guide</title>
+  <meta name="description" content="How to use Atlas Options Lab: options basics, first paper session, risk habits, and realistic P&amp;L discipline for India F&amp;O." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,700&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #15201c;
+      --muted: #5c6b64;
+      --teal: #0f766e;
+      --teal-soft: #d8f3ef;
+      --rose: #b42318;
+      --canvas: #eef3f0;
+      --paper: #f7faf8;
+      --line: #c9d5cf;
+      --shadow: 0 18px 50px rgba(21, 32, 28, 0.08);
+      --max: 46rem;
+      --wide: 58rem;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: Manrope, system-ui, sans-serif;
+      font-size: 1.05rem;
+      line-height: 1.65;
+      background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, #d9efe9 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 100% 0%, #e4ebe7 0%, transparent 45%),
+        linear-gradient(180deg, #f4f8f6 0%, var(--canvas) 40%, #e8efeb 100%);
+      background-attachment: fixed;
+    }
+
+    a { color: var(--teal); }
+    a:hover { text-decoration-thickness: 2px; }
+
+    .wrap {
+      width: min(100% - 2rem, var(--wide));
+      margin-inline: auto;
+    }
+
+    /* —— Hero —— */
+    .hero {
+      position: relative;
+      padding: 3.5rem 0 2.5rem;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(21,32,28,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(21,32,28,0.035) 1px, transparent 1px);
+      background-size: 28px 28px;
+      mask-image: linear-gradient(180deg, #000 30%, transparent 95%);
+      pointer-events: none;
+    }
+    .brand {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1.75rem;
+    }
+    .brand-mark {
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 0.45rem;
+      background: var(--ink);
+      color: #9fe8d8;
+      display: grid;
+      place-items: center;
+      font-family: Fraunces, Georgia, serif;
+      font-weight: 700;
+      font-size: 1.35rem;
+    }
+    .brand-text {
+      display: flex;
+      flex-direction: column;
+      gap: 0.1rem;
+    }
+    .brand-name {
+      font-family: Fraunces, Georgia, serif;
+      font-size: 1.65rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .brand-sub {
+      font-size: 0.72rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .hero h1 {
+      position: relative;
+      max-width: 18ch;
+      margin: 0;
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(2.1rem, 4.5vw, 3.15rem);
+      font-weight: 560;
+      letter-spacing: -0.03em;
+      line-height: 1.12;
+    }
+    .hero-lead {
+      position: relative;
+      max-width: 38rem;
+      margin: 1rem 0 0;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+    .hero-cta {
+      position: relative;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 1.75rem;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.7rem 1.15rem;
+      border-radius: 0.45rem;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      border: 1px solid transparent;
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-primary {
+      background: var(--teal);
+      color: #fff;
+    }
+    .btn-ghost {
+      background: rgba(255,255,255,0.65);
+      color: var(--ink);
+      border-color: var(--line);
+    }
+    .disclaimer {
+      position: relative;
+      margin-top: 1.75rem;
+      padding: 0.85rem 1rem;
+      border-left: 3px solid var(--teal);
+      background: rgba(255,255,255,0.55);
+      color: var(--muted);
+      font-size: 0.9rem;
+      max-width: 40rem;
+    }
+
+    /* —— Nav —— */
+    .toc {
+      margin: 0.5rem 0 2.5rem;
+      padding: 1.25rem 1.35rem;
+      background: rgba(255,255,255,0.72);
+      border: 1px solid var(--line);
+      border-radius: 0.75rem;
+      backdrop-filter: blur(8px);
+    }
+    .toc h2 {
+      margin: 0 0 0.75rem;
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--teal);
+      font-weight: 700;
+    }
+    .toc ol {
+      margin: 0;
+      padding-left: 1.25rem;
+      columns: 1;
+      gap: 2rem;
+    }
+    @media (min-width: 720px) {
+      .toc ol { columns: 2; }
+    }
+    .toc li { break-inside: avoid; margin: 0.35rem 0; }
+    .toc a { text-decoration: none; color: var(--ink); font-weight: 500; }
+    .toc a:hover { color: var(--teal); }
+
+    /* —— Sections —— */
+    section {
+      margin: 0 0 3.25rem;
+      scroll-margin-top: 1.25rem;
+    }
+    .prose {
+      max-width: var(--max);
+    }
+    section > h2 {
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(1.55rem, 2.6vw, 2rem);
+      font-weight: 560;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.75rem;
+      line-height: 1.2;
+    }
+    .step-kicker {
+      display: inline-block;
+      margin-bottom: 0.35rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--teal);
+    }
+    h3 {
+      font-family: Fraunces, Georgia, serif;
+      font-size: 1.2rem;
+      font-weight: 560;
+      margin: 1.5rem 0 0.5rem;
+    }
+    p { margin: 0.65rem 0; }
+    ul, ol { margin: 0.5rem 0 0.75rem; padding-left: 1.25rem; }
+    li { margin: 0.3rem 0; }
+    strong { font-weight: 700; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+      background: rgba(255,255,255,0.7);
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 0.65rem 0.75rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: var(--teal-soft);
+      font-weight: 700;
+      font-size: 0.82rem;
+      letter-spacing: 0.02em;
+    }
+
+    .compare {
+      display: grid;
+      gap: 0.75rem;
+      margin: 1rem 0;
+    }
+    @media (min-width: 640px) {
+      .compare { grid-template-columns: 1fr 1fr; }
+    }
+    .compare > div {
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.75);
+      border-radius: 0.6rem;
+    }
+    .compare h3 { margin-top: 0; font-size: 1.05rem; }
+    .is { border-top: 3px solid var(--teal); }
+    .is-not { border-top: 3px solid var(--rose); }
+
+    /* —— Figures / screenshots —— */
+    figure.shot {
+      margin: 1.35rem 0 1.75rem;
+      max-width: var(--wide);
+    }
+    figure.shot img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 0.65rem;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      background: #fff;
+    }
+    figcaption {
+      margin-top: 0.55rem;
+      font-size: 0.86rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    figcaption .tag {
+      display: inline-block;
+      margin-right: 0.4rem;
+      padding: 0.12rem 0.45rem;
+      border-radius: 999px;
+      background: var(--teal-soft);
+      color: var(--teal);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .checklist {
+      list-style: none;
+      padding: 0;
+      margin: 0.75rem 0;
+    }
+    .checklist li {
+      position: relative;
+      padding: 0.45rem 0.5rem 0.45rem 2rem;
+      border-bottom: 1px dashed var(--line);
+    }
+    .checklist li::before {
+      content: "";
+      position: absolute;
+      left: 0.35rem;
+      top: 0.7rem;
+      width: 0.95rem;
+      height: 0.95rem;
+      border: 1.5px solid var(--teal);
+      border-radius: 0.2rem;
+      background: #fff;
+    }
+
+    .path {
+      margin: 1rem 0;
+      padding: 1rem 1.15rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.86rem;
+      background: var(--ink);
+      color: #d7ebe4;
+      border-radius: 0.55rem;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+
+    .callout {
+      margin: 1.1rem 0;
+      padding: 0.95rem 1.1rem;
+      background: var(--teal-soft);
+      border-radius: 0.55rem;
+      color: var(--ink);
+      font-weight: 500;
+    }
+    .callout.danger {
+      background: #fce8e6;
+      border-left: 3px solid var(--rose);
+    }
+
+    .closing {
+      padding: 2rem 0 3.5rem;
+      text-align: center;
+    }
+    .closing p {
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(1.35rem, 2.5vw, 1.75rem);
+      font-weight: 560;
+      max-width: 28ch;
+      margin: 0 auto;
+      line-height: 1.3;
+    }
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 1.5rem 0 2.5rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    @media print {
+      body { background: #fff; }
+      .btn, .toc { break-inside: avoid; }
+      figure.shot { break-inside: avoid; }
+      .hero::before { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <div class="brand" aria-label="Atlas">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div class="brand-text">
+          <span class="brand-name">Atlas</span>
+          <span class="brand-sub">Options Lab · Operator guide</span>
+        </div>
+      </div>
+      <h1>Trade the India options desk — step by step</h1>
+      <p class="hero-lead">
+        From sign-in to Quotes, OI, Builder, Books, and Automations: how to use Atlas Options Lab,
+        how to start carefully, and how to think about losses and profits.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#session">Start the paper session</a>
+        <a class="btn btn-ghost" href="#basics">Options basics</a>
+      </div>
+      <p class="disclaimer">
+        <strong>Not financial advice.</strong> Options can lose more than the premium you pay (especially when selling).
+        Trade only with capital you can afford to lose. Pair Lab with your broker statements and a written playbook.
+      </p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <nav class="toc" aria-label="Contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#what">What Options Lab is</a></li>
+        <li><a href="#basics">Options in 10 minutes</a></li>
+        <li><a href="#before">Before you open the Lab</a></li>
+        <li><a href="#session">First paper session (A–F)</a></li>
+        <li><a href="#start">How to start trading</a></li>
+        <li><a href="#careful">How to be careful</a></li>
+        <li><a href="#losses">How to avoid large losses</a></li>
+        <li><a href="#profits">How to approach profits</a></li>
+        <li><a href="#daily">Daily operator loop</a></li>
+        <li><a href="#map">Lab map</a></li>
+      </ol>
+    </nav>
+
+    <section id="what">
+      <p class="step-kicker">Chapter 1</p>
+      <h2>What Options Lab is (and is not)</h2>
+      <div class="prose">
+        <p>
+          Atlas Options Lab is your <strong>live India options desk</strong>: chain, OI/IV context,
+          strategy builder, books, backtests, and paper automations — wired to Kite when tools are bound.
+        </p>
+      </div>
+      <div class="compare">
+        <div class="is">
+          <h3>Lab is</h3>
+          <ul>
+            <li>A desk to see, build, paper, and carefully place multi-leg books</li>
+            <li>A place to <strong>reconcile</strong> Lab books vs broker positions</li>
+            <li>Paper bots with gates, SL/TP %, event-avoid, DTE flat</li>
+          </ul>
+        </div>
+        <div class="is-not">
+          <h3>Lab is not</h3>
+          <ul>
+            <li>A guarantee of profit</li>
+            <li>A full OMS / fill simulator</li>
+            <li>“Set and forget” live auto-trading (live never auto-fires)</li>
+          </ul>
+        </div>
+      </div>
+
+      <figure class="shot">
+        <img src="assets/01-atlas-sign-in.png" alt="Atlas Agents sign-in landing page" width="1600" height="900" loading="eager" />
+        <figcaption><span class="tag">Live capture</span> Atlas sign-in — open your Stock Broker workspace after authenticating.</figcaption>
+      </figure>
+    </section>
+
+    <section id="basics">
+      <p class="step-kicker">Chapter 2</p>
+      <h2>Options in 10 minutes (India F&amp;O)</h2>
+      <div class="prose">
+        <h3>Calls and puts</h3>
+        <ul>
+          <li><strong>CE (Call):</strong> right to buy at the strike — buyers usually want the market <em>up</em>.</li>
+          <li><strong>PE (Put):</strong> right to sell at the strike — buyers usually want the market <em>down</em>.</li>
+          <li>You can <strong>buy</strong> (debit / loss ≈ premium) or <strong>sell</strong> (credit / loss can be large — always define risk).</li>
+        </ul>
+        <h3>Premium, lots, expiry</h3>
+        <ul>
+          <li><strong>Premium</strong> = option price (₹ per share).</li>
+          <li>India index options trade in <strong>lots</strong>. Builder qty is usually lots; Kite positions are <strong>shares</strong>. Reconcile compares in lots.</li>
+          <li><strong>Theta</strong> hurts long premium and helps short premium — faster near expiry.</li>
+        </ul>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Greek</th><th>Rough meaning</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Delta</td><td>Premium move if spot moves ₹1</td></tr>
+          <tr><td>Gamma</td><td>How fast delta changes (ATM / near expiry risk)</td></tr>
+          <tr><td>Theta</td><td>Daily time decay</td></tr>
+          <tr><td>Vega</td><td>Sensitivity to implied volatility</td></tr>
+          <tr><td>IV / IVP</td><td>How expensive options are vs history</td></tr>
+        </tbody>
+      </table>
+      <p class="callout">You do not need perfect Greek math to start — you <strong>do</strong> need a defined view and a defined exit.</p>
+    </section>
+
+    <section id="before">
+      <p class="step-kicker">Chapter 3</p>
+      <h2>Before you open the Lab</h2>
+      <ul class="checklist">
+        <li>Kite session valid (access token renews ~daily)</li>
+        <li>Signals ops / Live teams published with Kite tools bound</li>
+        <li>Lab setup: underlying, FUT for the chain month, strike step, Mock off</li>
+        <li>Written rules: max loss/day, max lots, no revenge size-up</li>
+      </ul>
+      <div class="prose">
+        <p>In the Stock Broker workspace, use the desk tabs:</p>
+        <ol>
+          <li><strong>Signal Engine</strong> — checklist / macro gates</li>
+          <li><strong>Options Lab</strong> — chain + builder + Ideas / Backtest / Books</li>
+          <li><strong>Automations</strong> — paper bots + Reconcile</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="session">
+      <p class="step-kicker">Chapter 4</p>
+      <h2>First paper session — step by step</h2>
+
+      <h3>Step A — Setup bar</h3>
+      <ol>
+        <li>Open <strong>Options Lab</strong>.</li>
+        <li>Pick preset (NIFTY / BANKNIFTY / …).</li>
+        <li>Confirm <strong>FUT</strong> matches the expiry you want.</li>
+        <li>Confirm <strong>Mock</strong> is off for live quotes.</li>
+        <li>Wait until Spot / ATM / PCR-style strip populates.</li>
+      </ol>
+
+      <h3>Step B — Read the market (Quotes · OI · Straddle · IV)</h3>
+      <p>Stay on the left shell — do not skip this.</p>
+      <figure class="shot">
+        <img src="assets/02-options-lab-quotes.png" alt="Options Lab Quotes chain and Iron Condor builder" width="1600" height="900" loading="lazy" />
+        <figcaption><span class="tag">Lab UI</span> Quotes + Builder — ATM chain on the left, strategy template and payoff on the right.</figcaption>
+      </figure>
+      <table>
+        <thead><tr><th>Tab</th><th>Ask yourself</th></tr></thead>
+        <tbody>
+          <tr><td>Quotes</td><td>Where is ATM? Liquid? Spreads wide?</td></tr>
+          <tr><td>OI</td><td>Where are walls / build-up?</td></tr>
+          <tr><td>Straddle</td><td>Is ATM straddle rich or melting?</td></tr>
+          <tr><td>IV</td><td>Is IV / IVP elevated?</td></tr>
+        </tbody>
+      </table>
+      <figure class="shot">
+        <img src="assets/03-options-lab-oi.png" alt="Options Lab OI analysis view" width="1600" height="900" loading="lazy" />
+        <figcaption><span class="tag">Lab UI</span> OI view — walls and build-up before you commit to legs.</figcaption>
+      </figure>
+      <p class="callout">If you cannot explain <em>why</em> the trade fits the day in one sentence, do not build legs yet.</p>
+
+      <h3>Step C — Build a strategy</h3>
+      <ol>
+        <li>Open the strategy rail (Builder).</li>
+        <li>Start with a <strong>defined-risk</strong> template (spread or iron condor) — not naked shorts on day one.</li>
+        <li>Check payoff, net premium, rough delta.</li>
+        <li>Check margin before any place.</li>
+        <li>Prefer <strong>paper</strong> place first.</li>
+      </ol>
+
+      <h3>Step D — Ideas → Backtest</h3>
+      <ol>
+        <li>Ideas — screen candidates; send one to Backtest.</li>
+        <li>Run model / hist / BS marks — treat as <strong>scenario</strong>, not prophecy.</li>
+        <li>Save a run; optionally Create bot (paper, event-avoid, flat ≤ 1 DTE).</li>
+      </ol>
+      <figure class="shot">
+        <img src="assets/04-options-lab-backtest.png" alt="Options Lab Backtest panel with P and L path" width="1600" height="900" loading="lazy" />
+        <figcaption><span class="tag">Lab UI</span> Backtest — sanity-check structure before you size or automate.</figcaption>
+      </figure>
+
+      <h3>Step E — Books</h3>
+      <ol>
+        <li>Save drafts from Builder, or Import from Kite.</li>
+        <li>Watch MTM; use GTT when tools are bound.</li>
+        <li>Hit <strong>Reconcile</strong> — qty compared in lots; Kite import books may show shares.</li>
+      </ol>
+      <figure class="shot">
+        <img src="assets/05-options-lab-books.png" alt="Options Lab Books panel with MTM and Reconcile" width="1600" height="900" loading="lazy" />
+        <figcaption><span class="tag">Lab UI</span> Books — drafts, paper books, MTM, Import, and Reconcile.</figcaption>
+      </figure>
+
+      <h3>Step F — Automations (paper until proven)</h3>
+      <ol>
+        <li>Add / arm a <strong>paper</strong> bot with schedule, gates, SL/TP %, event-avoid, max DTE hold.</li>
+        <li>Evaluate now, or wait for the worker when <code>OPTIONS_LAB_BOTS_ENABLED</code> is on.</li>
+        <li><strong>Live never auto-fires</strong> — live Run once is HITL confirm.</li>
+        <li>Reconcile for available / used margin vs Lab OPEN and books.</li>
+      </ol>
+      <figure class="shot">
+        <img src="assets/06-automations-reconcile.png" alt="Automations bots and broker reconcile strip" width="1600" height="900" loading="lazy" />
+        <figcaption><span class="tag">Lab UI</span> Automations — broker book (read-only) plus paper bots with event-avoid and DTE flat.</figcaption>
+      </figure>
+    </section>
+
+    <section id="start">
+      <p class="step-kicker">Chapter 5</p>
+      <h2>How to start trading</h2>
+      <div class="path">Mock / learning  →  Paper books &amp; bots  →  Tiny live (1 lot defined risk)
+                 →  Scale only after a boring, rule-following streak</div>
+      <ol>
+        <li><strong>Week 1–2:</strong> Paper only. Same setup every day. Log why you entered/exited.</li>
+        <li><strong>First live:</strong> One defined-risk spread, 1 lot, SL/target or GTT, hard daily loss stop.</li>
+        <li>Never jump from a winning paper day to max size live.</li>
+        <li>Keep Reconcile green (or understood) before adding size.</li>
+      </ol>
+    </section>
+
+    <section id="careful">
+      <p class="step-kicker">Chapter 6</p>
+      <h2>How to be careful on the market</h2>
+      <h3>Session</h3>
+      <ul>
+        <li>Prefer liquid underlyings and strikes.</li>
+        <li>Respect event-avoid (NSE holidays, FOMC) unless your playbook says otherwise.</li>
+        <li>Wide bid–ask + low OI → size down or skip.</li>
+      </ul>
+      <h3>Position</h3>
+      <ul>
+        <li>Know max loss before click (especially short premium).</li>
+        <li>One thesis per book — do not stack correlated shorts “because IV is high.”</li>
+        <li>After a stop-out: stop for the day if that is your rule.</li>
+      </ul>
+      <h3>Ops</h3>
+      <ul>
+        <li>Mock off for real decisions.</li>
+        <li>Watch <strong>used</strong> margin and util % on Reconcile, not only available cash.</li>
+      </ul>
+    </section>
+
+    <section id="losses">
+      <p class="step-kicker">Chapter 7</p>
+      <h2>How to avoid large losses</h2>
+      <p>Pros survive by cutting left-tail risk, not by predicting every move.</p>
+      <table>
+        <thead><tr><th>Practice</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>Defined risk (spreads / condors with wings)</td><td>Caps disaster vs naked short</td></tr>
+          <tr><td>Hard daily loss limit</td><td>Stops revenge trading</td></tr>
+          <tr><td>Size from risk, not from feeling lucky</td><td>One bad day ≠ account damage</td></tr>
+          <tr><td>No averaging losers without a new thesis</td><td>Often doubles the mistake</td></tr>
+          <tr><td>Exit plan before entry</td><td>SL %, target %, time stop, or DTE flat</td></tr>
+          <tr><td>Reconcile Lab vs broker</td><td>Stops ghost books and wrong lot math</td></tr>
+        </tbody>
+      </table>
+      <p class="callout danger">
+        <strong>Selling options:</strong> credit looks easy until one gap — know margin and wing distance.
+        <strong>Buying options:</strong> limited loss, but high chance of 100% premium loss — need catalyst and a time box.
+      </p>
+    </section>
+
+    <section id="profits">
+      <p class="step-kicker">Chapter 8</p>
+      <h2>How to approach profits</h2>
+      <p>Profits come from <strong>repeatable edge + risk control</strong>, not one heroic trade.</p>
+      <ol>
+        <li><strong>Context</strong> — Signal checklist + OI/IV/straddle agree with a clear bias.</li>
+        <li><strong>Structure</strong> — Template matches the bias.</li>
+        <li><strong>Price</strong> — You are not paying silly mid with no liquidity.</li>
+        <li><strong>Exit</strong> — Take profit per plan; cut losers per plan.</li>
+        <li><strong>Review</strong> — Books MTM + journal: process vs luck.</li>
+      </ol>
+      <h3>What usually destroys P&amp;L</h3>
+      <ul>
+        <li>Overtrading after a win or loss</li>
+        <li>Ignoring event days / holidays</li>
+        <li>Naked short “income” without wings</li>
+        <li>Holding losers into expiry “for a bounce”</li>
+        <li>Treating paper bot wins as proof of live edge</li>
+      </ul>
+    </section>
+
+    <section id="daily">
+      <p class="step-kicker">Chapter 9</p>
+      <h2>Daily operator loop</h2>
+      <h3>Pre-open</h3>
+      <ul class="checklist">
+        <li>Kite session OK</li>
+        <li>Lab FUT + mock correct</li>
+        <li>Signal Engine: any hard NO-GO?</li>
+        <li>Know max loss for the day</li>
+      </ul>
+      <h3>During</h3>
+      <ul class="checklist">
+        <li>Quotes → OI → Straddle/IV before Builder</li>
+        <li>Margin check → paper or small live</li>
+        <li>GTT / SL-TP when live</li>
+        <li>Reconcile after fills</li>
+      </ul>
+      <h3>Post</h3>
+      <ul class="checklist">
+        <li>Flat or sized for overnight intentionally</li>
+        <li>Disarm bots if you leave the desk</li>
+        <li>One-line journal: thesis / result / lesson</li>
+      </ul>
+    </section>
+
+    <section id="map">
+      <p class="step-kicker">Chapter 10</p>
+      <h2>Lab map</h2>
+      <table>
+        <thead><tr><th>Surface</th><th>Job</th></tr></thead>
+        <tbody>
+          <tr><td>Setup bar</td><td>Underlying, FUT, strike step, mock</td></tr>
+          <tr><td>Quotes / OI / Straddle / IV</td><td>Market context</td></tr>
+          <tr><td>Builder + payoff</td><td>Construct &amp; sanity-check risk</td></tr>
+          <tr><td>Ideas</td><td>Candidate structures</td></tr>
+          <tr><td>Backtest</td><td>Scenario / hist / BS marks</td></tr>
+          <tr><td>Books</td><td>Draft / paper books, MTM, GTT, Reconcile</td></tr>
+          <tr><td>Automations</td><td>Paper bots, Evaluate, Reconcile, event-avoid / DTE flat</td></tr>
+        </tbody>
+      </table>
+      <p><strong>Broker truth:</strong> Kite positions &amp; margins remain authoritative. Lab Reconcile is the bridge — it does not replace the broker app.</p>
+      <p>Related Markdown: <code>Instructions/StockBroker/OPTIONS_LAB_GUIDE.md</code> · Kite bind list in <code>tools/KITE.md</code>.</p>
+    </section>
+
+    <div class="closing">
+      <p>Survive first. Size second. Edge third.</p>
+    </div>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      Atlas Options Lab operator guide · Stock Broker desk ·
+      Sign-in image is a live capture; Lab panels are Atlas-styled UI figures for this guide.
+      Open locally: <code>guides/options-lab/index.html</code>
+    </div>
+  </footer>
+</body>
+</html>

@@ -551,9 +551,9 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "label": "Gold",
         "rule": "abs_lte",
         "target": 0.5,
-        "tier": "slow",
+        "tier": "medium",
         "gates_entry": True,
-        "hint": "Gold",
+        "hint": "Gold (Yahoo GC=F session % vs prior close, ~10 min)",
         "feed_key": "gold_chg"
     },
     {
@@ -563,9 +563,9 @@ DEFAULT_METRICS: list[dict[str, Any]] = [
         "label": "Silver",
         "rule": "abs_lte",
         "target": 0.5,
-        "tier": "slow",
+        "tier": "medium",
         "gates_entry": True,
-        "hint": "Silver",
+        "hint": "Silver (Yahoo SI=F session % vs prior close, ~10 min)",
         "feed_key": "silver_chg"
     },
     {

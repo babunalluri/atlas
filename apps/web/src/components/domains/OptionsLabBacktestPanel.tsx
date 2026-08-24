@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import {
+  ChartLineIcon,
+  DownloadIcon,
+  PlusIcon,
+  SaveIcon,
+  TrashIcon,
+} from "@/components/ui/icons";
 import type { StrategyLeg } from "@/components/domains/options-lab-strategy";
 import {
   buildPayoffCurve,
@@ -20,6 +27,11 @@ import {
   type OptionsLabBacktestSummaryRow,
 } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
+
+/** Match Options Lab desk toolbar (Wings select / Button sm). */
+const fieldClass =
+  "rounded-md border border-line bg-canvas px-2 py-1.5 text-xs font-medium tracking-tight text-ink";
+const fieldNarrowClass = cn(fieldClass, "w-16 px-1.5");
 
 function pnlTone(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value === 0) return "text-ink";
@@ -173,8 +185,8 @@ export function OptionsLabBacktestPanel({
     const pnls = shocks.flatMap((s) => [s.pnlUp, s.pnlDown]);
     const wins = pnls.filter((p) => p > 0).length;
     const avg = pnls.reduce((a, b) => a + b, 0) / (pnls.length || 1);
-    const maxDd = Math.min(...equity.map((e) => e.equity), 0);
-    const peak = Math.max(...equity.map((e) => e.equity), 0);
+    const maxDd = Math.min(...equity.map((e) => e.equity));
+    const peak = Math.max(...equity.map((e) => e.equity));
     return {
       summary: summaryLocal,
       shocks,
@@ -302,7 +314,7 @@ export function OptionsLabBacktestPanel({
       return;
     }
     setMessage(
-      `Bot “${res.bot?.name}” created — open Automations tab to arm (paper).`,
+      `Bot “${res.bot?.name}” created — open Bot (next to Backtest) to arm (paper).`,
     );
   }
 
@@ -338,23 +350,73 @@ export function OptionsLabBacktestPanel({
     );
   }
 
-  const equityMin = result ? Math.min(...result.equity.map((e) => e.equity), 0) : 0;
-  const equityMax = result ? Math.max(...result.equity.map((e) => e.equity), 0) : 0;
-  const equitySpan = Math.max(1e-6, equityMax - equityMin);
+  const pathStart = result?.equity[0]?.equity ?? null;
+  const pathEnd =
+    result && result.equity.length
+      ? result.equity[result.equity.length - 1]!.equity
+      : null;
+  const pathDelta =
+    pathStart != null && pathEnd != null ? pathEnd - pathStart : null;
+  const troughPt =
+    result?.equity.reduce(
+      (best, e) => (e.equity < best.equity ? e : best),
+      result.equity[0]!,
+    ) ?? null;
+  const peakPt =
+    result?.equity.reduce(
+      (best, e) => (e.equity > best.equity ? e : best),
+      result.equity[0]!,
+    ) ?? null;
+  const endShock = result?.shocks.length
+    ? result.shocks[result.shocks.length - 1]!
+    : null;
+  /** Scale to path range only (plus small pad) so the line uses the full plot. */
+  const pathVals = result?.equity.map((e) => e.equity) ?? [];
+  const rawMin = pathVals.length ? Math.min(...pathVals) : 0;
+  const rawMax = pathVals.length ? Math.max(...pathVals) : 0;
+  const padAmt = Math.max(1, (rawMax - rawMin) * 0.12);
+  const chartMin = rawMin - padAmt;
+  const chartMax = rawMax + padAmt;
+  const chartSpan = Math.max(1e-6, chartMax - chartMin);
+  const showBreakeven = 0 >= chartMin && 0 <= chartMax;
+  const equityPoints = result
+    ? result.equity.map((e, i) => {
+        const n = result.equity.length;
+        const x = n <= 1 ? 50 : (i / (n - 1)) * 100;
+        const y = ((chartMax - e.equity) / chartSpan) * 100;
+        return { x, y, ...e };
+      })
+    : [];
+  const equityPolyline = equityPoints.map((p) => `${p.x},${p.y}`).join(" ");
+  const zeroY = ((chartMax - 0) / chartSpan) * 100;
+  const equityArea =
+    equityPoints.length > 0
+      ? `${equityPoints[0]!.x},100 ${equityPolyline} ${equityPoints[equityPoints.length - 1]!.x},100`
+      : "";
+  const troughIsEnd =
+    troughPt != null &&
+    pathEnd != null &&
+    troughPt.day === result?.equity.length &&
+    Math.abs(troughPt.equity - pathEnd) < 1e-9;
+  const peakIsEnd =
+    peakPt != null &&
+    pathEnd != null &&
+    peakPt.day === result?.equity.length &&
+    Math.abs(peakPt.equity - pathEnd) < 1e-9;
 
   return (
-    <div className="flex flex-col gap-3 pt-3">
+    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3">
       {handoffHint ? (
-        <p className="rounded border border-teal/30 bg-teal/10 px-2 py-1.5 text-xs text-teal">
+        <p className="rounded-md border border-teal/30 bg-teal/10 px-2 py-1.5 text-xs text-teal">
           From Ideas: {handoffHint}
         </p>
       ) : null}
-      <p className="text-xs text-slate-muted">
+      <p className="text-sm text-slate-muted">
         {useMarks
           ? "Black-76 mark path (flat IV) vs entry premium — not NSE tick / chain archive."
           : "Model estimate (expiry payoff vs spot path) — not historical option tick replay."}{" "}
         Shock % is a daily proxy; path moves scale with √t. Preview fidelity:{" "}
-        <span className="font-semibold text-ink">
+        <span className="font-medium text-ink">
           {useMarks
             ? "bs_marks"
             : ivCalibrated
@@ -366,193 +428,403 @@ export function OptionsLabBacktestPanel({
           : null}
         {entryDte != null ? ` · DTE ${entryDte}` : " · DTE≈window"}
         . Prefer historical closes on save for{" "}
-        <span className="font-semibold text-ink">model_hist</span>
+        <span className="font-medium text-ink">model_hist</span>
         {useMarks ? " under BS marks" : ""}.
       </p>
       {useHistorical && !useMarks ? (
-        <p className="rounded border border-line bg-fog/40 px-2 py-1.5 text-xs text-slate-muted">
+        <p className="rounded-md border border-line bg-fog/40 px-2 py-1.5 text-xs text-slate-muted">
           On-screen chart/table stay <span className="font-medium text-ink">model</span>{" "}
           preview. <span className="font-medium text-ink">Save run</span> writes{" "}
           <span className="font-medium text-ink">model_hist</span>.
         </p>
       ) : null}
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="text-xs text-slate-muted">
-          Window (days)
-          <input
-            type="number"
-            min={3}
-            max={45}
-            value={days}
-            onChange={(e) => setDays(Math.max(3, Math.min(45, Number(e.target.value) || 10)))}
-            className="ml-1 w-16 rounded border border-line bg-canvas px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="text-xs text-slate-muted">
-          Daily shock %
-          <input
-            type="number"
-            min={0.5}
-            max={15}
-            step={0.5}
-            value={shockPct}
-            onChange={(e) => setShockPct(Math.max(0.5, Number(e.target.value) || 2))}
-            className="ml-1 w-16 rounded border border-line bg-canvas px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="text-xs text-slate-muted">
-          Path bias
-          <select
-            value={pathBias}
-            onChange={(e) => setPathBias(e.target.value as "up" | "down" | "flat")}
-            disabled={useHistorical}
-            className="ml-1 rounded border border-line bg-canvas px-2 py-1 text-sm disabled:opacity-50"
-          >
-            <option value="flat">flat (oscillate)</option>
-            <option value="up">bullish</option>
-            <option value="down">bearish</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-slate-muted">
-          <input
-            type="checkbox"
-            checked={useHistorical}
-            onChange={(e) => setUseHistorical(e.target.checked)}
-          />
-          Prefer historical closes
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-slate-muted">
-          <input
-            type="checkbox"
-            checked={useMarks}
-            onChange={(e) => setUseMarks(e.target.checked)}
-          />
-          Mark path (BS)
-        </label>
+      <div className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-slate-muted">
+            Window (days)
+            <input
+              type="number"
+              min={3}
+              max={45}
+              value={days}
+              onChange={(e) => setDays(Math.max(3, Math.min(45, Number(e.target.value) || 10)))}
+              className={fieldNarrowClass}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-slate-muted">
+            Daily shock %
+            <input
+              type="number"
+              min={0.5}
+              max={15}
+              step={0.5}
+              value={shockPct}
+              onChange={(e) => setShockPct(Math.max(0.5, Number(e.target.value) || 2))}
+              className={fieldNarrowClass}
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-slate-muted">
+            Path bias
+            <select
+              value={pathBias}
+              onChange={(e) => setPathBias(e.target.value as "up" | "down" | "flat")}
+              disabled={useHistorical}
+              className={cn(fieldClass, "disabled:opacity-50")}
+            >
+              <option value="flat">flat (oscillate)</option>
+              <option value="up">bullish</option>
+              <option value="down">bearish</option>
+            </select>
+          </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink">
+            <input
+              type="checkbox"
+              className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
+              checked={useHistorical}
+              onChange={(e) => setUseHistorical(e.target.checked)}
+            />
+            Prefer historical closes
+          </label>
+          <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink">
+            <input
+              type="checkbox"
+              className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
+              checked={useMarks}
+              onChange={(e) => setUseMarks(e.target.checked)}
+            />
+            Mark path (BS)
+          </label>
+        </div>
         {ivCalibrated ? (
           <Button
             type="button"
             size="sm"
             variant="secondary"
+            className="ml-auto shrink-0"
+            icon={<ChartLineIcon />}
             onClick={() => setShockPct(ivCalibrated.shockPct)}
           >
             Use IV shock ({ivCalibrated.shockPct}%)
           </Button>
         ) : null}
-        <Button type="button" size="sm" variant="secondary" onClick={downloadCsv} disabled={!result}>
-          Download CSV
-        </Button>
       </div>
 
-      <div className="flex flex-wrap items-end gap-2 rounded border border-line bg-canvas/40 px-2 py-2">
-        <label className="text-xs text-slate-muted">
+      <div className="flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-lg border border-line bg-canvas/40 px-2.5 py-2">
+        <label className="flex items-center gap-1.5 text-xs text-slate-muted">
           Save as
           <input
             value={saveName}
             onChange={(e) => setSaveName(e.target.value)}
             placeholder="Model · 10d"
-            className="ml-1 w-40 rounded border border-line bg-canvas px-2 py-1 text-sm"
+            className={cn(fieldClass, "w-40")}
           />
         </label>
-        <Button type="button" size="sm" disabled={saving || spot == null} onClick={() => void onSave()}>
-          {saving ? "Saving…" : "Save run"}
-        </Button>
-        <Button type="button" size="sm" variant="secondary" onClick={() => void onSummary()}>
-          Portfolio summary
-        </Button>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <Button
+            type="button"
+            size="sm"
+            icon={<SaveIcon />}
+            disabled={saving || spot == null}
+            onClick={() => void onSave()}
+          >
+            {saving ? "Saving…" : "Save run"}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            icon={<ChartLineIcon />}
+            onClick={() => void onSummary()}
+          >
+            Portfolio summary
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            icon={<DownloadIcon />}
+            onClick={downloadCsv}
+            disabled={!result}
+          >
+            Download CSV
+          </Button>
+        </div>
       </div>
       {message ? <p className="text-xs text-slate-muted">{message}</p> : null}
 
       {result ? (
         <>
-          <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-            <div className="rounded border border-line px-2 py-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div
+              className="rounded-lg border border-line bg-raised/40 px-2.5 py-2"
+              title="Share of up/down expiry samples with P&L > 0 — not trade win rate"
+            >
               <p className="th-label">Model hit rate</p>
               <p
                 className={cn(
-                  "font-semibold tabular-nums",
+                  "mt-0.5 text-lg font-semibold tabular-nums",
                   result.winRate >= 0.5 ? "text-teal" : "text-rose",
                 )}
               >
                 {(result.winRate * 100).toFixed(0)}%
               </p>
-              <p className="mt-0.5 text-[10px] text-slate-muted">
-                Up/down expiry samples with P&amp;L&gt;0 — not trade win rate
-              </p>
             </div>
-            <div className="rounded border border-line px-2 py-2">
+            <div className="rounded-lg border border-line bg-raised/40 px-2.5 py-2">
               <p className="th-label">Avg P&amp;L</p>
-              <p className={cn("font-semibold tabular-nums", pnlTone(result.avg))}>
+              <p className={cn("mt-0.5 text-lg font-semibold tabular-nums", pnlTone(result.avg))}>
                 {result.avg.toFixed(1)}
               </p>
             </div>
-            <div className="rounded border border-line px-2 py-2">
+            <div className="rounded-lg border border-line bg-raised/40 px-2.5 py-2">
               <p className="th-label">Path trough</p>
-              <p className={cn("font-semibold tabular-nums", pnlTone(result.maxDd))}>
+              <p className={cn("mt-0.5 text-lg font-semibold tabular-nums", pnlTone(result.maxDd))}>
                 {result.maxDd.toFixed(1)}
+                {troughPt != null ? (
+                  <span className="ml-1 text-xs font-normal text-slate-muted">
+                    D{troughPt.day}
+                  </span>
+                ) : null}
               </p>
             </div>
-            <div className="rounded border border-line px-2 py-2">
+            <div className="rounded-lg border border-line bg-raised/40 px-2.5 py-2">
               <p className="th-label">Path peak</p>
-              <p className={cn("font-semibold tabular-nums", pnlTone(result.peak))}>
+              <p className={cn("mt-0.5 text-lg font-semibold tabular-nums", pnlTone(result.peak))}>
                 {result.peak.toFixed(1)}
+                {peakPt != null ? (
+                  <span className="ml-1 text-xs font-normal text-slate-muted">
+                    D{peakPt.day}
+                  </span>
+                ) : null}
               </p>
             </div>
           </div>
 
-          <div className="rounded border border-line px-2 py-2">
-            <p className="th-label mb-1">Model equity (path P&amp;L by day)</p>
-            <svg
-              viewBox="0 0 320 72"
-              className={cn(
-                "h-16 w-full",
-                result.equity.length && result.equity[result.equity.length - 1]!.equity >= 0
-                  ? "text-teal"
-                  : "text-rose",
-              )}
-              aria-hidden
-            >
-              <polyline
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                points={result.equity
-                  .map((e, i) => {
-                    const x =
-                      result.equity.length <= 1 ? 0 : (i / (result.equity.length - 1)) * 320;
-                    const y = 68 - ((e.equity - equityMin) / equitySpan) * 60;
-                    return `${x},${y}`;
-                  })
-                  .join(" ")}
-              />
-            </svg>
+          <div className="overflow-hidden rounded-lg border border-line bg-raised/40">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line/60 px-3 py-2">
+              <div className="min-w-0">
+                <p className="th-label">Model equity</p>
+                <p className="mt-0.5 text-xs text-slate-muted">
+                  Path P&amp;L by day · {pathBias} · {shockPct}%/√t ·{" "}
+                  {result.equity.length}d
+                  {useMarks ? " · BS marks" : " · expiry payoff"}
+                  {troughIsEnd ? " · ends at trough" : null}
+                  {peakIsEnd ? " · ends at peak" : null}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-end gap-4 text-right">
+                <div>
+                  <p className="th-label">High</p>
+                  <p
+                    className={cn(
+                      "text-sm font-semibold tabular-nums",
+                      pnlTone(peakPt?.equity),
+                    )}
+                  >
+                    {peakPt != null ? peakPt.equity.toFixed(1) : "—"}
+                    {peakPt != null ? (
+                      <span className="ml-1 text-[10px] font-normal text-slate-muted">
+                        D{peakPt.day}
+                      </span>
+                    ) : null}
+                  </p>
+                </div>
+                <div>
+                  <p className="th-label">Low</p>
+                  <p
+                    className={cn(
+                      "text-sm font-semibold tabular-nums",
+                      pnlTone(troughPt?.equity),
+                    )}
+                  >
+                    {troughPt != null ? troughPt.equity.toFixed(1) : "—"}
+                    {troughPt != null ? (
+                      <span className="ml-1 text-[10px] font-normal text-slate-muted">
+                        D{troughPt.day}
+                      </span>
+                    ) : null}
+                  </p>
+                </div>
+                <div>
+                  <p className="th-label">End</p>
+                  <p
+                    className={cn(
+                      "text-lg font-semibold tabular-nums",
+                      pnlTone(pathEnd),
+                    )}
+                  >
+                    {pathEnd != null
+                      ? `${pathEnd > 0 ? "+" : ""}${pathEnd.toFixed(1)}`
+                      : "—"}
+                  </p>
+                  {pathDelta != null ? (
+                    <p className={cn("text-[11px] tabular-nums", pnlTone(pathDelta))}>
+                      {pathDelta > 0 ? "+" : ""}
+                      {pathDelta.toFixed(1)} vs D1
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="px-3 py-2">
+              <div
+                className={cn(
+                  "relative h-24 w-full overflow-hidden",
+                  pathEnd != null && pathEnd >= 0 ? "text-teal" : "text-rose",
+                )}
+              >
+                <svg
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                  className="absolute inset-0 h-full w-full"
+                  aria-hidden
+                >
+                  {showBreakeven ? (
+                    <line
+                      x1="0"
+                      y1={zeroY}
+                      x2="100"
+                      y2={zeroY}
+                      stroke="currentColor"
+                      strokeOpacity="0.3"
+                      strokeWidth="0.6"
+                      strokeDasharray="2 2"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ) : null}
+                  {equityArea ? (
+                    <polygon
+                      points={equityArea}
+                      fill="currentColor"
+                      fillOpacity="0.12"
+                      stroke="none"
+                    />
+                  ) : null}
+                  <polyline
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                    points={equityPolyline}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </svg>
+                {equityPoints.map((p) => {
+                  const isHi = p.day === peakPt?.day;
+                  const isLo = p.day === troughPt?.day;
+                  return (
+                    <span
+                      key={`dot-${p.day}`}
+                      className={cn(
+                        "absolute rounded-full bg-current",
+                        isHi || isLo ? "size-2.5" : "size-1.5",
+                      )}
+                      style={{
+                        left: `${p.x}%`,
+                        top: `${p.y}%`,
+                        transform: "translate(-50%, -50%)",
+                      }}
+                      title={`D${p.day}: ${p.equity.toFixed(1)}`}
+                    />
+                  );
+                })}
+              </div>
+
+              <div
+                className="mt-1.5 grid gap-1"
+                style={{
+                  gridTemplateColumns: `repeat(${Math.max(result.equity.length, 1)}, minmax(0, 1fr))`,
+                }}
+              >
+                {result.equity.map((e) => {
+                  const isHi = e.day === peakPt?.day;
+                  const isLo = e.day === troughPt?.day;
+                  return (
+                    <div
+                      key={e.day}
+                      className={cn(
+                        "rounded-md px-1 py-1 text-center",
+                        isHi || isLo ? "bg-fog/80" : undefined,
+                      )}
+                    >
+                      <p className="th-label">D{e.day}</p>
+                      <p
+                        className={cn(
+                          "text-xs font-semibold tabular-nums",
+                          pnlTone(e.equity),
+                        )}
+                      >
+                        {e.equity.toFixed(1)}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {endShock != null && spot != null ? (
+                <p className="mt-1.5 text-[11px] text-slate-muted">
+                  End spot{" "}
+                  <span className="font-semibold tabular-nums text-ink">
+                    {endShock.pathSpot.toFixed(0)}
+                  </span>
+                  <span className={cn("tabular-nums", pnlTone(endShock.pathSpot - spot))}>
+                    {" "}
+                    ({endShock.pathSpot - spot >= 0 ? "+" : ""}
+                    {(((endShock.pathSpot - spot) / spot) * 100).toFixed(1)}% vs entry)
+                  </span>
+                  {showBreakeven ? " · dashed = breakeven" : null}
+                </p>
+              ) : null}
+            </div>
           </div>
 
-          <div className="overflow-auto rounded border border-line">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-raised text-slate-muted">
-                <tr>
-                  <th className="px-2 py-1">Day</th>
-                  <th className="px-2 py-1">Up spot</th>
-                  <th className="px-2 py-1">P&amp;L</th>
-                  <th className="px-2 py-1">Down spot</th>
-                  <th className="px-2 py-1">P&amp;L</th>
-                  <th className="px-2 py-1">Path</th>
+          <div className="rounded-lg border border-line">
+            <table className="w-full border-collapse text-sm">
+              <thead className="bg-raised/95">
+                <tr className="border-b border-line">
+                  <th className="th-label px-1.5 py-1 text-left">Day</th>
+                  <th className="th-label px-1.5 py-1 text-right">Up spot</th>
+                  <th className="th-label px-1.5 py-1 text-right">P&amp;L</th>
+                  <th className="th-label px-1.5 py-1 text-right">Down spot</th>
+                  <th className="th-label px-1.5 py-1 text-right">P&amp;L</th>
+                  <th className="th-label px-1.5 py-1 text-right">Path</th>
                 </tr>
               </thead>
               <tbody>
                 {result.shocks.map((s) => (
-                  <tr key={s.day} className="border-t border-line">
-                    <td className="px-2 py-1 tabular-nums text-slate-muted">{s.day}</td>
-                    <td className="px-2 py-1 tabular-nums">{s.up.toFixed(0)}</td>
-                    <td className={cn("px-2 py-1 tabular-nums font-medium", pnlTone(s.pnlUp))}>
+                  <tr key={s.day} className="border-b border-line/50">
+                    <td className="px-1.5 py-1 tabular-nums text-slate-muted">
+                      {s.day}
+                    </td>
+                    <td className="px-1.5 py-1 text-right font-semibold tabular-nums text-ink">
+                      {s.up.toFixed(0)}
+                    </td>
+                    <td
+                      className={cn(
+                        "px-1.5 py-1 text-right font-semibold tabular-nums",
+                        pnlTone(s.pnlUp),
+                      )}
+                    >
                       {s.pnlUp.toFixed(1)}
                     </td>
-                    <td className="px-2 py-1 tabular-nums">{s.down.toFixed(0)}</td>
-                    <td className={cn("px-2 py-1 tabular-nums font-medium", pnlTone(s.pnlDown))}>
+                    <td className="px-1.5 py-1 text-right font-semibold tabular-nums text-ink">
+                      {s.down.toFixed(0)}
+                    </td>
+                    <td
+                      className={cn(
+                        "px-1.5 py-1 text-right font-semibold tabular-nums",
+                        pnlTone(s.pnlDown),
+                      )}
+                    >
                       {s.pnlDown.toFixed(1)}
                     </td>
-                    <td className={cn("px-2 py-1 tabular-nums font-semibold", pnlTone(s.pnlPath))}>
+                    <td
+                      className={cn(
+                        "px-1.5 py-1 text-right font-semibold tabular-nums",
+                        pnlTone(s.pnlPath),
+                      )}
+                    >
                       {s.pnlPath.toFixed(1)}
                     </td>
                   </tr>
@@ -563,20 +835,24 @@ export function OptionsLabBacktestPanel({
         </>
       ) : null}
 
-      <div className="rounded border border-line p-2">
+      <div className="rounded-lg border border-line p-3">
         <p className="th-label mb-2">Saved model runs</p>
         {saved.length === 0 ? (
-          <p className="text-xs text-slate-muted">No saved runs yet.</p>
+          <p className="text-sm text-slate-muted">No saved runs yet.</p>
         ) : (
-          <ul className="divide-y divide-line text-xs">
+          <ul className="divide-y divide-line">
             {saved.map((row) => {
               const id = String(row.id ?? "");
               const on = selectedIds.includes(id);
               return (
-                <li key={id} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
-                  <label className="flex min-w-0 items-center gap-2">
+                <li
+                  key={id}
+                  className="flex flex-wrap items-center justify-between gap-2 py-2"
+                >
+                  <label className="flex min-w-0 items-center gap-2 text-xs">
                     <input
                       type="checkbox"
+                      className="size-3.5 shrink-0 rounded border-line text-teal"
                       checked={on}
                       onChange={() =>
                         setSelectedIds((prev) =>
@@ -584,7 +860,7 @@ export function OptionsLabBacktestPanel({
                         )
                       }
                     />
-                    <span className="truncate font-medium text-ink">{row.name}</span>
+                    <span className="truncate text-sm font-medium text-ink">{row.name}</span>
                     <span className="text-slate-muted">
                       {row.fidelity ? `${row.fidelity} · ` : ""}
                       {row.stats ? (
@@ -597,21 +873,25 @@ export function OptionsLabBacktestPanel({
                       ) : null}
                     </span>
                   </label>
-                  <div className="flex items-center gap-2">
-                    <button
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
                       type="button"
-                      className="text-teal hover:underline"
+                      size="sm"
+                      variant="secondary"
+                      icon={<PlusIcon />}
                       onClick={() => void onCreateBot(row)}
                     >
                       Create bot
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
-                      className="text-rose hover:underline"
+                      size="sm"
+                      variant="danger"
+                      icon={<TrashIcon />}
                       onClick={() => void onDelete(id)}
                     >
                       Delete
-                    </button>
+                    </Button>
                   </div>
                 </li>
               );
@@ -621,38 +901,43 @@ export function OptionsLabBacktestPanel({
       </div>
 
       {summary?.ok && summary.stats ? (
-        <div className="rounded border border-line p-2 text-xs">
+        <div className="rounded-lg border border-line p-3">
           <p className="th-label mb-1">Portfolio summary ({summary.count} runs)</p>
-          <p className="text-slate-muted">{summary.note}</p>
-          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <div>
-              <p className="text-slate-muted">Avg hit</p>
-              <p className="font-semibold tabular-nums">
+          <p className="text-sm text-slate-muted">{summary.note}</p>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-lg border border-line bg-raised/40 px-3 py-3">
+              <p className="th-label">Avg hit</p>
+              <p className="mt-1 text-xl font-semibold tabular-nums text-ink">
                 {(summary.stats.avg_hit_rate * 100).toFixed(0)}%
               </p>
             </div>
-            <div>
-              <p className="text-slate-muted">Avg P&amp;L</p>
-              <p className={cn("font-semibold tabular-nums", pnlTone(summary.stats.avg_pnl))}>
+            <div className="rounded-lg border border-line bg-raised/40 px-3 py-3">
+              <p className="th-label">Avg P&amp;L</p>
+              <p
+                className={cn(
+                  "mt-1 text-xl font-semibold tabular-nums",
+                  pnlTone(summary.stats.avg_pnl),
+                )}
+              >
                 {summary.stats.avg_pnl.toFixed(1)}
               </p>
             </div>
-            <div>
-              <p className="text-slate-muted">Avg trough</p>
+            <div className="rounded-lg border border-line bg-raised/40 px-3 py-3">
+              <p className="th-label">Avg trough</p>
               <p
                 className={cn(
-                  "font-semibold tabular-nums",
+                  "mt-1 text-xl font-semibold tabular-nums",
                   pnlTone(summary.stats.avg_path_trough),
                 )}
               >
                 {summary.stats.avg_path_trough.toFixed(1)}
               </p>
             </div>
-            <div>
-              <p className="text-slate-muted">Avg peak</p>
+            <div className="rounded-lg border border-line bg-raised/40 px-3 py-3">
+              <p className="th-label">Avg peak</p>
               <p
                 className={cn(
-                  "font-semibold tabular-nums",
+                  "mt-1 text-xl font-semibold tabular-nums",
                   pnlTone(summary.stats.avg_path_peak),
                 )}
               >
@@ -661,9 +946,9 @@ export function OptionsLabBacktestPanel({
             </div>
           </div>
           {(summary.correlations ?? []).length > 0 ? (
-            <ul className="mt-2 space-y-0.5 text-slate-muted">
+            <ul className="mt-2 space-y-0.5 text-xs text-slate-muted">
               {(summary.correlations ?? []).map((c) => (
-                <li key={`${c.a}-${c.b}`} className={cn("tabular-nums")}>
+                <li key={`${c.a}-${c.b}`} className="tabular-nums">
                   {c.a_name} ↔ {c.b_name}: corr {c.corr?.toFixed(2)}
                 </li>
               ))}

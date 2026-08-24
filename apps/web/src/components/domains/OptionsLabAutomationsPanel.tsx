@@ -7,6 +7,16 @@ import {
   type StrategyTemplateId,
 } from "@/components/domains/options-lab-strategy";
 import { Button } from "@/components/ui/Button";
+import {
+  BellIcon,
+  CloseIcon,
+  PauseIcon,
+  PlayIcon,
+  PlusIcon,
+  RefreshIcon,
+  StopIcon,
+  TrashIcon,
+} from "@/components/ui/icons";
 import { useAgentOsToken } from "@/lib/auth/token";
 import {
   createOptionsLabBot,
@@ -24,13 +34,23 @@ import { cn } from "@/lib/utils";
 
 const TEMPLATE_CHOICES = STRATEGY_TEMPLATES.filter((t) => !t.gated);
 
+/** Match Button sm height so selects/inputs/time align on one baseline. */
+const fieldClass =
+  "box-border h-8 rounded-md border border-line bg-canvas px-2 text-xs font-medium leading-none tracking-tight text-ink";
+const fieldNarrowClass = cn(fieldClass, "w-14 px-1.5 text-center");
+const fieldTimeClass = cn(fieldClass, "w-[7.25rem] px-1.5");
+const btnAlignClass = "h-8";
+const rowClass = "flex min-h-8 flex-wrap items-center gap-2";
+const labelClass = "inline-flex h-8 items-center gap-1.5 text-xs leading-none text-slate-muted";
+const tagClass = "inline-flex h-8 shrink-0 items-center text-xs font-medium leading-none text-ink";
+
 function formatCash(value: number | null | undefined) {
   if (value == null || Number.isNaN(value)) return "—";
   return `₹${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 }
 
 /**
- * Automations desk tab — server-persisted bots.
+ * Bot overlay — server-persisted paper/live bots.
  * Armed paper runs via OPTIONS_LAB_BOTS_ENABLED worker (~60s) or Evaluate nudge.
  * Live never auto-fires; Run once always confirms.
  */
@@ -203,6 +223,7 @@ export function OptionsLabAutomationsPanel() {
             type="button"
             size="sm"
             variant="secondary"
+            icon={<RefreshIcon />}
             disabled={reconcileBusy || labMock}
             title={labMock ? "Disable Lab mock for broker reconcile" : undefined}
             onClick={() => void refreshReconcile()}
@@ -283,19 +304,32 @@ export function OptionsLabAutomationsPanel() {
           </div>
         ) : null}
       </div>
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="text-xs text-slate-muted">
+      <div className={rowClass}>
+        <label className={labelClass}>
           Name
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="ml-1 rounded border border-line bg-canvas px-2 py-1 text-sm text-ink"
+            className={cn(fieldClass, "min-w-[12rem]")}
           />
         </label>
-        <Button type="button" size="sm" onClick={() => void addBot()}>
+        <Button
+          type="button"
+          size="sm"
+          className={btnAlignClass}
+          icon={<PlusIcon />}
+          onClick={() => void addBot()}
+        >
           Add bot
         </Button>
-        <Button type="button" size="sm" variant="secondary" onClick={() => void nudgeEvaluate()}>
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          className={btnAlignClass}
+          icon={<RefreshIcon />}
+          onClick={() => void nudgeEvaluate()}
+        >
           Evaluate now
         </Button>
       </div>
@@ -308,10 +342,9 @@ export function OptionsLabAutomationsPanel() {
       ) : (
         <ul className="divide-y divide-line rounded-lg border border-line">
           {bots.map((bot) => (
-            <li key={bot.id} className="flex flex-col gap-2 px-3 py-2">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <li key={bot.id} className="flex flex-col gap-2.5 px-3 py-2.5">
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-ink">{bot.name}</p>
+                <p className="text-sm font-medium text-ink">{bot.name}</p>
                 <p className="text-xs text-slate-muted">
                   {bot.template || bot.backtest_id || "legs"} · TP {bot.profit_pct}% · SL{" "}
                   {bot.stop_pct}% · {bot.mode}
@@ -338,217 +371,248 @@ export function OptionsLabAutomationsPanel() {
                   <p className="mt-1 text-xs text-slate-muted">{bot.last_run_message}</p>
                 ) : null}
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={bot.mode}
-                  onChange={(e) =>
-                    void patchBot(bot.id, {
-                      mode: e.target.value as "paper" | "live",
-                    })
-                  }
-                  className="rounded border border-line bg-canvas px-2 py-1 text-xs"
-                >
-                  <option value="paper">paper</option>
-                  <option value="live">live</option>
-                </select>
-                <select
-                  value={bot.template || ""}
-                  disabled={Boolean(bot.backtest_id)}
-                  onChange={(e) =>
-                    void patchBot(bot.id, {
-                      template: e.target.value as StrategyTemplateId,
-                    })
-                  }
-                  className="max-w-[9rem] rounded border border-line bg-canvas px-2 py-1 text-xs"
-                >
-                  {TEMPLATE_CHOICES.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className={cn(
-                    "rounded px-2 py-1 text-xs font-medium",
-                    bot.avoid_events ? "bg-teal/20 text-teal" : "bg-fog text-slate-muted",
-                  )}
-                  onClick={() =>
-                    void patchBot(bot.id, { avoid_events: !bot.avoid_events })
-                  }
-                >
-                  {bot.avoid_events ? "Avoid evt" : "Any day"}
-                </button>
-                <label className="flex items-center gap-1 text-xs text-slate-muted">
-                  Flat≤
-                  <input
-                    type="number"
-                    min={0}
-                    max={30}
-                    defaultValue={bot.max_dte_hold ?? ""}
-                    key={`${bot.id}-dte-${bot.max_dte_hold ?? "x"}`}
-                    placeholder="—"
-                    onBlur={(e) => {
-                      const raw = e.target.value.trim();
-                      const next = raw === "" ? null : Number(raw);
-                      if (next === bot.max_dte_hold) return;
-                      if (next != null && !Number.isFinite(next)) return;
-                      void patchBot(bot.id, { max_dte_hold: next });
-                    }}
-                    className="w-12 rounded border border-line bg-canvas px-1 py-0.5 text-ink"
-                  />
-                  d
-                </label>
-                {bot.open_position ? (
-                  <button
-                    type="button"
-                    className="rounded px-2 py-1 text-xs font-medium bg-rose/15 text-rose"
-                    onClick={() => {
-                      if (
-                        !window.confirm(
-                          `Clear tracked OPEN book for “${bot.name}”?\n\nOnly clears Lab tracking — does not place broker exits.`,
-                        )
-                      ) {
-                        return;
+
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className={cn(rowClass, "min-w-0")}>
+                    <span className={tagClass}>Window</span>
+                    <label className={labelClass}>
+                      <input
+                        type="time"
+                        defaultValue={bot.schedule?.window_start ?? "09:15"}
+                        key={`${bot.id}-ws-${bot.schedule?.window_start ?? "x"}`}
+                        onBlur={(e) => {
+                          const next = e.target.value || "09:15";
+                          if (next === (bot.schedule?.window_start ?? "09:15")) return;
+                          void patchBot(bot.id, {
+                            schedule: {
+                              ...(bot.schedule ?? {}),
+                              window_start: next,
+                              window_end: bot.schedule?.window_end ?? "15:30",
+                              days: bot.schedule?.days ?? [0, 1, 2, 3, 4],
+                            },
+                          });
+                        }}
+                        className={fieldTimeClass}
+                      />
+                      <span>–</span>
+                      <input
+                        type="time"
+                        defaultValue={bot.schedule?.window_end ?? "15:30"}
+                        key={`${bot.id}-we-${bot.schedule?.window_end ?? "x"}`}
+                        onBlur={(e) => {
+                          const next = e.target.value || "15:30";
+                          if (next === (bot.schedule?.window_end ?? "15:30")) return;
+                          void patchBot(bot.id, {
+                            schedule: {
+                              ...(bot.schedule ?? {}),
+                              window_end: next,
+                              window_start: bot.schedule?.window_start ?? "09:15",
+                              days: bot.schedule?.days ?? [0, 1, 2, 3, 4],
+                            },
+                          });
+                        }}
+                        className={fieldTimeClass}
+                      />
+                      <span>IST</span>
+                    </label>
+                  </div>
+                  <div className={cn(rowClass, "sm:justify-end")}>
+                    {bot.open_position ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="danger"
+                        icon={<CloseIcon />}
+                        className={btnAlignClass}
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              `Clear tracked OPEN book for “${bot.name}”?\n\nOnly clears Lab tracking — does not place broker exits.`,
+                            )
+                          ) {
+                            return;
+                          }
+                          void patchBot(bot.id, { clear_open_position: true });
+                        }}
+                      >
+                        Clear OPEN
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      icon={bot.enabled && !bot.kill ? <PlayIcon /> : <PauseIcon />}
+                      className={cn(
+                        btnAlignClass,
+                        bot.enabled && !bot.kill
+                          ? "border-teal/40 bg-teal/10 text-teal hover:border-teal/55 hover:bg-teal/20"
+                          : undefined,
+                      )}
+                      onClick={() =>
+                        void patchBot(bot.id, {
+                          enabled: !bot.enabled,
+                          kill: false,
+                        })
                       }
-                      void patchBot(bot.id, { clear_open_position: true });
-                    }}
+                    >
+                      {bot.enabled && !bot.kill ? "Armed" : "Disarmed"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      icon={<StopIcon />}
+                      className={cn(
+                        btnAlignClass,
+                        bot.kill
+                          ? "border-rose/40 bg-rose/10 text-rose hover:border-rose/55 hover:bg-rose/15"
+                          : undefined,
+                      )}
+                      onClick={() => void patchBot(bot.id, { kill: !bot.kill })}
+                    >
+                      {bot.kill ? "Killed" : "Kill"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      icon={<PlayIcon />}
+                      className={btnAlignClass}
+                      disabled={busyId === bot.id || Boolean(bot.kill)}
+                      onClick={() => void runOnce(bot)}
+                    >
+                      {busyId === bot.id ? "Running…" : "Run once"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="danger"
+                      icon={<TrashIcon />}
+                      className={btnAlignClass}
+                      onClick={async () => {
+                        const token = await getAccessToken();
+                        if (!token) return;
+                        await deleteOptionsLabBot(token, bot.id);
+                        await refresh();
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+
+                <div className={cn(rowClass, "border-t border-line/60 pt-2")}>
+                  <select
+                    value={bot.mode}
+                    onChange={(e) =>
+                      void patchBot(bot.id, {
+                        mode: e.target.value as "paper" | "live",
+                      })
+                    }
+                    className={fieldClass}
                   >
-                    Clear OPEN
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  className={cn(
-                    "rounded px-2 py-1 text-xs font-medium",
-                    bot.enabled && !bot.kill
-                      ? "bg-teal/20 text-teal"
-                      : "bg-fog text-slate-muted",
-                  )}
-                  onClick={() =>
-                    void patchBot(bot.id, {
-                      enabled: !bot.enabled,
-                      kill: false,
-                    })
-                  }
-                >
-                  {bot.enabled && !bot.kill ? "Armed" : "Disarmed"}
-                </button>
-                <button
-                  type="button"
-                  className={cn(
-                    "rounded px-2 py-1 text-xs font-medium",
-                    bot.kill ? "bg-rose/20 text-rose" : "bg-fog text-slate-muted",
-                  )}
-                  onClick={() => void patchBot(bot.id, { kill: !bot.kill })}
-                >
-                  {bot.kill ? "Killed" : "Kill"}
-                </button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={busyId === bot.id || Boolean(bot.kill)}
-                  onClick={() => void runOnce(bot)}
-                >
-                  {busyId === bot.id ? "Running…" : "Run once"}
-                </Button>
-                <button
-                  type="button"
-                  className="text-xs text-rose hover:underline"
-                  onClick={async () => {
-                    const token = await getAccessToken();
-                    if (!token) return;
-                    await deleteOptionsLabBot(token, bot.id);
-                    await refresh();
-                  }}
-                >
-                  Delete
-                </button>
-              </div>
-              </div>
-              <div className="flex w-full flex-wrap items-center gap-2 border-t border-line/60 pt-2 text-xs text-slate-muted">
-                <span className="font-medium text-ink">Entry</span>
-                <label className="flex items-center gap-1">
-                  IVP≥
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    defaultValue={bot.entry?.min_ivp ?? ""}
-                    key={`${bot.id}-minivp-${bot.entry?.min_ivp ?? "x"}`}
-                    placeholder="—"
-                    onBlur={(e) => {
-                      const raw = e.target.value.trim();
-                      const next = raw === "" ? null : Number(raw);
-                      if (next === (bot.entry?.min_ivp ?? null)) return;
+                    <option value="paper">paper</option>
+                    <option value="live">live</option>
+                  </select>
+                  <select
+                    value={bot.template || ""}
+                    disabled={Boolean(bot.backtest_id)}
+                    onChange={(e) =>
                       void patchBot(bot.id, {
-                        entry: { ...(bot.entry ?? {}), min_ivp: next },
-                      });
-                    }}
-                    className="w-12 rounded border border-line bg-canvas px-1 py-0.5 text-ink"
-                  />
-                </label>
-                <label className="flex items-center gap-1">
-                  enter≤
-                  <input
-                    type="number"
-                    min={0}
-                    max={45}
-                    defaultValue={bot.entry?.max_dte ?? ""}
-                    key={`${bot.id}-maxdte-${bot.entry?.max_dte ?? "x"}`}
-                    placeholder="—"
-                    onBlur={(e) => {
-                      const raw = e.target.value.trim();
-                      const next = raw === "" ? null : Number(raw);
-                      if (next === (bot.entry?.max_dte ?? null)) return;
-                      void patchBot(bot.id, {
-                        entry: { ...(bot.entry ?? {}), max_dte: next },
-                      });
-                    }}
-                    className="w-12 rounded border border-line bg-canvas px-1 py-0.5 text-ink"
-                  />
-                  d
-                </label>
-                <span className="ml-1 font-medium text-ink">Window</span>
-                <input
-                  type="time"
-                  defaultValue={bot.schedule?.window_start ?? "09:15"}
-                  key={`${bot.id}-ws-${bot.schedule?.window_start ?? "x"}`}
-                  onBlur={(e) => {
-                    const next = e.target.value || "09:15";
-                    if (next === (bot.schedule?.window_start ?? "09:15")) return;
-                    void patchBot(bot.id, {
-                      schedule: {
-                        ...(bot.schedule ?? {}),
-                        window_start: next,
-                        window_end: bot.schedule?.window_end ?? "15:30",
-                        days: bot.schedule?.days ?? [0, 1, 2, 3, 4],
-                      },
-                    });
-                  }}
-                  className="rounded border border-line bg-canvas px-1 py-0.5 text-ink"
-                />
-                <span>–</span>
-                <input
-                  type="time"
-                  defaultValue={bot.schedule?.window_end ?? "15:30"}
-                  key={`${bot.id}-we-${bot.schedule?.window_end ?? "x"}`}
-                  onBlur={(e) => {
-                    const next = e.target.value || "15:30";
-                    if (next === (bot.schedule?.window_end ?? "15:30")) return;
-                    void patchBot(bot.id, {
-                      schedule: {
-                        ...(bot.schedule ?? {}),
-                        window_end: next,
-                        window_start: bot.schedule?.window_start ?? "09:15",
-                        days: bot.schedule?.days ?? [0, 1, 2, 3, 4],
-                      },
-                    });
-                  }}
-                  className="rounded border border-line bg-canvas px-1 py-0.5 text-ink"
-                />
-                <span className="text-[10px] text-slate-muted">IST · Mon–Fri default</span>
+                        template: e.target.value as StrategyTemplateId,
+                      })
+                    }
+                    className={cn(fieldClass, "max-w-[9rem] disabled:opacity-50")}
+                  >
+                    {TEMPLATE_CHOICES.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    icon={<BellIcon />}
+                    className={cn(
+                      btnAlignClass,
+                      bot.avoid_events
+                        ? "border-teal/40 bg-teal/10 text-teal hover:border-teal/55 hover:bg-teal/20"
+                        : undefined,
+                    )}
+                    onClick={() =>
+                      void patchBot(bot.id, { avoid_events: !bot.avoid_events })
+                    }
+                  >
+                    {bot.avoid_events ? "Avoid evt" : "Any day"}
+                  </Button>
+                  <label className={labelClass}>
+                    Flat≤
+                    <input
+                      type="number"
+                      min={0}
+                      max={30}
+                      defaultValue={bot.max_dte_hold ?? ""}
+                      key={`${bot.id}-dte-${bot.max_dte_hold ?? "x"}`}
+                      placeholder="—"
+                      onBlur={(e) => {
+                        const raw = e.target.value.trim();
+                        const next = raw === "" ? null : Number(raw);
+                        if (next === bot.max_dte_hold) return;
+                        if (next != null && !Number.isFinite(next)) return;
+                        void patchBot(bot.id, { max_dte_hold: next });
+                      }}
+                      className={fieldNarrowClass}
+                    />
+                    d
+                  </label>
+                  <span className="mx-1 hidden h-4 w-px shrink-0 bg-line sm:block" aria-hidden />
+                  <span className={tagClass}>Entry</span>
+                  <label className={labelClass}>
+                    IVP≥
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      defaultValue={bot.entry?.min_ivp ?? ""}
+                      key={`${bot.id}-minivp-${bot.entry?.min_ivp ?? "x"}`}
+                      placeholder="—"
+                      onBlur={(e) => {
+                        const raw = e.target.value.trim();
+                        const next = raw === "" ? null : Number(raw);
+                        if (next === (bot.entry?.min_ivp ?? null)) return;
+                        void patchBot(bot.id, {
+                          entry: { ...(bot.entry ?? {}), min_ivp: next },
+                        });
+                      }}
+                      className={fieldNarrowClass}
+                    />
+                  </label>
+                  <label className={labelClass}>
+                    enter≤
+                    <input
+                      type="number"
+                      min={0}
+                      max={45}
+                      defaultValue={bot.entry?.max_dte ?? ""}
+                      key={`${bot.id}-maxdte-${bot.entry?.max_dte ?? "x"}`}
+                      placeholder="—"
+                      onBlur={(e) => {
+                        const raw = e.target.value.trim();
+                        const next = raw === "" ? null : Number(raw);
+                        if (next === (bot.entry?.max_dte ?? null)) return;
+                        void patchBot(bot.id, {
+                          entry: { ...(bot.entry ?? {}), max_dte: next },
+                        });
+                      }}
+                      className={fieldNarrowClass}
+                    />
+                    d
+                  </label>
+                </div>
               </div>
             </li>
           ))}

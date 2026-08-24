@@ -34,8 +34,8 @@ export function OptionsLabFlowsPanel({
 
   return (
     <div className="flex flex-col gap-4 pt-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-slate-muted">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="min-w-0 flex-1 text-sm text-slate-muted">
           NSE FII / DII net (₹ crores). Session keeps a multi-day series when you refresh
           (Mock seeds a short history). Independent of Signal Engine Start.
         </p>
@@ -43,6 +43,7 @@ export function OptionsLabFlowsPanel({
           type="button"
           size="sm"
           variant="secondary"
+          className="ml-auto shrink-0"
           icon={<RefreshIcon />}
           disabled={loading}
           onClick={onRefresh}

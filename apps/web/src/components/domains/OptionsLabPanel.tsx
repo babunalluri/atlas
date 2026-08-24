@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { OptionsLabPortfoliosPanel } from "@/components/domains/OptionsLabPortfoliosPanel";
+import { OptionsLabAutomationsPanel } from "@/components/domains/OptionsLabAutomationsPanel";
 import { OptionsLabBacktestPanel } from "@/components/domains/OptionsLabBacktestPanel";
 import { OptionsLabFlowsPanel } from "@/components/domains/OptionsLabFlowsPanel";
 import { OptionsLabIdeasPanel } from "@/components/domains/OptionsLabIdeasPanel";
@@ -26,6 +27,7 @@ import {
   CloseIcon,
   HistoryIcon,
   LayersIcon,
+  PlayIcon,
   RefreshIcon,
   SearchIcon,
 } from "@/components/ui/icons";
@@ -50,7 +52,15 @@ const SCREENER_POLL_MS = 60_000;
 const WING_OPTIONS = [10, 15, 20] as const;
 /** Left analysis pane — market read before building. */
 type AnalysisPane = "quotes" | "oi" | "straddle" | "iv";
-type DeskOverlay = null | "screener" | "books" | "heatmap" | "flows" | "backtest" | "ideas";
+type DeskOverlay =
+  | null
+  | "screener"
+  | "books"
+  | "heatmap"
+  | "flows"
+  | "backtest"
+  | "bots"
+  | "ideas";
 
 type PendingPortfolioSave = {
   name: string;
@@ -704,6 +714,14 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
               Backtest
             </Button>
             <Button
+              variant={overlay === "bots" ? "primary" : "secondary"}
+              size="sm"
+              icon={<PlayIcon />}
+              onClick={() => setOverlay((prev) => (prev === "bots" ? null : "bots"))}
+            >
+              Bot
+            </Button>
+            <Button
               variant={overlay === "books" ? "primary" : "secondary"}
               size="sm"
               icon={<BookIcon />}
@@ -1093,14 +1111,17 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                       ? "Ideas"
                       : overlay === "backtest"
                         ? "Backtest"
-                        : "Books"
+                        : overlay === "bots"
+                          ? "Bot"
+                          : "Books"
             }
             className={cn(
               "relative z-10 flex h-full w-full flex-col border-l border-line bg-canvas shadow-xl",
               overlay === "screener" ||
                 overlay === "heatmap" ||
                 overlay === "ideas" ||
-                overlay === "backtest"
+                overlay === "backtest" ||
+                overlay === "bots"
                 ? "max-w-5xl"
                 : "max-w-3xl",
             )}
@@ -1118,6 +1139,8 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                   <BuildingIcon className="h-4 w-4" />
                 ) : overlay === "backtest" ? (
                   <HistoryIcon className="h-4 w-4" />
+                ) : overlay === "bots" ? (
+                  <PlayIcon className="h-4 w-4" />
                 ) : (
                   <BookIcon className="h-4 w-4" />
                 )}
@@ -1131,7 +1154,9 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                         ? "Ideas"
                         : overlay === "backtest"
                           ? "Backtest"
-                          : "Books"}
+                          : overlay === "bots"
+                            ? "Bot"
+                            : "Books"}
               </h2>
               <button
                 type="button"
@@ -1195,6 +1220,8 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                   futSymbol={config?.fut_symbol ?? snapshot?.fut_symbol}
                   handoffHint={backtestHandoffHint}
                 />
+              ) : overlay === "bots" ? (
+                <OptionsLabAutomationsPanel />
               ) : overlay === "flows" ? (
                 <OptionsLabFlowsPanel
                   snapshot={flows}

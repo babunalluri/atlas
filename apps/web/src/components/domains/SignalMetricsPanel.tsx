@@ -907,33 +907,44 @@ export function SignalMetricsPanel({
     if (!isLoaded || !isSignedIn) return;
 
     const controller = new AbortController();
-    setStreaming(true);
+    let cancelled = false;
 
     void (async () => {
-      try {
-        const token = await getAccessToken();
-        if (!token || !mounted.current) return;
-        await streamSignalState({
-          accessToken: token,
-          signal: controller.signal,
-          onState: (data) => {
-            if (mounted.current) {
-              setState(data);
-              setError(null);
-            }
-          },
-        });
-      } catch (err) {
-        if (!mounted.current || controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "Signal stream failed");
-        setStreaming(false);
-        void refreshOnce();
-      } finally {
-        if (mounted.current) setStreaming(false);
+      let backoffMs = 500;
+      while (!cancelled && mounted.current) {
+        setStreaming(true);
+        try {
+          const token = await getAccessToken();
+          if (!token || cancelled || !mounted.current) return;
+          await streamSignalState({
+            accessToken: token,
+            signal: controller.signal,
+            onState: (data) => {
+              if (mounted.current) {
+                setState(data);
+                setError(null);
+                setStreaming(true);
+              }
+            },
+          });
+          // Clean close — reconnect promptly.
+          backoffMs = 500;
+        } catch (err) {
+          if (!mounted.current || cancelled || controller.signal.aborted) return;
+          setError(err instanceof Error ? err.message : "Signal stream failed");
+          setStreaming(false);
+          void refreshOnce();
+        } finally {
+          if (mounted.current && !cancelled) setStreaming(false);
+        }
+        if (cancelled || controller.signal.aborted || !mounted.current) return;
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        backoffMs = Math.min(backoffMs * 2, 8_000);
       }
     })();
 
     return () => {
+      cancelled = true;
       mounted.current = false;
       controller.abort();
     };

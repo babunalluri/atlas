@@ -1,0 +1,4 @@
+# Keep this folder; never commit private keys or certs.
+*
+!.gitignore
+!README.md

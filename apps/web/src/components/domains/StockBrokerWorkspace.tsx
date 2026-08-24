@@ -5,7 +5,6 @@ import { useEffect, useState } from "react";
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
-import { OptionsLabAutomationsPanel } from "@/components/domains/OptionsLabAutomationsPanel";
 import { OptionsLabPanel } from "@/components/domains/OptionsLabPanel";
 import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
@@ -17,7 +16,7 @@ import { cn } from "@/lib/utils";
 const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
 const DESK_MAIN_TAB_KEY = "atlas-desk-main-tab";
 
-type DeskMainTab = "signals" | "options-lab" | "automations";
+type DeskMainTab = "signals" | "options-lab";
 
 function useDeskMainTab() {
   const [tab, setTabState] = useState<DeskMainTab>("signals");
@@ -25,8 +24,12 @@ function useDeskMainTab() {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DESK_MAIN_TAB_KEY);
-      if (stored === "options-lab" || stored === "signals" || stored === "automations") {
+      if (stored === "options-lab" || stored === "signals") {
         setTabState(stored);
+      } else if (stored === "automations") {
+        // Former Automations desk tab → Options Lab (Bot overlay).
+        setTabState("options-lab");
+        window.localStorage.setItem(DESK_MAIN_TAB_KEY, "options-lab");
       }
     } catch {
       // private mode / blocked storage
@@ -175,7 +178,7 @@ export function StockBrokerWorkspace({
             <div
               role="tablist"
               aria-label="Trading desk views"
-              className="grid w-full shrink-0 grid-cols-3 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
+              className="grid w-full shrink-0 grid-cols-2 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
             >
               {(
                 [
@@ -187,12 +190,7 @@ export function StockBrokerWorkspace({
                   {
                     id: "options-lab" as const,
                     label: "Options Lab",
-                    hint: "Chain, builder & Greeks",
-                  },
-                  {
-                    id: "automations" as const,
-                    label: "Automations",
-                    hint: "Bots · entry & exits",
+                    hint: "Chain, builder, bots",
                   },
                 ] as const
               ).map(({ id, label, hint }) => {
@@ -232,10 +230,6 @@ export function StockBrokerWorkspace({
                   fetchedAt={data.fetched_at}
                   rangeDays={data.range_days}
                 />
-              </div>
-            ) : deskTab === "automations" ? (
-              <div className="mt-3 min-h-0 flex-1 overflow-hidden rounded-lg border border-line bg-canvas/40">
-                <OptionsLabAutomationsPanel />
               </div>
             ) : (
               <div className="mt-3 min-h-0 flex-1">

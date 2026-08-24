@@ -1,4 +1,8 @@
 .env
+# OCI / SSH private keys — never commit
+keys/*
+!keys/.gitignore
+!keys/README.md
 # No trailing slash: the repo root .venv is a symlink to apps/backend/.venv,
 # and a directory-only pattern would not match it.
 .venv

@@ -7,6 +7,8 @@ import {
   type IdeaFilters,
 } from "@/components/domains/options-lab-ideas";
 import type { StrategyTemplateId } from "@/components/domains/options-lab-strategy";
+import { Button } from "@/components/ui/Button";
+import { ExternalLinkIcon, HistoryIcon } from "@/components/ui/icons";
 import type { OptionsScreenerRow, OptionsScreenerSnapshot } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
@@ -196,21 +198,26 @@ export function OptionsLabIdeasPanel({
                 </div>
               </div>
               <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                <button
+                <Button
                   type="button"
-                  className="rounded border border-line px-2 py-1 text-xs font-medium text-ink hover:bg-raised/50"
+                  size="sm"
+                  variant="secondary"
+                  icon={<ExternalLinkIcon />}
                   onClick={() => onApplyIdea(idea.row, idea.templateId)}
                 >
                   Open
-                </button>
+                </Button>
                 {onSendToBacktest ? (
-                  <button
+                  <Button
                     type="button"
-                    className="rounded border border-teal/40 bg-teal/10 px-2 py-1 text-xs font-medium text-teal hover:bg-teal/20"
+                    size="sm"
+                    variant="secondary"
+                    className="border-teal/40 bg-teal/10 text-teal hover:border-teal/55 hover:bg-teal/20"
+                    icon={<HistoryIcon />}
                     onClick={() => onSendToBacktest(idea.row, idea.templateId)}
                   >
                     Backtest
-                  </button>
+                  </Button>
                 ) : null}
               </div>
             </li>

@@ -1435,18 +1435,18 @@ export function OptionsLabStrategyPanel({
     </div>
   );
 
-  /** Sensibull-style action strip: one compact row — funds through Buy. */
+  /** Sensibull-style action strip: pinned funds/charges + scrollable controls + Buy. */
   const tradeFooter = (
     <div className="rounded-lg border border-line bg-canvas/50 px-2.5 py-1.5">
       <div className="flex items-center gap-x-3 text-sm">
-        <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-x-3 overflow-x-auto pb-0.5">
-          <span className="shrink-0 text-slate-muted">
+        <div className="flex shrink-0 flex-nowrap items-center gap-x-3">
+          <span className="text-slate-muted">
             Funds{" "}
             <span className="font-semibold tabular-nums text-ink">
               {formatNum(displayFundsNeeded, 0)}
             </span>
           </span>
-          <span className="shrink-0 text-slate-muted">
+          <span className="text-slate-muted">
             Margin{" "}
             <span className="font-semibold tabular-nums text-ink">
               {formatNum(displayMarginNeeded, 0)}
@@ -1457,6 +1457,17 @@ export function OptionsLabStrategyPanel({
                 : "broker"}
             </span>
           </span>
+          <span
+            className="text-slate-muted"
+            title="Rough NSE F&O option charges estimate (brokerage + statutory) — not a broker invoice"
+          >
+            Charges{" "}
+            <span className="font-semibold tabular-nums text-ink">
+              {formatNum(charges?.total, 2)}
+            </span>
+          </span>
+        </div>
+        <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-x-3 overflow-x-auto pb-0.5">
           <label className="flex shrink-0 items-center gap-1.5 text-slate-muted">
             Available
             <input
@@ -1520,12 +1531,6 @@ export function OptionsLabStrategyPanel({
               className="w-12 rounded border border-line bg-canvas px-1 py-1 text-sm tabular-nums text-ink"
             />
           </label>
-          <span className="shrink-0 text-slate-muted">
-            Charges{" "}
-            <span className="font-semibold tabular-nums text-ink">
-              {formatNum(charges?.total, 2)}
-            </span>
-          </span>
         </div>
         <span className="flex shrink-0 items-center gap-2 border-l border-line pl-3">
           {pnlTable && pnlTable.spots.length > 0 ? (
