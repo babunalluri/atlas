@@ -890,7 +890,7 @@ export function SignalMetricsPanel({
   const metricsAtmAligned =
     metricsAtmHint != null &&
     Boolean(config?.underlying_symbol) &&
-    state?.underlying?.symbol === config.underlying_symbol
+    state?.underlying?.symbol === config?.underlying_symbol
       ? metricsAtmHint
       : null;
   const atmHint = metricsAtmAligned ?? screenerAtmHint;
