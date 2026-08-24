@@ -8,6 +8,7 @@ import {
   buildPresetOptions,
   buildStrikeStepOptions,
   buildUnderlyingOptions,
+  sanitizeOptionSymbol,
 } from "@/components/domains/signal-setup-options";
 import { CommonInstrumentSetupBar } from "@/components/domains/CommonInstrumentSetupBar";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
@@ -51,6 +52,9 @@ export function SignalSetupBar({
     [config?.fut_symbol],
   );
 
+  const ceValue = sanitizeOptionSymbol(config?.ce_symbol);
+  const peValue = sanitizeOptionSymbol(config?.pe_symbol);
+
   const ceOptions = useMemo(
     () =>
       buildOptionSideOptions(
@@ -58,9 +62,9 @@ export function SignalSetupBar({
         "CE",
         atmHint,
         config?.strike_step ?? 50,
-        config?.ce_symbol,
+        ceValue,
       ),
-    [atmHint, config?.ce_symbol, config?.fut_symbol, config?.strike_step],
+    [atmHint, ceValue, config?.fut_symbol, config?.strike_step],
   );
 
   const peOptions = useMemo(
@@ -70,9 +74,9 @@ export function SignalSetupBar({
         "PE",
         atmHint,
         config?.strike_step ?? 50,
-        config?.pe_symbol,
+        peValue,
       ),
-    [atmHint, config?.fut_symbol, config?.pe_symbol, config?.strike_step],
+    [atmHint, config?.fut_symbol, config?.strike_step, peValue],
   );
 
   if (loading || !config) {
@@ -92,6 +96,22 @@ export function SignalSetupBar({
     });
   }
 
+  function onFutChange(value: string) {
+    const patch: Partial<SignalEngineAdminConfig> = { fut_symbol: value };
+    // Clear CE/PE if they were wrongly set to the FUT (or any non-option).
+    if (!sanitizeOptionSymbol(config?.ce_symbol)) patch.ce_symbol = "";
+    if (!sanitizeOptionSymbol(config?.pe_symbol)) patch.pe_symbol = "";
+    patchConfig(patch);
+  }
+
+  function onCeChange(value: string) {
+    patchConfig({ ce_symbol: sanitizeOptionSymbol(value) });
+  }
+
+  function onPeChange(value: string) {
+    patchConfig({ pe_symbol: sanitizeOptionSymbol(value) });
+  }
+
   return (
     <CommonInstrumentSetupBar
       loading={loading}
@@ -101,7 +121,7 @@ export function SignalSetupBar({
       presetLocked={presetLocked}
       onPresetChange={onPresetChange}
       onUnderlyingChange={onUnderlyingChange}
-      onFutChange={(value) => patchConfig({ fut_symbol: value })}
+      onFutChange={onFutChange}
       onStrikeStepChange={(value) =>
         patchConfig({ strike_step: Number(value) || 50 })
       }
@@ -130,15 +150,15 @@ export function SignalSetupBar({
               <SearchableSelect
                 id="signal-ce"
                 className="tnum"
-                value={config?.ce_symbol ?? ""}
-                onChange={(value) => patchConfig({ ce_symbol: value })}
+                value={ceValue}
+                onChange={onCeChange}
                 options={ceOptions}
                 allowCustom
-                placeholder="CE…"
+                placeholder="CE option…"
                 emptyMessage={
                   atmHint != null
-                    ? "Type CE symbol or pick ATM strike"
-                    : "Set FUT and start engine for ATM suggestions"
+                    ? "Pick ATM CE (…CE), not FUT"
+                    : "Set FUT and start engine for ATM CE suggestions"
                 }
               />
             </div>
@@ -151,15 +171,15 @@ export function SignalSetupBar({
               <SearchableSelect
                 id="signal-pe"
                 className="tnum"
-                value={config?.pe_symbol ?? ""}
-                onChange={(value) => patchConfig({ pe_symbol: value })}
+                value={peValue}
+                onChange={onPeChange}
                 options={peOptions}
                 allowCustom
-                placeholder="PE…"
+                placeholder="PE option…"
                 emptyMessage={
                   atmHint != null
-                    ? "Type PE symbol or pick ATM strike"
-                    : "Set FUT and start engine for ATM suggestions"
+                    ? "Pick ATM PE (…PE), not FUT"
+                    : "Set FUT and start engine for ATM PE suggestions"
                 }
               />
             </div>

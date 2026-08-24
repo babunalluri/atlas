@@ -13,11 +13,13 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.domains import options_lab_cache as ol_cache
 from app.domains.kite_ticker_hub import quote_source_for_tenant
 from app.domains.signal_engine import (
     SignalEngineService,
     UNDERLYING_PRESETS,
+    _broker_auth_warning,
     _cache_get,
     _cache_set,
     _find_quote_row,
@@ -53,10 +55,16 @@ from app.domains.signal_engine_chain import (
     strike_ladder,
 )
 
+logger = get_logger(__name__)
+
 DEFAULT_WINGS = 15
 MIN_WINGS = 5
 MAX_WINGS = 25
 SCREENER_WINGS = 5
+# Equities: lighter chain for enrich pass (ATM ±2 → 5 strikes × CE/PE).
+SCREENER_WINGS_EQUITY = 2
+# Cap live equity/all scans so cold opens stay responsive.
+SCREENER_EQUITY_CAP = 20
 # Keep enough intra-session detail while avoiding huge write amplification.
 STRADDLE_HISTORY_MAX = 480  # ~8m at 1 point/s per strike (fetched_at is whole seconds)
 STRADDLE_HISTORY_RESPONSE_MAX = 600  # chart-facing payload cap
@@ -89,9 +97,13 @@ MONTH_CODES = (
 FUT_ROOT_BY_UNDERLYING: dict[str, tuple[str, str]] = {
     "NSE:NIFTY 50": ("NFO", "NIFTY"),
     "NSE:NIFTY": ("NFO", "NIFTY"),
+    "NSE:NIFTY BANK": ("NFO", "BANKNIFTY"),
     "NSE:BANKNIFTY": ("NFO", "BANKNIFTY"),
+    "NSE:NIFTY FIN SERVICE": ("NFO", "FINNIFTY"),
     "NSE:FINNIFTY": ("NFO", "FINNIFTY"),
+    "NSE:NIFTY NEXT 50": ("NFO", "NIFTYNXT50"),
     "NSE:NIFTYNXT50": ("NFO", "NIFTYNXT50"),
+    "NSE:NIFTY MID SELECT": ("NFO", "MIDCPNIFTY"),
     "NSE:MIDCPNIFTY": ("NFO", "MIDCPNIFTY"),
     "BSE:SENSEX": ("BFO", "SENSEX"),
 }
@@ -412,6 +424,7 @@ def compose_screener_row(
         "underlying_symbol": symbol,
         "underlying_label": label,
         "fut_symbol": fut_symbol,
+        "strike_step": int(preset.get("strike_step") or 50),
         "spot": round(spot, 2) if spot is not None else None,
         "atm": atm,
         "atm_iv": atm_metrics["atm_iv"],
@@ -926,7 +939,11 @@ async def chain_state_for_stream(
             )
             if snapshot is not None:
                 return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
-            payload = await service.chain_snapshot(wings=wings)
+            # Shield + bound wait: SSE reconnects must not orphan sandbox work.
+            payload = await asyncio.wait_for(
+                asyncio.shield(service.chain_snapshot(wings=wings)),
+                timeout=60.0,
+            )
             await ol_cache.set_snapshot(
                 tenant_id, payload, wings=wings, fingerprint=fingerprint
             )
@@ -1209,10 +1226,20 @@ class OptionsLabService:
         warnings: list[str] = []
         if not team_ready:
             warnings.append("Publish the Signals ops team and bind Kite toolkit.")
-        if not config.fut_symbol:
-            warnings.append("Set FUT symbol in Options Lab setup (e.g. NFO:NIFTY26AUGFUT).")
         if not config.underlying_symbol:
             warnings.append("Select an underlying in Options Lab setup.")
+        if not config.fut_symbol and config.underlying_symbol:
+            suggested = suggest_fut_symbol(config.underlying_symbol)
+            if suggested:
+                config.fut_symbol = suggested
+            else:
+                warnings.append(
+                    "Set FUT symbol in Options Lab setup (e.g. NFO:NIFTY26AUGFUT)."
+                )
+        elif not config.fut_symbol:
+            warnings.append(
+                "Set FUT symbol in Options Lab setup (e.g. NFO:NIFTY26AUGFUT)."
+            )
 
         if config.mock:
             payload = mock_chain_snapshot(config, wings=wings)
@@ -1231,7 +1258,8 @@ class OptionsLabService:
                 "strike_step": config.strike_step,
             }
 
-        if not config.fut_symbol or not config.underlying_symbol:
+        fut_symbol = config.fut_symbol
+        if not fut_symbol or not config.underlying_symbol:
             return {
                 "ok": False,
                 "error": "Configure underlying and FUT symbol in Options Lab setup first.",
@@ -1247,18 +1275,20 @@ class OptionsLabService:
         spot_row = _find_quote_row(spot_quotes, config.underlying_symbol)
         spot = _pick_float(spot_row or {}, "last_price", "ltp", "last")
         if spot is None:
+            auth = _broker_auth_warning(getattr(self.engine, "_last_quote_error", None))
             return {
                 "ok": False,
-                "error": f"No live quote for {config.underlying_symbol}.",
+                "error": auth
+                or f"No live quote for {config.underlying_symbol}.",
                 "warnings": warnings,
                 "wings": wings,
                 "underlying_symbol": config.underlying_symbol,
-                "fut_symbol": config.fut_symbol,
+                "fut_symbol": fut_symbol,
             }
 
         atm = _round_strike(spot, config.strike_step)
         strikes, ce_syms, pe_syms = build_chain_symbols(
-            config.fut_symbol,
+            fut_symbol,
             atm,
             config.strike_step,
             wings,
@@ -1311,29 +1341,50 @@ class OptionsLabService:
         await _cache_set(tenant_id, cache_key, "broker", payload)
         return await self._finalize_payload(payload, config)
 
-    async def screener_snapshot(self, *, universe: str = "indices") -> dict[str, Any]:
+    async def screener_snapshot(
+        self,
+        *,
+        universe: str = "indices",
+        mode: str = "full",
+    ) -> dict[str, Any]:
         universe = universe if universe in {"indices", "equities", "all"} else "indices"
+        mode = mode if mode in {"fast", "full"} else "full"
         config = await self._read_config()
         tenant_id = _tenant_key(self.context)
-        cache_key = f"options_lab:screener:{universe}:{int(config.mock)}"
-        cached = await _cache_get(tenant_id, cache_key)
-        if isinstance(cached, dict) and cached.get("ok"):
+
+        async def _from_cached(cached: dict[str, Any]) -> dict[str, Any]:
             if cached.get("mock"):
                 return cached
             baselines = await load_screener_baselines(tenant_id)
             rows = cached.get("rows") or []
             rows_with_deltas = apply_screener_session_deltas(list(rows), baselines)
-            rows_with_deltas = await apply_screener_ivp(tenant_id, rows_with_deltas)
+            if not cached.get("partial"):
+                rows_with_deltas = await apply_screener_ivp(tenant_id, rows_with_deltas)
             return {
                 **cached,
                 "rows": rows_with_deltas,
             }
 
+        # Prefer warm full snapshot on fast opens so a stale partial cache cannot
+        # hide an already-enriched board (stale-while-revalidate).
+        if mode == "fast":
+            full_key = f"options_lab:screener:{universe}:full:{int(config.mock)}"
+            full_cached = await _cache_get(tenant_id, full_key)
+            if isinstance(full_cached, dict) and full_cached.get("ok"):
+                return await _from_cached(full_cached)
+
+        cache_key = f"options_lab:screener:{universe}:{mode}:{int(config.mock)}"
+        cached = await _cache_get(tenant_id, cache_key)
+        if isinstance(cached, dict) and cached.get("ok"):
+            return await _from_cached(cached)
+
         equity_presets, equity_meta = await self._equity_presets()
         presets = screener_presets(universe, equity_presets=equity_presets)
-        # Equities screener can be large — cap live scan for broker quote budget.
-        if universe in {"equities", "all"} and len(presets) > 40:
-            presets = presets[:40]
+        presets_total = len(presets)
+        truncated = False
+        if universe in {"equities", "all"} and presets_total > SCREENER_EQUITY_CAP:
+            presets = presets[:SCREENER_EQUITY_CAP]
+            truncated = True
         _, has_broker, team_ready = await self.engine._load_setup()
         warnings: list[str] = []
         if not team_ready:
@@ -1343,27 +1394,47 @@ class OptionsLabService:
                 "Equity list from seed — republish kite_toolkit with get_instruments "
                 "for full NFO underlyings."
             )
+        if truncated:
+            warnings.append(
+                f"Showing first {SCREENER_EQUITY_CAP} of {presets_total} names "
+                "(live quote budget). Use Indices or Equities for a focused list."
+            )
+        if mode == "fast":
+            warnings.append("Fast scan — spot/ATM only; metrics enriching…")
 
         if config.mock:
             payload = {
                 "ok": True,
                 "mock": True,
                 "universe": universe,
+                "mode": mode,
+                "partial": mode == "fast",
                 "fetched_at": int(time.time()),
                 "warnings": warnings,
                 "rows": mock_screener_rows(presets),
             }
-            tenant_id = _tenant_key(self.context)
-            for row in payload["rows"]:
-                if row.get("error") or row.get("atm_iv") is None:
-                    continue
-                symbol = str(row.get("underlying_symbol") or "")
-                row["ivp"] = await ivp_for_symbol(
-                    tenant_id,
-                    symbol,
-                    row.get("atm_iv"),
-                    mock=True,
-                )
+            if mode == "fast":
+                for row in payload["rows"]:
+                    row["atm_iv"] = None
+                    row["straddle"] = None
+                    row["pcr"] = None
+                    row["max_pain"] = None
+                    row["chain_ce_oi"] = None
+                    row["chain_pe_oi"] = None
+                    row["oi_pct_chg"] = None
+                    row["iv_chg"] = None
+                    row["ivp"] = None
+            else:
+                for row in payload["rows"]:
+                    if row.get("error") or row.get("atm_iv") is None:
+                        continue
+                    symbol = str(row.get("underlying_symbol") or "")
+                    row["ivp"] = await ivp_for_symbol(
+                        tenant_id,
+                        symbol,
+                        row.get("atm_iv"),
+                        mock=True,
+                    )
             await _cache_set(tenant_id, cache_key, "medium", payload)
             return payload
 
@@ -1372,6 +1443,8 @@ class OptionsLabService:
                 "ok": False,
                 "error": "Kite (or broker) quotes not bound on Signals ops team.",
                 "universe": universe,
+                "mode": mode,
+                "partial": mode == "fast",
                 "warnings": warnings,
             }
 
@@ -1401,6 +1474,13 @@ class OptionsLabService:
                     "symbol": symbol,
                     "fut": fut,
                     "strike_step": max(1, int(preset.get("strike_step") or 50)),
+                    # M6: key wings off each preset, not the request universe
+                    # (universe=all must not shrink index chains to ±2).
+                    "wings": (
+                        SCREENER_WINGS_EQUITY
+                        if str(preset.get("universe") or "").lower() == "equities"
+                        else SCREENER_WINGS
+                    ),
                 }
             )
             spot_symbols.append(symbol)
@@ -1410,14 +1490,18 @@ class OptionsLabService:
                 "ok": True,
                 "mock": False,
                 "universe": universe,
+                "mode": mode,
+                "partial": mode == "fast",
                 "fetched_at": int(time.time()),
                 "warnings": warnings,
                 "rows": errors,
             }
 
+        # Spots: prefer LTP for speed on the fast path; full uses get_quote.
+        spot_prefer = "get_ltp" if mode == "fast" else "get_quote"
         spot_quotes = await self.engine._fetch_quote(
             list(dict.fromkeys(spot_symbols)),
-            prefer="get_quote",
+            prefer=spot_prefer,
         )
 
         prepared: list[dict[str, Any]] = []
@@ -1444,11 +1528,26 @@ class OptionsLabService:
                 )
                 continue
             atm = _round_strike(spot, strike_step)
+            if mode == "fast":
+                prepared.append(
+                    {
+                        "preset": preset,
+                        "symbol": symbol,
+                        "fut": fut,
+                        "spot": spot,
+                        "atm": atm,
+                        "strikes": [],
+                        "ce_syms": [],
+                        "pe_syms": [],
+                    }
+                )
+                continue
+            plan_wings = int(plan.get("wings") or SCREENER_WINGS)
             strikes, ce_syms, pe_syms = build_chain_symbols(
                 fut,
                 atm,
                 strike_step,
-                SCREENER_WINGS,
+                plan_wings,
             )
             if not ce_syms:
                 errors.append(
@@ -1478,11 +1577,18 @@ class OptionsLabService:
             option_symbols.extend(ce_syms)
             option_symbols.extend(pe_syms)
 
-        all_symbols = list(dict.fromkeys(option_symbols))
         quotes = dict(spot_quotes)
-        if all_symbols:
-            more = await self.engine._fetch_quote(all_symbols, prefer="get_quote")
-            quotes.update(more)
+        if mode == "full":
+            all_symbols = list(dict.fromkeys(option_symbols))
+            # Chunk by underlying-sized batches so a sandbox timeout / URL limit
+            # cannot silently drop every NFO strike while BFO rows linger in the
+            # REST quote book from an earlier Options Lab session.
+            chunk_size = 44  # ~one index ladder (11 strikes × CE/PE)
+            for start in range(0, len(all_symbols), chunk_size):
+                batch = all_symbols[start : start + chunk_size]
+                more = await self.engine._fetch_quote(batch, prefer="get_quote")
+                if more:
+                    quotes.update(more)
 
         baseline_entries: dict[str, dict[str, float | None]] = {}
         rows_out: list[dict[str, Any]] = list(errors)
@@ -1491,6 +1597,18 @@ class OptionsLabService:
             preset = item["preset"]
             symbol = item["symbol"]
             fut = item["fut"]
+            if mode == "fast":
+                rows_out.append(
+                    compose_screener_row(
+                        preset,
+                        spot=item["spot"],
+                        atm=item["atm"],
+                        fut_symbol=fut,
+                        summary={},
+                        rows=[],
+                    )
+                )
+                continue
             summary = chain_metrics_from_quotes(
                 quotes,
                 find_row=_find_quote_row,
@@ -1506,6 +1624,22 @@ class OptionsLabService:
                 atm=item["atm"],
             )
             atm_metrics = _atm_metrics_from_rows(chain_rows)
+            row_error: str | None = None
+            ce_oi = float(summary.get("chain_ce_oi") or 0)
+            pe_oi = float(summary.get("chain_pe_oi") or 0)
+            if not summary or (ce_oi <= 0 and pe_oi <= 0):
+                sample = (item["ce_syms"][0] if item["ce_syms"] else fut) or symbol
+                row_error = (
+                    f"No option OI for {fut or symbol} "
+                    f"(sample {sample}) — check FUT expiry / NFO symbol"
+                )
+                logger.warning(
+                    "screener_chain_quotes_missing",
+                    underlying=symbol,
+                    fut=fut,
+                    sample=sample,
+                    quote_keys=len(quotes),
+                )
             baseline_entries[symbol] = {
                 "atm_iv": atm_metrics["atm_iv"],
                 "chain_ce_oi": summary.get("chain_ce_oi"),
@@ -1519,17 +1653,23 @@ class OptionsLabService:
                     fut_symbol=fut,
                     summary=summary,
                     rows=chain_rows,
+                    error=row_error,
                 )
             )
 
-        baselines = await ensure_screener_baselines(tenant_id, baseline_entries)
-        rows_with_deltas = apply_screener_session_deltas(rows_out, baselines)
-        rows_with_deltas = await apply_screener_ivp(tenant_id, rows_with_deltas)
+        if mode == "full":
+            baselines = await ensure_screener_baselines(tenant_id, baseline_entries)
+            rows_with_deltas = apply_screener_session_deltas(rows_out, baselines)
+            rows_with_deltas = await apply_screener_ivp(tenant_id, rows_with_deltas)
+        else:
+            rows_with_deltas = rows_out
 
         payload = {
             "ok": True,
             "mock": False,
             "universe": universe,
+            "mode": mode,
+            "partial": mode == "fast",
             "fetched_at": int(time.time()),
             "warnings": warnings,
             "rows": rows_with_deltas,

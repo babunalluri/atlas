@@ -209,6 +209,39 @@ async def test_fetch_quote_overlays_ticker_on_rest(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_quote_reuses_rest_seeded_book(monkeypatch) -> None:
+    """Screener batch seeds per-symbol book; single-symbol get_quote must reuse it."""
+    from app.domains.kite_ticker_hub import write_rest_quote_book
+    from app.domains.signal_engine import SignalEngineService
+
+    tenant = "tenant-book-reuse"
+    symbols = ["NSE:NIFTY 50"]
+    await write_rest_quote_book(
+        tenant,
+        {
+            "NSE:NIFTY 50": {
+                "last_price": 24163.65,
+                "ohlc": {"open": 24100.0, "high": 24200.0, "low": 24050.0, "close": 24150.0},
+                "instrument_token": 256265,
+            }
+        },
+    )
+
+    class _Ctx:
+        tenant_id = tenant
+
+    service = SignalEngineService.__new__(SignalEngineService)
+    service.context = _Ctx()  # type: ignore[assignment]
+
+    async def _boom_tools():
+        raise AssertionError("sandbox must not be called when REST book has ohlc")
+
+    monkeypatch.setattr(service, "_quote_tools", _boom_tools)
+    out = await SignalEngineService._fetch_quote(service, symbols, prefer="get_quote")
+    assert out["NSE:NIFTY 50"]["last_price"] == 24163.65
+
+
+@pytest.mark.asyncio
 async def test_overlay_ticker_rows_prefers_live_ltp() -> None:
     from app.domains.kite_ticker_hub import overlay_ticker_rows
 
@@ -318,6 +351,106 @@ async def test_sync_tenant_skips_dirty_when_map_unchanged(monkeypatch) -> None:
     feed.task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await feed.task
+
+
+@pytest.mark.asyncio
+async def test_sync_tenant_merges_sources_without_dropping_other_desk(
+    monkeypatch,
+) -> None:
+    from app.domains.kite_ticker_hub import (
+        SOURCE_OPTIONS_LAB,
+        SOURCE_SIGNAL,
+        get_kite_ticker_hub,
+    )
+
+    class _Settings:
+        kite_ticker_enabled = True
+
+    monkeypatch.setattr("app.core.settings.get_settings", lambda: _Settings())
+    hub = get_kite_ticker_hub()
+    hub._enabled = True
+    await hub.sync_tenant(
+        "t-merge",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={1: "NSE:NIFTY 50", 2: "NFO:NIFTYFUT"},
+        source=SOURCE_SIGNAL,
+    )
+    feed = hub._tenants["t-merge"]
+    if feed.task is not None:
+        feed.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feed.task
+        feed.task = asyncio.create_task(asyncio.sleep(3600))
+    feed.dirty.clear()
+    feed.pending_unsubscribe.clear()
+
+    await hub.sync_tenant(
+        "t-merge",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={3: "NFO:OPT1", 4: "NFO:OPT2"},
+        source=SOURCE_OPTIONS_LAB,
+    )
+    assert feed.desired_tokens == {1, 2, 3, 4}
+    assert feed.token_to_symbol[1] == "NSE:NIFTY 50"
+    assert 1 not in feed.pending_unsubscribe
+
+    # Signal shrinks — Options Lab tokens must remain subscribed.
+    feed.dirty.clear()
+    feed.pending_unsubscribe.clear()
+    await hub.sync_tenant(
+        "t-merge",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={1: "NSE:NIFTY 50"},
+        source=SOURCE_SIGNAL,
+    )
+    assert feed.desired_tokens == {1, 3, 4}
+    assert feed.pending_unsubscribe == {2}
+    feed.task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await feed.task
+
+
+@pytest.mark.asyncio
+async def test_sync_tenant_noop_when_web_concurrency_gt_1(monkeypatch) -> None:
+    from app.domains.kite_ticker_hub import get_kite_ticker_hub
+
+    class _Settings:
+        kite_ticker_enabled = True
+
+    monkeypatch.setattr("app.core.settings.get_settings", lambda: _Settings())
+    monkeypatch.setattr(
+        "app.domains.runtime.web_concurrency", lambda: 2
+    )
+    hub = get_kite_ticker_hub()
+    hub._enabled = True
+    await hub.sync_tenant(
+        "t-multi",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={1: "NSE:NIFTY 50"},
+    )
+    assert "t-multi" not in hub._tenants
+
+
+@pytest.mark.asyncio
+async def test_clean_ws_close_is_detected() -> None:
+    from app.domains.kite_ticker_hub import _is_clean_ws_close
+
+    class ConnectionClosedOK(Exception):
+        pass
+
+    class ConnectionClosed(Exception):
+        def __init__(self, code: int):
+            self.code = code
+            super().__init__(f"code={code}")
+
+    assert _is_clean_ws_close(ConnectionClosedOK("bye"))
+    assert _is_clean_ws_close(ConnectionClosed(1000))
+    assert not _is_clean_ws_close(ConnectionClosed(1006))
+    assert not _is_clean_ws_close(RuntimeError("auth failed"))
 
 
 @pytest.mark.asyncio

@@ -134,15 +134,24 @@ async def get_metric(tenant_id: str, metric_id: str) -> Any | None:
     return value
 
 
-async def set_metric(tenant_id: str, metric_id: str, tier: Tier, value: Any) -> None:
-    ttl_ms = TIER_TTL_MS[tier]
+async def set_metric(
+    tenant_id: str,
+    metric_id: str,
+    tier: Tier,
+    value: Any,
+    *,
+    ttl_ms: int | None = None,
+) -> None:
+    ttl = int(ttl_ms) if ttl_ms is not None else TIER_TTL_MS[tier]
+    if ttl <= 0:
+        ttl = TIER_TTL_MS[tier]
     client = await get_redis()
     if client is not None:
         try:
             await client.set(
                 _metric_key(tenant_id, metric_id),
                 json.dumps(value, separators=(",", ":")),
-                px=ttl_ms,
+                px=ttl,
             )
             return
         except Exception:
@@ -150,7 +159,7 @@ async def set_metric(tenant_id: str, metric_id: str, tier: Tier, value: Any) -> 
             logger.warning("signal_cache_metric_set_failed", tenant_id=tenant_id, metric_id=metric_id)
 
     bucket = _metric_cache.setdefault(tenant_id, {})
-    bucket[metric_id] = (_now_ms() + ttl_ms, value)
+    bucket[metric_id] = (_now_ms() + ttl, value)
 
 
 async def get_session_value(tenant_id: str, field: str) -> Any | None:
@@ -308,6 +317,20 @@ async def try_compute_lock(tenant_id: str) -> bool:
         return False
     await lock.acquire()
     return True
+
+
+async def compute_lock_held(tenant_id: str) -> bool:
+    """True while a worker/SSE holder is computing a fresh snapshot."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            return bool(await client.exists(_lock_key(tenant_id)))
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_lock_exists_failed", tenant_id=tenant_id)
+
+    lock = _local_compute_locks.get(tenant_id)
+    return isinstance(lock, asyncio.Lock) and lock.locked()
 
 
 async def extend_compute_lock(tenant_id: str) -> bool:

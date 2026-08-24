@@ -28,6 +28,10 @@ TICKER_ALIVE_KEY = "quote:ticker:alive"
 WS_MODE_FULL = "full"
 WS_MODE_QUOTE = "quote"
 TICKER_STALE_SECONDS = 5.0
+# Alive key must outlive quiet markets / brief WS gaps (broker tier is only 500ms).
+TICKER_ALIVE_TTL_MS = int(TICKER_STALE_SECONDS * 1000) * 2  # 10s
+SOURCE_SIGNAL = "signal"
+SOURCE_OPTIONS_LAB = "options_lab"
 
 _hub: "KiteTickerHub | None" = None
 
@@ -157,7 +161,24 @@ async def write_ticker_rows(tenant_id: str, rows_by_symbol: dict[str, dict[str, 
         TICKER_ALIVE_KEY,
         "broker",
         {"ts": int(time.time()), "count": len(rows_by_symbol)},
+        ttl_ms=TICKER_ALIVE_TTL_MS,
     )
+
+
+async def write_rest_quote_book(
+    tenant_id: str, rows_by_symbol: dict[str, dict[str, Any]]
+) -> None:
+    """Seed per-symbol quote rows from REST so single-symbol callers reuse batch hits.
+
+    Uses the broker tier (~500ms): long enough to bridge screener→Options Lab
+    handoff without advertising minute-old LTP/OI/IV as live.
+    """
+    if not rows_by_symbol:
+        return
+    for symbol, row in rows_by_symbol.items():
+        if not symbol or symbol == "_flat" or not isinstance(row, dict):
+            continue
+        await cache.set_metric(tenant_id, f"{QUOTE_SYM_PREFIX}{symbol}", "broker", row)
 
 
 async def assemble_quotes_from_book(
@@ -165,17 +186,21 @@ async def assemble_quotes_from_book(
     symbols: list[str],
     *,
     require_all: bool = True,
+    require_alive: bool = True,
 ) -> dict[str, Any] | None:
-    """Build a quote map from ticker book.
+    """Build a quote map from the per-symbol quote book.
 
     When ``require_all`` is True, returns None unless every symbol has a row.
     When False, returns whatever is present (may be empty dict).
+    When ``require_alive`` is False, skips the ticker heartbeat gate so REST-
+    seeded rows remain usable after a screener batch.
     """
     if not symbols:
         return {}
-    alive = await cache.get_metric(tenant_id, TICKER_ALIVE_KEY)
-    if not isinstance(alive, dict):
-        return None if require_all else {}
+    if require_alive:
+        alive = await cache.get_metric(tenant_id, TICKER_ALIVE_KEY)
+        if not isinstance(alive, dict):
+            return None if require_all else {}
     merged: dict[str, Any] = {}
     for symbol in symbols:
         row = await cache.get_metric(tenant_id, f"{QUOTE_SYM_PREFIX}{symbol}")
@@ -257,6 +282,8 @@ class _TenantFeed:
     access_token: str
     token_to_symbol: dict[int, str] = field(default_factory=dict)
     desired_tokens: set[int] = field(default_factory=set)
+    # Per-desk subscription maps; desired_tokens = union of all sources.
+    sources: dict[str, dict[int, str]] = field(default_factory=dict)
     pending_unsubscribe: set[int] = field(default_factory=set)
     connected: bool = False
     last_tick_at: float = 0.0
@@ -264,6 +291,15 @@ class _TenantFeed:
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     dirty: asyncio.Event = field(default_factory=asyncio.Event)
     credentials_epoch: int = 0
+
+
+def _union_source_maps(sources: dict[str, dict[int, str]]) -> dict[int, str]:
+    merged: dict[int, str] = {}
+    for mapping in sources.values():
+        for token, symbol in mapping.items():
+            if token and symbol:
+                merged[int(token)] = str(symbol)
+    return merged
 
 
 class KiteTickerHub:
@@ -305,6 +341,14 @@ class KiteTickerHub:
                 await self._supervisor
             self._supervisor = None
 
+    def _multi_worker_blocked(self) -> bool:
+        try:
+            from app.domains.runtime import web_concurrency
+
+            return web_concurrency() > 1
+        except Exception:
+            return False
+
     async def sync_tenant(
         self,
         tenant_id: str,
@@ -312,8 +356,9 @@ class KiteTickerHub:
         api_key: str,
         access_token: str,
         token_to_symbol: dict[int, str],
+        source: str = SOURCE_SIGNAL,
     ) -> None:
-        """Replace desired subscriptions for a tenant and (re)start its feed."""
+        """Merge ``source`` subscriptions into the tenant feed and (re)start WS."""
         if not self._enabled:
             return
         try:
@@ -324,9 +369,17 @@ class KiteTickerHub:
         except Exception:
             # Settings unavailable (rare) — refuse to open sockets blindly.
             return
+        if self._multi_worker_blocked():
+            logger.error(
+                "kite_ticker_sync_refused_multi_worker",
+                tenant_id=tenant_id,
+                hint="set WEB_CONCURRENCY=1 or disable KITE_TICKER_ENABLED",
+            )
+            return
         if not api_key or not access_token:
             return
-        next_map = {
+        source_key = (source or SOURCE_SIGNAL).strip() or SOURCE_SIGNAL
+        next_source_map = {
             int(tok): str(sym) for tok, sym in token_to_symbol.items() if tok and sym
         }
         feed = self._tenants.get(tenant_id)
@@ -350,6 +403,8 @@ class KiteTickerHub:
 
         old_map = dict(feed.token_to_symbol)
         old_tokens = set(feed.desired_tokens)
+        feed.sources[source_key] = next_source_map
+        next_map = _union_source_maps(feed.sources)
         feed.token_to_symbol = next_map
         feed.desired_tokens = set(next_map.keys())
         removed = old_tokens - feed.desired_tokens
@@ -404,16 +459,26 @@ class KiteTickerHub:
                 raise
             except Exception as exc:
                 feed.connected = False
-                logger.warning(
-                    "kite_ticker_session_failed",
-                    tenant_id=tenant_id,
-                    error=str(exc),
-                )
+                clean = _is_clean_ws_close(exc)
+                if clean:
+                    logger.info(
+                        "kite_ticker_reconnect_clean",
+                        tenant_id=tenant_id,
+                        error=str(exc)[:200],
+                    )
+                    delay = 0.75
+                else:
+                    logger.warning(
+                        "kite_ticker_session_failed",
+                        tenant_id=tenant_id,
+                        error=str(exc),
+                    )
+                    delay = backoff
+                    backoff = min(backoff * 2, 30.0)
                 try:
-                    await asyncio.wait_for(feed.stop.wait(), timeout=backoff)
+                    await asyncio.wait_for(feed.stop.wait(), timeout=delay)
                 except TimeoutError:
                     pass
-                backoff = min(backoff * 2, 30.0)
 
     async def _session(self, tenant_id: str, feed: _TenantFeed) -> None:
         try:
@@ -495,6 +560,20 @@ class KiteTickerHub:
             await ws.send(json.dumps({"a": "mode", "v": [mode, mode_tokens]}))
 
 
+def _is_clean_ws_close(exc: BaseException) -> bool:
+    """True for graceful peer closes — reconnect quickly without exponential backoff."""
+    if type(exc).__name__ == "ConnectionClosedOK":
+        return True
+    code = getattr(exc, "code", None)
+    try:
+        if code is not None and int(code) == 1000:
+            return True
+    except (TypeError, ValueError):
+        pass
+    msg = str(exc).lower()
+    return "connectionclosedok" in msg or ("1000" in msg and "ok" in msg)
+
+
 _CRED_CACHE: dict[str, tuple[float, tuple[str, str]]] = {}
 _CRED_CACHE_TTL_S = 30.0
 
@@ -510,7 +589,9 @@ async def resolve_kite_credentials(session: Any, context: Any) -> tuple[str, str
     from app.tools.providers import merge_tenant_python_settings
 
     tenant_id = _tenant_key(context)
-    cached = _CRED_CACHE.get(tenant_id)
+    user_id = str(getattr(context, "user_id", "") or "")
+    cache_key = f"{tenant_id}:{user_id}"
+    cached = _CRED_CACHE.get(cache_key)
     if cached is not None:
         expires_at, pair = cached
         if time.monotonic() < expires_at:
@@ -534,19 +615,32 @@ async def resolve_kite_credentials(session: Any, context: Any) -> tuple[str, str
             continue
         settings = dict(published.settings or {})
         credential_value: str | None = None
-        if definition.credential_id is not None:
-            credential = await factory.credentials.get(definition.credential_id)
+        cred_id = definition.credential_id or getattr(binding, "credential_id", None)
+        if cred_id is not None:
+            credential = await factory.credentials.get(cred_id)
             if credential is not None:
                 credential_value = factory._decrypt(
                     credential.encrypted_value,
                     credential.key_version,
                 )
         merged, _ = merge_tenant_python_settings(settings, credential_value)
+        # Admin desk may also keep keys in the user vault.
+        try:
+            vault = await factory._user_vault_map()
+            for key in ("api_key", "access_token", "token"):
+                if key in vault and vault[key]:
+                    merged[key] = vault[key]
+        except Exception as exc:
+            logger.warning(
+                "kite_credential_vault_merge_failed",
+                tenant_id=tenant_id,
+                error=str(exc)[:200],
+            )
         api_key = str(merged.get("api_key") or "").strip()
         access_token = str(merged.get("access_token") or merged.get("token") or "").strip()
         if api_key and access_token:
             pair = (api_key, access_token)
-            _CRED_CACHE[tenant_id] = (time.monotonic() + _CRED_CACHE_TTL_S, pair)
+            _CRED_CACHE[cache_key] = (time.monotonic() + _CRED_CACHE_TTL_S, pair)
             return pair
     return None
 

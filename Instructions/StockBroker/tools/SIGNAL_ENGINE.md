@@ -44,9 +44,13 @@ Replace option symbols with **current expiry** strikes from Kite. Update `pcr`, 
 
 ## Admin desk
 
-The admin trading desk opens **`GET /admin/signals/stream`** (SSE) at ~**8×/sec**. The engine coalesces ticks per tenant and throttles broker quotes to ~**2×/sec**. Dow Jones and crude use slower cache tiers inside the backend engine.
+The admin trading desk opens **`GET /admin/signals/stream`** (SSE) at ~**8×/sec**. With `KITE_TICKER_ENABLED` and the book-first path, the background worker evaluates **Tier A** (underlying / FUT / CE / PE LTP+OI) from the live ticker book at **`SIGNAL_ACTIVE_TICK_MS` (200ms ≈ 5 Hz)**. When the ticker heartbeat is dead, REST gap-fill is capped at **`TIER_A_REST_GAP_FILL_MS` (5s)** so the fast loop cannot stampede the sandbox — the badge may show stale/rest honestly during that window. Crude / India VIX / Dow / index-aux use **medium/slow caches** refreshed off that critical path. Dow Jones and crude no longer block LTP ticks.
 
 Single snapshot: `GET /admin/signals/state` (same payload, coalesced).
+
+### Follow-up: quotes outside the sandbox
+
+This pass keeps Kite **REST** (`get_quote` / IV) on the existing sandbox toolkit path. Once ticker-first is stable in production, prefer a **read-only in-process Kite client** in the backend for quote/LTP/historical — keep the sandbox for tenant-authored tools only. Not implemented here (larger auth/safety surface).
 
 ## Shared cache (Redis)
 
@@ -59,7 +63,7 @@ When `REDIS_URL` points at a real Redis instance, signal-engine caches are **sha
 | `atlas:signals:{tenant}:sess` | OI baseline, IV session, publish dedup | session |
 | `atlas:signals:watch:{tenant}` | Active admin desk (SSE) | 2s, renewed each frame |
 
-A background ticker (`SIGNAL_ENGINE_TICKER_ENABLED`, default **off**) pre-computes snapshots for watched tenants when enabled. Desk Compose also enables `OPTIONS_LAB_TICKER_ENABLED` and `KITE_TICKER_ENABLED` (both default **off** in settings so non-desk deploys do not open Kite WS or 8 Hz loops by accident). Starting the engine touches the watcher; the config API schedules a post-commit snapshot warm so SSE can serve Redis instead of blocking on the first cold `state()` fan-out. The worker also keeps the shared Kite WebSocket hub subscribed to Signal symbols so LTP/OI overlay stays hot (REST `get_quote` still runs for IV/greeks). Snapshots carry `computed_at_ms` / `data_age_ms` (desk badge uses age for Stale vs Running). Compute locks use a **10s TTL** with a **3s heartbeat** so a killed worker self-heals quickly without stampeding while alive. `KITE_TICKER_ENABLED` refuses to start when `WEB_CONCURRENCY > 1` (production image defaults to 1 worker). With no admin desk open, the ticker idle-polls every 2s instead of 8 Hz.
+A background ticker (`SIGNAL_ENGINE_TICKER_ENABLED`, default **off**) pre-computes snapshots for watched tenants when enabled. Desk Compose also enables `OPTIONS_LAB_TICKER_ENABLED` and `KITE_TICKER_ENABLED` (both default **off** in settings so non-desk deploys do not open Kite WS or 8 Hz loops by accident). Starting the engine touches the watcher; the config API schedules a post-commit snapshot warm so SSE can serve Redis instead of blocking on the first cold `state()` fan-out. The worker also keeps the shared Kite WebSocket hub subscribed to Signal symbols (`source=signal`, merged with Options Lab) so LTP/OI overlay stays hot. Tier A evaluates from the live book first; REST `get_quote` is only for gaps/IV. Crude / VIX / aux refresh on a medium-tier background timer. Snapshots carry `computed_at_ms` / `data_age_ms` (desk badge uses age for Stale vs Running). Compute locks use a **10s TTL** with a **3s heartbeat** so a killed worker self-heals quickly without stampeding while alive. `KITE_TICKER_ENABLED` refuses to start (and `sync_tenant` is a no-op) when `WEB_CONCURRENCY > 1` (production image defaults to 1 worker). With no admin desk open, the ticker idle-polls every 2s instead of ~5 Hz.
 
 With `REDIS_URL=memory://` (local/test), caches fall back to in-process dicts — fine for single-worker dev.
 

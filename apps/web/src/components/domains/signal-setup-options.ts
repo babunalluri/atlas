@@ -27,9 +27,13 @@ const FUT_ROOT_BY_UNDERLYING: Record<string, { exchange: string; root: string }>
     "NSE:NIFTY 50": { exchange: "NFO", root: "NIFTY" },
     "NSE:NIFTY": { exchange: "NFO", root: "NIFTY" },
     "NSE:BANKNIFTY": { exchange: "NFO", root: "BANKNIFTY" },
+    "NSE:NIFTY BANK": { exchange: "NFO", root: "BANKNIFTY" },
     "NSE:FINNIFTY": { exchange: "NFO", root: "FINNIFTY" },
+    "NSE:NIFTY FIN SERVICE": { exchange: "NFO", root: "FINNIFTY" },
     "NSE:NIFTYNXT50": { exchange: "NFO", root: "NIFTYNXT50" },
+    "NSE:NIFTY NEXT 50": { exchange: "NFO", root: "NIFTYNXT50" },
     "NSE:MIDCPNIFTY": { exchange: "NFO", root: "MIDCPNIFTY" },
+    "NSE:NIFTY MID SELECT": { exchange: "NFO", root: "MIDCPNIFTY" },
     "BSE:SENSEX": { exchange: "BFO", root: "SENSEX" },
   };
 
@@ -101,6 +105,22 @@ export function suggestFutSymbol(
   return `NFO:${root}${yy}${mon}FUT`;
 }
 
+export function isOptionSymbol(symbol: string | null | undefined): boolean {
+  const raw = (symbol ?? "").trim().toUpperCase();
+  if (!raw || raw.endsWith("FUT")) return false;
+  const body = raw.includes(":") ? (raw.split(":", 2)[1] ?? "") : raw;
+  // Require a digit before CE/PE so "NIFTY FIN SERVICE" is not a call.
+  return /\d(CE|PE)$/.test(body);
+}
+
+/** Drop FUT / blank values mistakenly pasted into CE/PE fields. */
+export function sanitizeOptionSymbol(
+  symbol: string | null | undefined,
+): string {
+  const raw = (symbol ?? "").trim();
+  return isOptionSymbol(raw) ? raw : "";
+}
+
 export function deriveOptionSymbol(
   futSymbol: string,
   strike: number,
@@ -134,13 +154,15 @@ function uniqueOptions(values: Iterable<string>): SearchableSelectOption[] {
 export function buildPresetOptions(
   presets: SignalUnderlyingPreset[],
 ): SearchableSelectOption[] {
-  return [
-    ...presets.map((preset) => ({
-      value: preset.symbol,
-      label: preset.label,
-    })),
-    { value: CUSTOM_PRESET, label: "Custom…" },
-  ];
+  const seen = new Set<string>();
+  const options: SearchableSelectOption[] = [];
+  for (const preset of presets) {
+    if (seen.has(preset.symbol)) continue;
+    seen.add(preset.symbol);
+    options.push({ value: preset.symbol, label: preset.label });
+  }
+  options.push({ value: CUSTOM_PRESET, label: "Custom…" });
+  return options;
 }
 
 export function buildUnderlyingOptions(
@@ -165,11 +187,18 @@ export function buildStrikeStepOptions(
   strikeStep: number | null | undefined,
 ): SearchableSelectOption[] {
   const values = [
-    ...presets.map((preset) => String(preset.strike_step)),
+    ...presets.map((preset) => String(preset.strike_step ?? "")),
     ...EXTRA_STRIKE_STEPS.map(String),
-    strikeStep != null ? String(strikeStep) : "",
+    strikeStep != null && Number.isFinite(strikeStep) && strikeStep > 0
+      ? String(strikeStep)
+      : "",
   ];
-  return uniqueOptions(values);
+  return uniqueOptions(
+    values.filter((value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0;
+    }),
+  );
 }
 
 export function buildFutOptions(
@@ -194,7 +223,8 @@ export function buildOptionSideOptions(
   current: string | null | undefined,
 ): SearchableSelectOption[] {
   const values = new Set<string>();
-  if (current?.trim()) values.add(current.trim());
+  const cleaned = sanitizeOptionSymbol(current);
+  if (cleaned) values.add(cleaned);
   const fut = futSymbol?.trim() ?? "";
   if (fut && atm != null && strikeStep > 0) {
     for (let offset = -4; offset <= 4; offset += 1) {

@@ -14,6 +14,7 @@ from app.db.models import Role, Tenant
 from app.db.session import SessionFactory, apply_tenant_guc
 from app.domains import options_lab_cache as ol_cache
 from app.domains.kite_ticker_hub import (
+    SOURCE_OPTIONS_LAB,
     get_kite_ticker_hub,
     resolve_kite_credentials,
     token_map_from_quotes,
@@ -147,6 +148,7 @@ async def _sync_kite_from_chain_payload(
         api_key=api_key,
         access_token=access_token,
         token_to_symbol=token_map,
+        source=SOURCE_OPTIONS_LAB,
     )
 
 

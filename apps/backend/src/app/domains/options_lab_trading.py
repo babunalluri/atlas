@@ -512,8 +512,8 @@ class OptionsLabTradingService:
     def __init__(self, session: AsyncSession, context: Any) -> None:
         self.session = session
         self.context = context
-        self.teams = TeamRepository(session)
-        self.tools = ToolDefinitionRepository(session)
+        self.teams = TeamRepository(session, context)
+        self.tools = ToolDefinitionRepository(session, context)
         self.factory = AgentFactoryService(session, context)
 
     async def _iter_team_bindings(self, slugs: tuple[str, ...]):

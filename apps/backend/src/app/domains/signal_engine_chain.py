@@ -27,19 +27,39 @@ def strike_ladder(atm: int, step: int, wings: int = 5) -> list[int]:
 
 
 def _max_pain_strike(strikes: list[int], ce_oi: dict[int, float], pe_oi: dict[int, float]) -> int | None:
+    """Strike that minimizes writer pain across the ladder.
+
+    Returns ``None`` when there is no OI (avoids returning ``min(strikes)`` —
+    which is what a zero-OI ladder always produced) or when multiple strikes
+    share the same minimum pain (ambiguous / flat distribution).
+    """
     if not strikes:
         return None
-    best_strike = strikes[0]
+    total_oi = sum(ce_oi.get(s, 0.0) for s in strikes) + sum(
+        pe_oi.get(s, 0.0) for s in strikes
+    )
+    if total_oi <= 0:
+        return None
+
+    best_strike: int | None = None
     best_pain = float("inf")
+    tied = False
     for candidate in strikes:
         total = 0.0
         for strike in strikes:
             ce = ce_oi.get(strike, 0.0)
             pe = pe_oi.get(strike, 0.0)
-            total += ce * max(0.0, candidate - strike) + pe * max(0.0, strike - candidate)
+            total += ce * max(0.0, candidate - strike) + pe * max(
+                0.0, strike - candidate
+            )
         if total < best_pain:
             best_pain = total
             best_strike = candidate
+            tied = False
+        elif total == best_pain and best_strike is not None:
+            tied = True
+    if tied:
+        return None
     return best_strike
 
 
@@ -54,10 +74,13 @@ def chain_metrics_from_quotes(
     ce_oi_by_strike: dict[int, float] = {}
     pe_oi_by_strike: dict[int, float] = {}
     ce_oi = pe_oi = 0.0
+    matched = 0
 
     for strike, ce_sym, pe_sym in zip(strikes, ce_symbols, pe_symbols, strict=False):
         ce_row = find_row(quotes, ce_sym)
         pe_row = find_row(quotes, pe_sym)
+        if ce_row is not None or pe_row is not None:
+            matched += 1
         ce = _oi(ce_row)
         pe = _oi(pe_row)
         ce_oi_by_strike[strike] = ce
@@ -65,14 +88,20 @@ def chain_metrics_from_quotes(
         ce_oi += ce
         pe_oi += pe
 
+    # No quote rows at all → empty payload (callers treat as missing, not zeros).
+    if matched == 0:
+        return {}
+
     out: dict[str, float] = {}
     if pe_oi > 0:
         out["pcr"] = round(pe_oi / ce_oi, 3) if ce_oi > 0 else round(pe_oi, 3)
     max_pain = _max_pain_strike(strikes, ce_oi_by_strike, pe_oi_by_strike)
     if max_pain is not None:
         out["max_pain"] = float(max_pain)
-    out["chain_ce_oi"] = ce_oi
-    out["chain_pe_oi"] = pe_oi
+    # Only publish OI totals when we actually saw interest — keeps UI "—" vs "0".
+    if ce_oi > 0 or pe_oi > 0:
+        out["chain_ce_oi"] = ce_oi
+        out["chain_pe_oi"] = pe_oi
     grip = writer_grip_score(strikes, ce_oi_by_strike, pe_oi_by_strike)
     if grip is not None:
         out["writer_grip_score"] = grip

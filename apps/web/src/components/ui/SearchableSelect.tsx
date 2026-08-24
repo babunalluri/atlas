@@ -231,7 +231,7 @@ export function SearchableSelect({
 
   const displayValue = open
     ? query
-    : (selected?.label ?? (allowCustom ? value : ""));
+    : (selected?.label ?? value);
 
   const customHint =
     allowCustom && query.trim() && !findExactOption(query)
@@ -308,7 +308,7 @@ export function SearchableSelect({
                 const isSelected = option.value === value;
                 return (
                   <li
-                    key={option.value}
+                    key={`${option.value}::${option.label}`}
                     role="option"
                     aria-selected={isSelected}
                     aria-disabled={option.disabled || undefined}

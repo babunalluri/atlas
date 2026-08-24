@@ -59,6 +59,52 @@ def test_chain_metrics_pcr_and_max_pain() -> None:
     assert "writer_grip_score" in out
 
 
+def test_max_pain_none_when_all_oi_zero() -> None:
+    """Zero-OI ladders must not report min(strikes) as max pain."""
+    from app.domains.signal_engine_chain import _max_pain_strike
+
+    strikes = [23950, 24000, 24050, 24100, 24150, 24200]
+    empty = {s: 0.0 for s in strikes}
+    assert _max_pain_strike(strikes, empty, empty) is None
+
+    def find_row(_q: dict, _sym: str):
+        return {"open_interest": 0}
+
+    out = chain_metrics_from_quotes(
+        {},
+        find_row=find_row,
+        strikes=strikes,
+        ce_symbols=[f"CE{s}" for s in strikes],
+        pe_symbols=[f"PE{s}" for s in strikes],
+    )
+    # find_row returns rows → matched, but OI totals stay 0 → no max_pain / OI keys
+    assert "max_pain" not in out
+    assert "pcr" not in out
+    assert "chain_ce_oi" not in out
+
+
+def test_chain_metrics_empty_when_no_quote_rows() -> None:
+    strikes = [24200, 24250]
+    out = chain_metrics_from_quotes(
+        {},
+        find_row=lambda _q, _s: None,
+        strikes=strikes,
+        ce_symbols=["CE1", "CE2"],
+        pe_symbols=["PE1", "PE2"],
+    )
+    assert out == {}
+
+
+def test_max_pain_none_on_flat_tie() -> None:
+    from app.domains.signal_engine_chain import _max_pain_strike
+
+    strikes = [100, 200]
+    # Symmetric OI → equal pain at both strikes
+    ce = {100: 10.0, 200: 10.0}
+    pe = {100: 10.0, 200: 10.0}
+    assert _max_pain_strike(strikes, ce, pe) is None
+
+
 def test_levels_from_candles() -> None:
     daily = [
         ["2026-08-18", 100, 120, 95, 110],

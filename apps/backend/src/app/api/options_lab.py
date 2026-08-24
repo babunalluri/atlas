@@ -108,9 +108,13 @@ async def get_options_screener(
     context: AdminContext,
     session: TenantSession,
     universe: str = Query("indices"),
+    mode: str = Query("full", pattern="^(fast|full)$"),
 ) -> dict[str, Any]:
-    """Index F&O screener — PCR, max pain, ATM IV, session OI/IV change."""
-    return await OptionsLabService(session, context).screener_snapshot(universe=universe)
+    """Index/equity F&O screener — fast=spot/ATM, full=PCR/IV/OI enrich."""
+    return await OptionsLabService(session, context).screener_snapshot(
+        universe=universe,
+        mode=mode,
+    )
 
 
 @router.get("/flows")

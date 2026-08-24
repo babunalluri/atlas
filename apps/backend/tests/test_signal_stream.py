@@ -169,6 +169,22 @@ def test_annotate_snapshot_freshness_unknown_without_computed_at() -> None:
     assert "computed_at_ms" not in out
 
 
+def test_annotate_snapshot_freshness_while_computing() -> None:
+    import time
+
+    from app.domains.signal_engine import _annotate_snapshot_freshness
+    from app.domains.signal_engine_constants import SNAPSHOT_FRESH_MS
+
+    computed = int(time.time() * 1000) - (SNAPSHOT_FRESH_MS + 5_000)
+    out = _annotate_snapshot_freshness(
+        {"passed": 1, "computed_at_ms": computed},
+        computing=True,
+    )
+    assert out["snapshot_stale"] is False
+    assert out["engine_computing"] is True
+    assert out["data_age_ms"] is not None and out["data_age_ms"] > SNAPSHOT_FRESH_MS
+
+
 @pytest.mark.asyncio
 async def test_signal_stream_requires_auth(client) -> None:
     denied = await client.get("/admin/signals/stream")

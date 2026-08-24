@@ -37,6 +37,7 @@ import type {
   PublicWorkflowSurface,
 } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
+import { randomUuid } from "@/lib/random-uuid";
 import { Link, useRouter } from "@/i18n/navigation";
 
 function newId(prefix: string) {
@@ -217,7 +218,7 @@ export function CustomerChat({
   useEffect(() => {
     abortActiveStream();
     const session: ConversationSession = {
-      id: crypto.randomUUID(),
+      id: randomUuid(),
       title: "New conversation",
       targetType: activeTargetType,
       versionId: "",
@@ -237,7 +238,7 @@ export function CustomerChat({
   function createSession() {
     abortActiveStream();
     const session: ConversationSession = {
-      id: crypto.randomUUID(),
+      id: randomUuid(),
       title: "New conversation",
       targetType: activeTargetType,
       versionId: "",

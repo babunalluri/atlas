@@ -3671,6 +3671,12 @@ export interface SignalEngineState {
   /** true when data_age_ms > snapshot_fresh_ms; null when age unknown. */
   snapshot_stale?: boolean | null;
   live_warnings: string[];
+  /**
+   * True when the engine is live/mock-off but underlying LTP is missing
+   * (auth failure, empty underlying, broker miss). Prefer this over regex
+   * on live_warnings for the Running / No quote badge.
+   */
+  live_quote_missing?: boolean;
   team_slug: string;
   underlying?: { symbol: string; label: string };
 }
@@ -3872,6 +3878,7 @@ export interface OptionsScreenerRow {
   underlying_symbol: string;
   underlying_label: string;
   fut_symbol: string;
+  strike_step?: number | null;
   spot: number | null;
   atm: number | null;
   atm_iv: number | null;
@@ -3891,6 +3898,9 @@ export interface OptionsScreenerSnapshot {
   error?: string;
   mock?: boolean;
   universe?: string;
+  mode?: "fast" | "full" | string;
+  /** True when spot/ATM only — PCR/IV/OI still enriching. */
+  partial?: boolean;
   fetched_at?: number;
   warnings?: string[];
   rows?: OptionsScreenerRow[];
@@ -3899,10 +3909,13 @@ export interface OptionsScreenerSnapshot {
 export async function getOptionsScreener(
   accessToken: string,
   universe = "indices",
+  mode: "fast" | "full" = "full",
+  signal?: AbortSignal,
 ): Promise<OptionsScreenerSnapshot> {
-  const params = new URLSearchParams({ universe });
+  const params = new URLSearchParams({ universe, mode });
   return apiFetch<OptionsScreenerSnapshot>(`/admin/options-lab/screener?${params}`, {
     accessToken,
+    signal,
   });
 }
 

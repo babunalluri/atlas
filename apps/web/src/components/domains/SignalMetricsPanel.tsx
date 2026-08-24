@@ -4,17 +4,39 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SignalSetupBar } from "@/components/domains/SignalSetupBar";
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
+import { OptionsLabScreenerPanel } from "@/components/domains/OptionsLabScreenerPanel";
+import {
+  deskInstrumentKey,
+  readDeskInstrument,
+  subscribeDeskInstrument,
+  type DeskInstrumentSelection,
+} from "@/components/domains/desk-instrument";
 import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { FieldHint, Input, Label, Textarea } from "@/components/ui/Field";
-import { PauseIcon, PlayIcon, RefreshIcon, BellIcon, CheckIcon, CloseIcon, ChevronDownIcon, ArrowUpIcon, BookIcon } from "@/components/ui/icons";
 import {
+  PauseIcon,
+  PlayIcon,
+  RefreshIcon,
+  BellIcon,
+  CheckIcon,
+  CloseIcon,
+  ChevronDownIcon,
+  ArrowUpIcon,
+  BookIcon,
+  SearchIcon,
+} from "@/components/ui/icons";
+import {
+  getOptionsScreener,
   getSignalState,
   publishSignalEntry,
+  resetOptionsLabScreenerBaseline,
   type DomainBrokerTool,
   type DomainDashboard,
+  type OptionsScreenerRow,
+  type OptionsScreenerSnapshot,
   type SignalEngineAdminConfig,
   type SignalEngineState,
   type SignalEntry,
@@ -24,6 +46,8 @@ import {
 import { streamSignalState } from "@/lib/api/signals-stream";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
+
+const SCREENER_POLL_MS = 60_000;
 
 /** Trade Desk Checklist category order (matches backend). */
 const CHECKLIST_CATEGORY_ORDER = [
@@ -809,7 +833,19 @@ export function SignalMetricsPanel({
   const [warningsOpen, setWarningsOpen] = useState(true);
   const [engineBusy, setEngineBusy] = useState(false);
   const [booksOpen, setBooksOpen] = useState(false);
+  const [screenerOpen, setScreenerOpen] = useState(false);
+  const [screener, setScreener] = useState<OptionsScreenerSnapshot | null>(null);
+  const [screenerUniverse, setScreenerUniverse] = useState<
+    "indices" | "equities" | "all"
+  >("indices");
+  const [screenerLoading, setScreenerLoading] = useState(false);
+  const [screenerError, setScreenerError] = useState<string | null>(null);
+  const [resettingScreener, setResettingScreener] = useState(false);
+  const [screenerAtmHint, setScreenerAtmHint] = useState<number | null>(null);
   const mounted = useRef(true);
+  const screenerSeq = useRef(0);
+  const screenerAbortRef = useRef<AbortController | null>(null);
+  const lastDeskInstrumentKey = useRef("");
 
   const {
     config,
@@ -822,7 +858,11 @@ export function SignalMetricsPanel({
     patchConfig,
     patchConfigImmediate,
     onPresetChange,
+    applyInstrumentSelection,
   } = useSignalConfigAutosave(getAccessToken, isLoaded && isSignedIn);
+
+  const configRef = useRef(config);
+  configRef.current = config;
 
   const engineEnabled =
     config?.engine_enabled ?? state?.engine_enabled ?? false;
@@ -831,7 +871,6 @@ export function SignalMetricsPanel({
   // Prefer server snapshot_stale; unknown age is not "Running" / not live.
   const engineStale = engineActive && snapshotStale === true;
   const engineRunning = engineActive && snapshotStale === false;
-  const engineLive = engineRunning;
 
   const metrics = useMemo(() => state?.metrics ?? [], [state?.metrics]);
   const failingRules = useMemo(
@@ -843,10 +882,18 @@ export function SignalMetricsPanel({
         ),
     [metrics],
   );
-  const atmHint = useMemo(() => {
+  const metricsAtmHint = useMemo(() => {
     const atm = metrics.find((row) => row.id === "atm")?.value;
     return atm != null ? Math.round(atm) : null;
   }, [metrics]);
+  // H4: SSE can lag behind a screener pick — don't blend old ATM into new FUT CE/PE.
+  const metricsAtmAligned =
+    metricsAtmHint != null &&
+    Boolean(config?.underlying_symbol) &&
+    state?.underlying?.symbol === config.underlying_symbol
+      ? metricsAtmHint
+      : null;
+  const atmHint = metricsAtmAligned ?? screenerAtmHint;
   const metricGroups = useMemo(
     () => groupMetricsByCategory(metrics),
     [metrics],
@@ -894,13 +941,148 @@ export function SignalMetricsPanel({
   }, [getAccessToken]);
 
   useEffect(() => {
-    if (!booksOpen) return;
+    if (!booksOpen && !screenerOpen) return;
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setBooksOpen(false);
+      if (event.key === "Escape") {
+        setBooksOpen(false);
+        setScreenerOpen(false);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [booksOpen]);
+  }, [booksOpen, screenerOpen]);
+
+  const refreshScreener = useCallback(async () => {
+    const seq = ++screenerSeq.current;
+    screenerAbortRef.current?.abort();
+    const controller = new AbortController();
+    screenerAbortRef.current = controller;
+    setScreenerLoading(true);
+    try {
+      const token = await getAccessToken();
+      if (!token || !mounted.current) return;
+      const fast = await getOptionsScreener(
+        token,
+        screenerUniverse,
+        "fast",
+        controller.signal,
+      );
+      if (!mounted.current || seq !== screenerSeq.current) return;
+      setScreener(fast);
+      setScreenerError(fast.ok ? null : fast.error ?? "Screener unavailable");
+      setScreenerLoading(false);
+
+      if (fast.ok && fast.partial === true) {
+        const full = await getOptionsScreener(
+          token,
+          screenerUniverse,
+          "full",
+          controller.signal,
+        );
+        if (!mounted.current || seq !== screenerSeq.current) return;
+        setScreener(full);
+        setScreenerError(full.ok ? null : full.error ?? "Screener unavailable");
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (mounted.current && seq === screenerSeq.current) {
+        setScreenerError(
+          err instanceof Error ? err.message : "Failed to load screener",
+        );
+      }
+    } finally {
+      if (mounted.current && seq === screenerSeq.current) {
+        setScreenerLoading(false);
+      }
+    }
+  }, [getAccessToken, screenerUniverse]);
+
+  const onResetScreenerBaseline = useCallback(async () => {
+    setResettingScreener(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) return;
+      await resetOptionsLabScreenerBaseline(token);
+      await refreshScreener();
+    } finally {
+      setResettingScreener(false);
+    }
+  }, [getAccessToken, refreshScreener]);
+
+  const onSelectScreenerUnderlying = useCallback(
+    (row: OptionsScreenerRow) => {
+      const preset = presets.find((item) => item.symbol === row.underlying_symbol);
+      const strike =
+        row.strike_step ??
+        preset?.strike_step ??
+        config?.strike_step ??
+        50;
+      applyInstrumentSelection({
+        underlying_symbol: row.underlying_symbol,
+        underlying_label: row.underlying_label,
+        fut_symbol: row.fut_symbol,
+        strike_step: strike > 0 ? strike : 50,
+      });
+      if (row.atm != null) setScreenerAtmHint(Math.round(row.atm));
+      setScreenerOpen(false);
+    },
+    [applyInstrumentSelection, config?.strike_step, presets],
+  );
+
+  // Mirror Options Lab stream / setup into Signal Engine when this tab mounts
+  // or when Options Lab publishes a new instrument (same browser session).
+  useEffect(() => {
+    if (configLoading) return;
+    const apply = (selection: DeskInstrumentSelection) => {
+      const key = deskInstrumentKey(selection);
+      if (key === lastDeskInstrumentKey.current) return;
+      const current = configRef.current;
+      const sameUnderlying =
+        current?.underlying_symbol?.trim() === selection.underlying_symbol;
+      const sameFut =
+        (current?.fut_symbol || "").trim() ===
+        (selection.fut_symbol || "").trim();
+      const sameCe =
+        !selection.ce_symbol ||
+        (current?.ce_symbol || "").trim() === selection.ce_symbol.trim();
+      const samePe =
+        !selection.pe_symbol ||
+        (current?.pe_symbol || "").trim() === selection.pe_symbol.trim();
+      if (sameUnderlying && sameFut && sameCe && samePe) {
+        lastDeskInstrumentKey.current = key;
+        return;
+      }
+      lastDeskInstrumentKey.current = key;
+      applyInstrumentSelection({
+        underlying_symbol: selection.underlying_symbol,
+        underlying_label: selection.underlying_label,
+        fut_symbol: selection.fut_symbol,
+        strike_step: selection.strike_step,
+        ce_symbol: selection.ce_symbol,
+        pe_symbol: selection.pe_symbol,
+        clearOptions: !selection.ce_symbol && !selection.pe_symbol,
+      });
+    };
+
+    const existing = readDeskInstrument();
+    if (existing) apply(existing);
+    return subscribeDeskInstrument(apply);
+  }, [applyInstrumentSelection, configLoading]);
+
+  useEffect(() => {
+    if (!screenerOpen) return;
+    void refreshScreener();
+    const timer = window.setInterval(() => void refreshScreener(), SCREENER_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      screenerAbortRef.current?.abort();
+    };
+  }, [refreshScreener, screenerOpen]);
+
+  // Live metrics ATM wins once it matches the configured underlying.
+  useEffect(() => {
+    if (metricsAtmAligned != null) setScreenerAtmHint(null);
+  }, [metricsAtmAligned]);
 
   useEffect(() => {
     mounted.current = true;
@@ -1010,6 +1192,15 @@ export function SignalMetricsPanel({
   const warnings = state?.live_warnings ?? [];
   const mockMode = Boolean(config?.mock ?? state?.mock);
   const fetchedLabel = formatEvaluatedAt(state?.evaluated_at);
+  const noLivePrint =
+    Boolean(state?.live_quote_missing) ||
+    warnings.some((w) =>
+      /no live print|no live quote|credentials missing|access_token rejected|api_key is required|select an underlying/i.test(
+        w,
+      ),
+    );
+  // Engine/stream can be up while broker LTP is missing — don't call that Running.
+  const engineHealthy = engineRunning && !noLivePrint;
 
   return (
     <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-raised/20 p-2">
@@ -1020,21 +1211,25 @@ export function SignalMetricsPanel({
                 tone={
                   !engineEnabled
                     ? "neutral"
-                    : engineStale
+                    : noLivePrint
                       ? "warning"
-                      : engineRunning
-                        ? "success"
-                        : "warning"
+                      : engineStale
+                        ? "warning"
+                        : engineHealthy
+                          ? "success"
+                          : "warning"
                 }
-                live={engineLive}
+                live={engineHealthy}
               >
                 {!engineEnabled
                   ? "Stopped"
-                  : engineStale
-                    ? "Stale"
-                    : engineRunning
-                      ? "Running"
-                      : "Reconnecting"}
+                  : noLivePrint
+                    ? "No quote"
+                    : engineStale
+                      ? "Stale"
+                      : engineHealthy
+                        ? "Running"
+                        : "Reconnecting"}
               </Badge>
               {engineEnabled ? (
                 <Badge tone={streaming ? "success" : "warning"} dot={false}>
@@ -1057,15 +1252,31 @@ export function SignalMetricsPanel({
                   ? "mock feed"
                   : (state?.feed_source ?? "…")
                 : "engine stopped"}
-              {!state?.has_broker && !mockMode ? " · broker not bound" : ""}
+              {state && state.has_broker === false && !mockMode
+                ? " · broker not bound"
+                : ""}
             </span>
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
             <Button
+              variant={screenerOpen ? "primary" : "secondary"}
+              size="sm"
+              icon={<SearchIcon />}
+              onClick={() => {
+                setBooksOpen(false);
+                setScreenerOpen((open) => !open);
+              }}
+            >
+              Screener
+            </Button>
+            <Button
               variant={booksOpen ? "primary" : "secondary"}
               size="sm"
               icon={<BookIcon />}
-              onClick={() => setBooksOpen((open) => !open)}
+              onClick={() => {
+                setScreenerOpen(false);
+                setBooksOpen((open) => !open);
+              }}
             >
               Books
             </Button>
@@ -1291,6 +1502,56 @@ export function SignalMetricsPanel({
                 onRefresh={onRefreshBooks}
                 fetchedAt={fetchedAt}
                 rangeDays={rangeDays}
+              />
+            </div>
+          </aside>
+        </div>
+      ) : null}
+
+      {screenerOpen ? (
+        <div className="absolute inset-0 z-30 flex justify-end bg-ink/35">
+          <button
+            type="button"
+            aria-label="Close overlay"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setScreenerOpen(false)}
+          />
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-label="Screener"
+            className="relative z-10 flex h-full w-full max-w-5xl flex-col border-l border-line bg-canvas shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
+              <h2 className="flex items-center gap-2 font-display text-base font-semibold text-ink">
+                <SearchIcon className="h-4 w-4" />
+                Screener
+              </h2>
+              <button
+                type="button"
+                onClick={() => setScreenerOpen(false)}
+                aria-label="Close"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-muted hover:bg-fog/70 hover:text-ink"
+              >
+                <CloseIcon className="h-4 w-4" />
+              </button>
+            </div>
+            {screenerError ? (
+              <div className="mx-3 mt-2 rounded-md border border-rose/30 bg-rose/10 px-2 py-1 text-xs text-rose">
+                {screenerError}
+              </div>
+            ) : null}
+            <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
+              <OptionsLabScreenerPanel
+                snapshot={screener}
+                loading={screenerLoading}
+                universe={screenerUniverse}
+                onUniverseChange={setScreenerUniverse}
+                onRefresh={() => void refreshScreener()}
+                onResetBaseline={() => void onResetScreenerBaseline()}
+                resetting={resettingScreener}
+                onSelectUnderlying={onSelectScreenerUnderlying}
               />
             </div>
           </aside>

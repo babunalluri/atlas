@@ -37,6 +37,21 @@ _SENSITIVE_HEADER_NAMES = frozenset(
     }
 )
 
+# Kite (and similar) use POST + JSON for read-only margin quotes. Allow these
+# paths on non-mutating sandbox runs without opening POST /orders.
+_READ_POST_PATH_PREFIXES = ("/margins",)
+
+
+def _proxy_allowed_methods(url: str, *, mutating: bool) -> tuple[str, ...]:
+    if mutating:
+        return ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
+    from urllib.parse import urlparse
+
+    path = (urlparse(url).path or "").lower()
+    if any(path == prefix or path.startswith(prefix + "/") for prefix in _READ_POST_PATH_PREFIXES):
+        return ("GET", "HEAD", "POST")
+    return ("GET", "HEAD")
+
 
 @dataclass(slots=True)
 class SandboxRunRequest:
@@ -213,11 +228,7 @@ class SandboxOrchestrator:
                 )
             raise LookupError("Sandbox run is not owned by this instance")
         merged = {**request.headers, **(headers or {})}
-        allowed = (
-            ("GET", "POST", "PUT", "PATCH", "DELETE")
-            if request.mutating
-            else ("GET", "HEAD")
-        )
+        allowed = _proxy_allowed_methods(url, mutating=request.mutating)
         try:
             response = await rest_client.request(
                 method.upper(),

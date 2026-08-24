@@ -1,4 +1,8 @@
 .env
+# Live broker credential dumps (api_key / api_secret / access_token).
+# Docs show the JSON shape; never commit filled files.
+Instructions/StockBroker/tools/kite_credentials
+Instructions/StockBroker/tools/*_credentials
 # OCI / SSH private keys — never commit
 keys/*
 !keys/.gitignore

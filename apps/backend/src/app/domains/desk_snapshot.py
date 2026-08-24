@@ -926,7 +926,14 @@ def quote_call_attempts(fn: Any, symbols: list[str]) -> list[dict[str, Any]]:
             }
             attempts.append(payload)
     if is_zero_arg(fn) and names:
-        attempts.append({})
+        # Quote tools accept all-default kwargs but empty {} always fails
+        # (_resolve_instruments). Skip that attempt so auth errors stay visible.
+        if not (
+            "instruments" in names
+            or "trading_symbols" in names
+            or "exchange_symbols" in names
+        ):
+            attempts.append({})
     # Deduplicate while preserving order.
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1046,11 +1053,34 @@ def _symbol_key(symbol: str) -> str:
     return symbol.upper().replace(" ", "")
 
 
-def _kite_instrument(symbol: str) -> str:
-    text = symbol.strip()
-    if ":" in text:
+# Atlas/UI shorthand → Kite cash-market instrument ids.
+KITE_QUOTE_ALIASES: dict[str, str] = {
+    "NSE:NIFTY": "NSE:NIFTY 50",
+    "NSE:NIFTY50": "NSE:NIFTY 50",
+    "NSE:BANKNIFTY": "NSE:NIFTY BANK",
+    "NSE:NIFTYBANK": "NSE:NIFTY BANK",
+    "NSE:FINNIFTY": "NSE:NIFTY FIN SERVICE",
+    "NSE:NIFTYNXT50": "NSE:NIFTY NEXT 50",
+    "NSE:MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+}
+
+
+def resolve_kite_instrument(symbol: str) -> str:
+    """Map desk shorthand to the instrument id Kite's /quote API expects."""
+    text = (symbol or "").strip()
+    if not text:
         return text
-    return f"NSE:{text}"
+    if ":" not in text:
+        text = f"NSE:{text}"
+    compact = text.upper().replace(" ", "")
+    for alias, canonical in KITE_QUOTE_ALIASES.items():
+        if compact == alias.upper().replace(" ", ""):
+            return canonical
+    return text
+
+
+def _kite_instrument(symbol: str) -> str:
+    return resolve_kite_instrument(symbol)
 
 
 def _looks_like_quote_map(value: dict[str, Any]) -> bool:

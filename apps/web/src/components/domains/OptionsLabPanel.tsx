@@ -15,6 +15,10 @@ import { OptionsLabSetupBar } from "@/components/domains/OptionsLabSetupBar";
 import { OptionsLabStrategyPanel } from "@/components/domains/OptionsLabStrategyPanel";
 import { OptionsLabStraddleChart } from "@/components/domains/OptionsLabStraddleChart";
 import { useOptionsLabConfigAutosave } from "@/components/domains/useOptionsLabConfigAutosave";
+import {
+  deskInstrumentKey,
+  publishDeskInstrument,
+} from "@/components/domains/desk-instrument";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import type { StrategyLeg, StrategyTemplateId } from "@/components/domains/options-lab-strategy";
 import { STRATEGY_TEMPLATES } from "@/components/domains/options-lab-strategy";
@@ -220,6 +224,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   const mounted = useRef(true);
   const refreshSeq = useRef(0);
   const screenerSeq = useRef(0);
+  const screenerAbortRef = useRef<AbortController | null>(null);
   const flowsSeq = useRef(0);
   const chainToggleSeq = useRef(0);
 
@@ -287,15 +292,39 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
 
   const refreshScreener = useCallback(async () => {
     const seq = ++screenerSeq.current;
+    screenerAbortRef.current?.abort();
+    const controller = new AbortController();
+    screenerAbortRef.current = controller;
     setScreenerLoading(true);
     try {
       const token = await getAccessToken();
       if (!token || !mounted.current) return;
-      const data = await getOptionsScreener(token, screenerUniverse);
+      // Fast paint: spot/ATM only (or warm full cache from API).
+      const fast = await getOptionsScreener(
+        token,
+        screenerUniverse,
+        "fast",
+        controller.signal,
+      );
       if (!mounted.current || seq !== screenerSeq.current) return;
-      setScreener(data);
-      setScreenerError(data.ok ? null : data.error ?? "Screener unavailable");
+      setScreener(fast);
+      setScreenerError(fast.ok ? null : fast.error ?? "Screener unavailable");
+      setScreenerLoading(false);
+
+      // Enrich in background when fast returned a partial snapshot.
+      if (fast.ok && fast.partial === true) {
+        const full = await getOptionsScreener(
+          token,
+          screenerUniverse,
+          "full",
+          controller.signal,
+        );
+        if (!mounted.current || seq !== screenerSeq.current) return;
+        setScreener(full);
+        setScreenerError(full.ok ? null : full.error ?? "Screener unavailable");
+      }
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (mounted.current && seq === screenerSeq.current) {
         setScreenerError(err instanceof Error ? err.message : "Failed to load screener");
       }
@@ -351,11 +380,22 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   const onSelectScreenerUnderlying = useCallback(
     (row: OptionsScreenerRow, opts?: { closeOverlay?: boolean }) => {
       const preset = presets.find((item) => item.symbol === row.underlying_symbol);
+      const strike =
+        row.strike_step ??
+        preset?.strike_step ??
+        config?.strike_step ??
+        50;
       patchConfig({
         underlying_symbol: row.underlying_symbol,
         underlying_label: row.underlying_label,
-        strike_step: preset?.strike_step ?? config?.strike_step ?? 50,
+        strike_step: strike,
         fut_symbol: row.fut_symbol || suggestFutSymbol(row.underlying_symbol),
+      });
+      publishDeskInstrument({
+        underlying_symbol: row.underlying_symbol,
+        underlying_label: row.underlying_label,
+        fut_symbol: row.fut_symbol || suggestFutSymbol(row.underlying_symbol) || undefined,
+        strike_step: strike,
       });
       if (opts?.closeOverlay !== false) {
         setOverlay(null);
@@ -429,6 +469,49 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
   }, [overlay]);
 
   const streamGeneration = useRef(0);
+  const lastDeskPublishKey = useRef("");
+
+  // Push Options Lab instrument (+ ATM CE/PE from the live chain) to Signal Engine.
+  useEffect(() => {
+    if (!active) return;
+    const underlying =
+      snapshot?.underlying_symbol?.trim() ||
+      config?.underlying_symbol?.trim() ||
+      "";
+    if (!underlying) return;
+    const atmRow = snapshot?.rows?.find((row) => row.is_atm);
+    const selection = {
+      underlying_symbol: underlying,
+      underlying_label:
+        snapshot?.underlying_label?.trim() ||
+        config?.underlying_label?.trim() ||
+        underlying,
+      fut_symbol:
+        snapshot?.fut_symbol?.trim() ||
+        config?.fut_symbol?.trim() ||
+        undefined,
+      strike_step: snapshot?.strike_step ?? config?.strike_step,
+      ce_symbol: atmRow?.ce?.symbol || undefined,
+      pe_symbol: atmRow?.pe?.symbol || undefined,
+      updated_at_ms: Date.now(),
+      source: "options-lab" as const,
+    };
+    const key = deskInstrumentKey(selection);
+    if (key === lastDeskPublishKey.current) return;
+    lastDeskPublishKey.current = key;
+    publishDeskInstrument(selection);
+  }, [
+    active,
+    config?.fut_symbol,
+    config?.strike_step,
+    config?.underlying_label,
+    config?.underlying_symbol,
+    snapshot?.fut_symbol,
+    snapshot?.rows,
+    snapshot?.strike_step,
+    snapshot?.underlying_label,
+    snapshot?.underlying_symbol,
+  ]);
 
   useEffect(() => {
     if (!active || !isLoaded || !isSignedIn || !configReady) return;
@@ -518,7 +601,10 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
     if (overlay !== "screener" && overlay !== "heatmap" && overlay !== "ideas") return;
     void refreshScreener();
     const timer = window.setInterval(() => void refreshScreener(), SCREENER_POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      screenerAbortRef.current?.abort();
+    };
   }, [
     active,
     config?.mock,

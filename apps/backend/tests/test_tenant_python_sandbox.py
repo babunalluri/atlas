@@ -549,6 +549,68 @@ async def test_orchestrator_reports_missing_manager():
     assert get_orchestrator_for_run(result.run_id) is None
 
 
+def test_proxy_allowed_methods_permits_margins_post_on_read_runs():
+    from app.tools.sandbox.orchestrator import _proxy_allowed_methods
+
+    margins = _proxy_allowed_methods(
+        "https://api.kite.trade/margins/basket?mode=compact",
+        mutating=False,
+    )
+    orders = _proxy_allowed_methods(
+        "https://api.kite.trade/orders/regular",
+        mutating=False,
+    )
+    mutating_orders = _proxy_allowed_methods(
+        "https://api.kite.trade/orders/regular",
+        mutating=True,
+    )
+    assert "POST" in margins
+    assert "POST" not in orders
+    assert "POST" in mutating_orders
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_allows_margins_post_on_read_runs(monkeypatch):
+    """Kite margin quotes need POST + JSON but are non-mutating capabilities."""
+    client = SafeRestClient({"api.kite.trade"})
+    orch = SandboxOrchestrator(
+        manager_url="",
+        client=client,
+        callback_base_url="http://backend:7777",
+    )
+    run = SandboxRunRequest(
+        source_code=SAFE_SOURCE,
+        settings={},
+        capability="get_basket_margins",
+        arguments={},
+        mutating=False,
+    )
+    from app.tools.sandbox import orchestrator as orch_mod
+
+    async def _fake_request(method, url, **kwargs):
+        assert method == "POST"
+        assert "/margins/basket" in url
+        assert "POST" in (kwargs.get("allowed_methods") or ())
+        return {"status": 200, "body": {"status": "success", "data": {}}}
+
+    monkeypatch.setattr(client, "request", _fake_request)
+
+    run_id = "margins-post-run"
+    orch_mod._ACTIVE[run_id] = orch
+    orch_mod._RUN_REQUESTS[run_id] = run
+    try:
+        ok = await orch.handle_http_proxy(
+            run_id,
+            method="POST",
+            url="https://api.kite.trade/margins/basket?mode=compact",
+            json_body=[{"exchange": "NFO", "tradingsymbol": "NIFTY26AUG24200CE"}],
+        )
+        assert ok["ok"] is True
+    finally:
+        orch_mod._ACTIVE.pop(run_id, None)
+        orch_mod._RUN_REQUESTS.pop(run_id, None)
+
+
 @pytest.mark.asyncio
 async def test_provider_catalog_includes_tenant_python():
     assert "tenant_python" in PROVIDERS

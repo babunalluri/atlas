@@ -38,7 +38,7 @@ function formatPct(value: number | null | undefined) {
 }
 
 function formatOi(value: number | null | undefined) {
-  if (value === null || value === undefined) return "—";
+  if (value === null || value === undefined || value === 0) return "—";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(Math.round(value));
@@ -145,7 +145,14 @@ export function OptionsLabScreenerPanel({
               : universe === "all"
                 ? "Index + equity F&O screener"
                 : "Index F&O screener"}{" "}
-            · ATM ±5 chain scan · refreshed {fetchedLabel ?? "…"}
+            ·{" "}
+            {universe === "indices"
+              ? "ATM ±5 chain scan"
+              : universe === "equities"
+                ? "ATM ±2 enrich (fast spot first)"
+                : "ATM ±5 index / ±2 equity (fast spot first)"}
+            {snapshot?.partial ? " · enriching metrics…" : ""} · refreshed{" "}
+            {fetchedLabel ?? "…"}
           </p>
           <div className="mt-2 flex flex-wrap gap-1">
             {(

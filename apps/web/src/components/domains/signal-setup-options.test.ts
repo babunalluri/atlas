@@ -5,6 +5,8 @@ import {
   buildOptionSideOptions,
   buildStrikeStepOptions,
   deriveOptionSymbol,
+  isOptionSymbol,
+  sanitizeOptionSymbol,
   suggestFutSymbol,
 } from "@/components/domains/signal-setup-options";
 
@@ -15,6 +17,9 @@ describe("signal setup options", () => {
       "NFO:NIFTY26AUGFUT",
     );
     expect(suggestFutSymbol("NSE:BANKNIFTY", august2026)).toBe(
+      "NFO:BANKNIFTY26AUGFUT",
+    );
+    expect(suggestFutSymbol("NSE:NIFTY BANK", august2026)).toBe(
       "NFO:BANKNIFTY26AUGFUT",
     );
   });
@@ -76,5 +81,24 @@ describe("signal setup options", () => {
     expect(options.map((option) => option.value)).toContain(
       "NFO:NIFTY26AUG24500CE",
     );
+  });
+
+  it("drops FUT values mistakenly used as CE/PE current", () => {
+    const options = buildOptionSideOptions(
+      "NFO:NIFTY26AUGFUT",
+      "CE",
+      24150,
+      50,
+      "NFO:NIFTY26AUGFUT",
+    );
+    const values = options.map((option) => option.value);
+    expect(values).not.toContain("NFO:NIFTY26AUGFUT");
+    expect(values).toContain("NFO:NIFTY26AUG24150CE");
+  });
+
+  it("does not treat index names ending in CE as options", () => {
+    expect(isOptionSymbol("NSE:NIFTY FIN SERVICE")).toBe(false);
+    expect(sanitizeOptionSymbol("NSE:NIFTY FIN SERVICE")).toBe("");
+    expect(isOptionSymbol("NFO:NIFTY26AUG24150CE")).toBe(true);
   });
 });

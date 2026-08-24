@@ -5,6 +5,7 @@ import type {
   ConversationSession,
 } from "@/lib/api/types";
 import { unpackAccessContext } from "@/lib/auth/access-context";
+import { randomUuid } from "@/lib/random-uuid";
 
 function agentOsBaseUrl(): string {
   // Server-side (Docker/SSR) must reach the backend by service hostname.
@@ -35,11 +36,11 @@ export function getOrCreateGuestId(): string {
     if (existing && /^[a-zA-Z0-9_-]{8,64}$/.test(existing)) {
       return existing;
     }
-    const created = crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+    const created = randomUuid().replace(/-/g, "").slice(0, 32);
     window.localStorage.setItem(GUEST_ID_KEY, created);
     return created;
   } catch {
-    return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+    return randomUuid().replace(/-/g, "").slice(0, 32);
   }
 }
 
@@ -300,7 +301,7 @@ export function streamConfiguredAgent(
   body.set("stream", "true");
   body.set("background", "true");
   body.set("agent_config_id", agentConfigId);
-  body.set("session_id", sessionId ?? crypto.randomUUID());
+  body.set("session_id", sessionId ?? randomUuid());
   body.set("preview", String(preview));
 
   return streamAgentRun({
@@ -336,7 +337,7 @@ export function streamPublicTeam(
   body.set("message", message);
   body.set("stream", "true");
   body.set("background", "true");
-  body.set("session_id", sessionId ?? crypto.randomUUID());
+  body.set("session_id", sessionId ?? randomUuid());
   return streamPublicRun({
     ...rest,
     guestId,
@@ -361,7 +362,7 @@ export function streamPublicWorkflow(
   body.set("message", message);
   body.set("stream", "true");
   body.set("background", "true");
-  body.set("session_id", sessionId ?? crypto.randomUUID());
+  body.set("session_id", sessionId ?? randomUuid());
   return streamPublicRun({
     ...rest,
     guestId,
@@ -525,7 +526,7 @@ export function streamConfiguredTeam(
   body.set("stream", "true");
   body.set("background", "true");
   body.set("team_config_id", teamConfigId);
-  body.set("session_id", sessionId ?? crypto.randomUUID());
+  body.set("session_id", sessionId ?? randomUuid());
   body.set("preview", String(preview));
   return streamAgentRun({
     ...rest,
@@ -557,7 +558,7 @@ export function streamConfiguredWorkflow(
   body.set("stream", "true");
   body.set("background", "true");
   body.set("workflow_config_id", workflowConfigId);
-  body.set("session_id", sessionId ?? crypto.randomUUID());
+  body.set("session_id", sessionId ?? randomUuid());
   body.set("preview", String(preview));
   return streamAgentRun({
     ...rest,

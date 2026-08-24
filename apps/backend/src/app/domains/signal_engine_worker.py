@@ -15,11 +15,17 @@ from app.db.models import Role, Tenant
 from app.db.session import SessionFactory, apply_tenant_guc
 from app.domains import signal_engine_cache as cache
 from app.domains.kite_ticker_hub import (
+    SOURCE_SIGNAL,
+    assemble_quotes_from_book,
     get_kite_ticker_hub,
     resolve_kite_credentials,
     token_map_from_quotes,
 )
-from app.domains.signal_engine_constants import STREAM_INTERVAL_MS, TICKER_IDLE_POLL_SECONDS
+from app.domains.signal_engine_constants import (
+    SIGNAL_ACTIVE_TICK_MS,
+    STREAM_INTERVAL_MS,
+    TICKER_IDLE_POLL_SECONDS,
+)
 from app.domains.signal_engine import SignalEngineService
 from app.tenancy.context import TenantContext
 
@@ -61,8 +67,24 @@ async def sync_kite_for_signal_tenant(
                 creds = await resolve_kite_credentials(session, context)
                 if creds is None:
                     return False
-                quotes = await engine._fetch_quote(symbols, prefer="get_quote")
+                # Prefer live/REST book for instrument tokens; sandbox only for gaps.
+                quotes = (
+                    await assemble_quotes_from_book(
+                        str(tenant_id),
+                        symbols,
+                        require_all=False,
+                        require_alive=False,
+                    )
+                    or {}
+                )
                 token_map = token_map_from_quotes(quotes)
+                have_syms = set(token_map.values())
+                missing = [sym for sym in symbols if sym not in have_syms]
+                if missing:
+                    quotes.update(
+                        await engine._fetch_quote(missing, prefer="get_quote")
+                    )
+                    token_map = token_map_from_quotes(quotes)
                 if not token_map:
                     return False
                 api_key, access_token = creds
@@ -71,6 +93,7 @@ async def sync_kite_for_signal_tenant(
                     api_key=api_key,
                     access_token=access_token,
                     token_to_symbol=token_map,
+                    source=SOURCE_SIGNAL,
                 )
                 return True
     except Exception as exc:
@@ -80,6 +103,35 @@ async def sync_kite_for_signal_tenant(
             error=str(exc),
         )
         return False
+
+
+async def refresh_tier_b_for_tenant(tenant_id: uuid.UUID, *, auth_org_id: str) -> None:
+    """Refresh crude/VIX/aux caches without gating the Tier A snapshot tick."""
+    tenant_key = str(tenant_id)
+    # Gate at medium TTL so book-first ticks are not stampeded by aux REST.
+    if await cache.get_metric(tenant_key, "tier_b_refresh_gate") is not None:
+        return
+    await cache.set_metric(tenant_key, "tier_b_refresh_gate", "medium", True)
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="signal-tier-b",
+        role=Role.tenant_admin,
+        auth_org_id=auth_org_id,
+        principal_type="scheduler",
+    )
+    try:
+        async with SessionFactory() as session:
+            async with session.begin():
+                await apply_tenant_guc(session, tenant_id)
+                service = SignalEngineService(session, context)
+                config = await service._load_config()
+                await service.refresh_tier_b_context(config)
+    except Exception as exc:
+        logger.warning(
+            "signal_tier_b_refresh_failed",
+            tenant_id=tenant_key,
+            error=str(exc),
+        )
 
 
 async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> bool:
@@ -92,6 +144,10 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
     try:
         # Prefer live WS quotes before the expensive state() fan-out.
         await sync_kite_for_signal_tenant(tenant_id, auth_org_id=auth_org_id)
+        # Tier B (crude/VIX/aux) refreshes off the critical path.
+        asyncio.create_task(
+            refresh_tier_b_for_tenant(tenant_id, auth_org_id=auth_org_id)
+        )
         context = TenantContext(
             tenant_id=tenant_id,
             user_id="signal-ticker",
@@ -138,7 +194,9 @@ class SignalEngineWorker:
             self._task = None
 
     async def _loop(self) -> None:
-        active_interval = STREAM_INTERVAL_MS / 1000
+        # SSE still streams at STREAM_INTERVAL_MS from Redis; this loop only
+        # refreshes snapshots. Book-first Tier A uses SIGNAL_ACTIVE_TICK_MS.
+        active_interval = max(STREAM_INTERVAL_MS, SIGNAL_ACTIVE_TICK_MS) / 1000
         while not self._stop.is_set():
             try:
                 has_watchers = await self.tick()

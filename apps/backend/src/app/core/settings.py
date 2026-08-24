@@ -353,7 +353,7 @@ class Settings(BaseSettings):
         validation_alias="SANDBOX_PYTHON_IMAGE",
     )
     sandbox_tenant_concurrency: int = Field(
-        default=4, ge=1, le=32, validation_alias="SANDBOX_TENANT_CONCURRENCY"
+        default=12, ge=1, le=32, validation_alias="SANDBOX_TENANT_CONCURRENCY"
     )
     sandbox_wall_seconds: int = Field(
         default=30, ge=5, le=120, validation_alias="SANDBOX_WALL_SECONDS"

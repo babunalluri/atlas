@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime.factory import AgentFactoryService, McpToolSkipped
+from app.core.logging import get_logger
 from app.db.repositories import TeamRepository, ToolDefinitionRepository, ToolDefinitionVersionRepository
 from app.db.repositories import UserNotificationRepository
 from app.domains.desk_snapshot import (
@@ -27,6 +29,7 @@ from app.domains.desk_snapshot import (
     _quote_map_rows,
     invoke_tool,
     quote_call_attempts,
+    resolve_kite_instrument,
 )
 from app.domains import signal_engine_cache as cache
 from app.domains.signal_engine_constants import (
@@ -34,6 +37,7 @@ from app.domains.signal_engine_constants import (
     SNAPSHOT_FRESH_MS,
     STREAM_COMPUTE_WAIT_MS,
     STREAM_INTERVAL_MS,
+    TIER_A_REST_GAP_FILL_MS,
     TIER_TTL_MS,
     Tier,
 )
@@ -74,6 +78,8 @@ LEVELS_DAILY_HISTORY_DAYS = 120
 
 SIGNAL_TEAM_SLUG = "signals-ops"
 
+logger = get_logger(__name__)
+
 Rule = Literal[
     "lt",
     "gt",
@@ -106,25 +112,37 @@ def _apply_engine_stopped_overlay(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _annotate_snapshot_freshness(payload: dict[str, Any]) -> dict[str, Any]:
-    """Attach age + server-side stale flag. Unknown age stays null (not 'fresh')."""
+def _annotate_snapshot_freshness(
+    payload: dict[str, Any],
+    *,
+    computing: bool = False,
+) -> dict[str, Any]:
+    """Attach age + server-side stale flag. Unknown age stays null (not 'fresh').
+
+    While a refresh is in flight, keep the badge fresh so long sandbox ticks do
+    not flip Running → Stale between computes.
+    """
     now_ms = int(time.time() * 1000)
     out = dict(payload)
     out["snapshot_fresh_ms"] = SNAPSHOT_FRESH_MS
+    out["engine_computing"] = bool(computing)
     computed = out.get("computed_at_ms")
     if computed is None:
         out["data_age_ms"] = None
-        out["snapshot_stale"] = None
+        out["snapshot_stale"] = None if not computing else False
         return out
     try:
         computed_ms = int(computed)
     except (TypeError, ValueError):
         out["data_age_ms"] = None
-        out["snapshot_stale"] = None
+        out["snapshot_stale"] = None if not computing else False
         return out
     age = max(0, now_ms - computed_ms)
     out["data_age_ms"] = age
-    out["snapshot_stale"] = age > SNAPSHOT_FRESH_MS
+    if computing:
+        out["snapshot_stale"] = False
+    else:
+        out["snapshot_stale"] = age > SNAPSHOT_FRESH_MS
     return out
 
 
@@ -132,12 +150,13 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
     """Coalesce concurrent stream/poll readers to one engine tick per tenant."""
     tenant_id = _tenant_key(service.context)
     config = await service._load_config()
+    computing = await cache.compute_lock_held(tenant_id)
 
     snapshot = await cache.get_snapshot(tenant_id)
     if snapshot is not None:
         if not config.engine_enabled:
             return _apply_engine_stopped_overlay(snapshot)
-        return _annotate_snapshot_freshness(snapshot)
+        return _annotate_snapshot_freshness(snapshot, computing=computing)
 
     if await cache.try_compute_lock(tenant_id):
         heartbeat = cache.start_compute_lock_heartbeat(tenant_id)
@@ -146,7 +165,7 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
             if snapshot is not None:
                 if not config.engine_enabled:
                     return _apply_engine_stopped_overlay(snapshot)
-                return _annotate_snapshot_freshness(snapshot)
+                return _annotate_snapshot_freshness(snapshot, computing=True)
             payload = await service.state()
             if not config.engine_enabled:
                 payload = _apply_engine_stopped_overlay(payload)
@@ -156,7 +175,7 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
                     "computed_at_ms": int(time.time() * 1000),
                 }
             await cache.set_snapshot(tenant_id, payload)
-            return _annotate_snapshot_freshness(payload)
+            return _annotate_snapshot_freshness(payload, computing=False)
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -173,7 +192,8 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
         if snapshot is not None:
             if not config.engine_enabled:
                 return _apply_engine_stopped_overlay(snapshot)
-            return _annotate_snapshot_freshness(snapshot)
+            still = await cache.compute_lock_held(tenant_id)
+            return _annotate_snapshot_freshness(snapshot, computing=still)
 
     payload = await service.state()
     if not config.engine_enabled:
@@ -181,17 +201,16 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
     else:
         payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
     await cache.set_snapshot(tenant_id, payload)
-    return _annotate_snapshot_freshness(payload)
+    return _annotate_snapshot_freshness(payload, computing=False)
 
 # Admin-selectable underlyings (not hard-coded to NIFTY).
 UNDERLYING_PRESETS: list[dict[str, Any]] = [
     {"label": "NIFTY 50", "symbol": "NSE:NIFTY 50", "strike_step": 50},
-    {"label": "NIFTY", "symbol": "NSE:NIFTY", "strike_step": 50},
-    {"label": "BANKNIFTY", "symbol": "NSE:BANKNIFTY", "strike_step": 100},
-    {"label": "FINNIFTY", "symbol": "NSE:FINNIFTY", "strike_step": 50},
-    {"label": "NIFTYNXT50", "symbol": "NSE:NIFTYNXT50", "strike_step": 100},
+    {"label": "BANKNIFTY", "symbol": "NSE:NIFTY BANK", "strike_step": 100},
+    {"label": "FINNIFTY", "symbol": "NSE:NIFTY FIN SERVICE", "strike_step": 50},
+    {"label": "NIFTYNXT50", "symbol": "NSE:NIFTY NEXT 50", "strike_step": 100},
     {"label": "SENSEX", "symbol": "BSE:SENSEX", "strike_step": 100},
-    {"label": "MIDCPNIFTY", "symbol": "NSE:MIDCPNIFTY", "strike_step": 25},
+    {"label": "MIDCPNIFTY", "symbol": "NSE:NIFTY MID SELECT", "strike_step": 25},
 ]
 
 ADMIN_CONFIG_KEYS: tuple[str, ...] = (
@@ -278,8 +297,8 @@ class SignalEngineConfig:
             nifty_fut_symbol=str(
                 raw.get("nifty_fut_symbol") or raw.get("fut_symbol") or ""
             ).strip(),
-            ce_symbol=str(raw.get("ce_symbol") or ""),
-            pe_symbol=str(raw.get("pe_symbol") or ""),
+            ce_symbol=_sanitize_option_symbol(raw.get("ce_symbol")),
+            pe_symbol=_sanitize_option_symbol(raw.get("pe_symbol")),
             crude_symbol=str(raw.get("crude_symbol") or "MCX:CRUDEOILM"),
             dow_change_pct=float(dow) if dow is not None and dow != "" else None,
             strike_step=int(raw.get("strike_step") or 50),
@@ -397,6 +416,30 @@ def _session_dated_key(name: str) -> str:
     return f"{name}:{_ist_session_date()}"
 
 
+def _option_side_from_symbol(symbol: str) -> str | None:
+    """Return CE/PE when ``symbol`` is an option contract (not a FUT/index name).
+
+    Requires a digit before the side suffix so ``NIFTY FIN SERVICE`` (ends in
+    ``CE``) is not mistaken for a call option.
+    """
+    raw = symbol.strip().upper()
+    if not raw or raw.endswith("FUT"):
+        return None
+    body = raw.split(":", 1)[-1]
+    match = re.search(r"(\d)(CE|PE)$", body)
+    if not match:
+        return None
+    return match.group(2)
+
+
+def _sanitize_option_symbol(symbol: str | None) -> str:
+    """Drop blanks / FUT / non-option values pasted into CE/PE fields."""
+    raw = str(symbol or "").strip()
+    if not raw or _option_side_from_symbol(raw) is None:
+        return ""
+    return raw
+
+
 def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None:
     """Build `NFO:NIFTY26AUG24500CE` from `NFO:NIFTY26AUGFUT` + ATM strike."""
     side = side.upper()
@@ -419,8 +462,8 @@ def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None
 
 
 def _resolve_option_symbols(config: SignalEngineConfig, atm: int | None) -> tuple[str, str]:
-    ce = config.ce_symbol.strip() if config.ce_symbol else ""
-    pe = config.pe_symbol.strip() if config.pe_symbol else ""
+    ce = _sanitize_option_symbol(config.ce_symbol)
+    pe = _sanitize_option_symbol(config.pe_symbol)
     if (
         config.auto_atm_symbols
         and atm is not None
@@ -1084,9 +1127,18 @@ def _normalize_quote_payload(result: Any) -> dict[str, Any]:
     return data
 
 
-def _quote_keys_match(quote_key: str, *, norm: str, groww: str) -> bool:
+def _quote_keys_match(
+    quote_key: str,
+    *,
+    norm: str,
+    groww: str,
+    canon_norm: str | None = None,
+) -> bool:
     qk = quote_key.upper().replace(" ", "")
-    if qk == norm or qk == groww:
+    qk_canon = resolve_kite_instrument(quote_key).upper().replace(" ", "")
+    if qk == norm or qk_canon == norm or qk == groww:
+        return True
+    if canon_norm and (qk == canon_norm or qk_canon == canon_norm):
         return True
     if "_" in qk and qk.split("_", 1)[-1] == groww:
         return True
@@ -1105,14 +1157,22 @@ def _find_quote_row(quotes: dict[str, Any], symbol: str) -> dict[str, Any] | Non
     if not quotes or not symbol:
         return None
     key = symbol.strip()
+    resolved = resolve_kite_instrument(key)
     norm = key.upper().replace(" ", "")
+    canon_norm = resolved.upper().replace(" ", "")
     groww = _groww_symbol(key).upper()
-    direct = _quote_row_from_value(quotes.get(key))
-    if direct is not None:
-        return direct
+    for candidate in dict.fromkeys([key, resolved]):
+        direct = _quote_row_from_value(quotes.get(candidate))
+        if direct is not None:
+            return direct
     keyed = {qk: row for qk, row in quotes.items() if qk != "_flat"}
     for quote_key, row in keyed.items():
-        if not _quote_keys_match(str(quote_key), norm=norm, groww=groww):
+        if not _quote_keys_match(
+            str(quote_key),
+            norm=norm,
+            groww=groww,
+            canon_norm=canon_norm,
+        ):
             continue
         parsed = _quote_row_from_value(row)
         if parsed is not None:
@@ -1127,19 +1187,45 @@ def _find_keyed_quote_row(quotes: dict[str, Any], symbol: str) -> dict[str, Any]
     if not quotes or not symbol:
         return None
     key = symbol.strip()
+    resolved = resolve_kite_instrument(key)
     norm = key.upper().replace(" ", "")
+    canon_norm = resolved.upper().replace(" ", "")
     groww = _groww_symbol(key).upper()
-    direct = _quote_row_from_value(quotes.get(key))
-    if direct is not None:
-        return direct
+    for candidate in dict.fromkeys([key, resolved]):
+        direct = _quote_row_from_value(quotes.get(candidate))
+        if direct is not None:
+            return direct
     for quote_key, row in quotes.items():
         if quote_key == "_flat":
             continue
-        if not _quote_keys_match(str(quote_key), norm=norm, groww=groww):
+        if not _quote_keys_match(
+            str(quote_key),
+            norm=norm,
+            groww=groww,
+            canon_norm=canon_norm,
+        ):
             continue
         parsed = _quote_row_from_value(row)
         if parsed is not None:
             return parsed
+    return None
+
+
+def _broker_auth_warning(quote_error: str | None) -> str | None:
+    """Map swallowed sandbox auth failures to an actionable desk warning."""
+    text = (quote_error or "").lower()
+    if not text:
+        return None
+    if "api_key" in text or "access_token" in text or "credential" in text:
+        return (
+            "Kite credentials missing on kite-toolkit — attach a tenant credential "
+            "JSON with api_key + access_token (daily token) and publish."
+        )
+    if "token" in text and ("invalid" in text or "expired" in text or "forbidden" in text):
+        return (
+            "Kite access_token rejected — mint a fresh token (~expires 06:00 IST) "
+            "and update the kite-toolkit credential."
+        )
     return None
 
 
@@ -1149,6 +1235,7 @@ def _live_setup_warnings(
     *,
     has_broker: bool,
     team_ready: bool,
+    quote_error: str | None = None,
 ) -> list[str]:
     if config.mock:
         return []
@@ -1157,14 +1244,30 @@ def _live_setup_warnings(
         warnings.append("Publish the Signals ops team and bind tools.")
     if not has_broker:
         warnings.append("Bind Kite (recommended) or Groww read-only quotes on Signals ops.")
+    auth_hint = _broker_auth_warning(quote_error)
+    if auth_hint:
+        warnings.append(auth_hint)
     if not config.underlying_symbol:
         warnings.append("Select an underlying symbol (Admin → Signal config).")
-    elif feed.get("nifty_ltp") is None:
+    elif feed.get("nifty_ltp") is None and not auth_hint:
         warnings.append(
             f"No live print for {config.underlying_symbol}. Check broker token and symbol."
         )
-    if not config.ce_symbol or not config.pe_symbol:
-        warnings.append("Set ce_symbol and pe_symbol in signal engine tool settings.")
+    ce_ok = bool(_sanitize_option_symbol(config.ce_symbol))
+    pe_ok = bool(_sanitize_option_symbol(config.pe_symbol))
+    can_auto_atm = bool(
+        config.auto_atm_symbols and config.nifty_fut_symbol and feed.get("atm") is not None
+    )
+    if not ce_ok or not pe_ok:
+        if not (can_auto_atm or (config.auto_atm_symbols and config.nifty_fut_symbol)):
+            warnings.append(
+                "Set CE/PE option symbols (…CE / …PE), not FUT — or set FUT and enable auto ATM."
+            )
+        elif feed.get("ce") is None or feed.get("pe") is None:
+            if feed.get("nifty_ltp") is not None:
+                warnings.append(
+                    "CE/PE quotes missing — check FUT expiry/ATM and that Kite returns option LTPs."
+                )
     elif feed.get("ce") is None or feed.get("pe") is None:
         warnings.append("CE/PE quotes missing — check option symbols and market hours.")
     if not config.nifty_fut_symbol:
@@ -1373,6 +1476,7 @@ class SignalEngineService:
         self.teams = TeamRepository(session, context)
         self.tools = ToolDefinitionRepository(session, context)
         self.tool_versions = ToolDefinitionVersionRepository(session, context)
+        self._last_quote_error: str | None = None
 
     @staticmethod
     def _tool_settings(definition: Any) -> dict[str, Any]:
@@ -1451,9 +1555,27 @@ class SignalEngineService:
     async def get_admin_config(self) -> dict[str, Any]:
         config = await self._load_config()
         tool = await self._signal_engine_tool()
+        # Match Options Lab: index presets + equity F&O list so screener picks
+        # (e.g. ASIANPAINT) show as named PRESET values, not always Custom….
+        from app.domains.options_lab import OptionsLabService
+        from app.domains.options_lab_underlyings import merge_presets
+
+        equity_presets: list[dict[str, Any]] = []
+        equity_meta: dict[str, Any] = {"source": "none"}
+        try:
+            lab = OptionsLabService(self.session, self.context)
+            equity_presets, equity_meta = await lab._equity_presets()
+        except Exception:  # noqa: BLE001
+            equity_presets = []
+        presets = merge_presets(
+            [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
+            equity_presets,
+        )
         return {
             "config": config.to_admin_dict(),
-            "presets": UNDERLYING_PRESETS,
+            "presets": presets,
+            "equity_source": equity_meta.get("source"),
+            "equity_count": len(equity_presets),
             "tool_bound": tool is not None,
             "tool_slug": tool.slug if tool else None,
         }
@@ -1472,6 +1594,14 @@ class SignalEngineService:
                 merged.pop(key, None)
             else:
                 merged[key] = val
+        # CE/PE must be option contracts (…CE / …PE), never a FUT paste.
+        for opt_key in ("ce_symbol", "pe_symbol"):
+            if opt_key in merged:
+                cleaned = _sanitize_option_symbol(str(merged.get(opt_key) or ""))
+                if cleaned:
+                    merged[opt_key] = cleaned
+                else:
+                    merged.pop(opt_key, None)
         # Keep legacy alias in sync for older readers.
         if merged.get("underlying_symbol"):
             merged["nifty_symbol"] = merged["underlying_symbol"]
@@ -1532,7 +1662,12 @@ class SignalEngineService:
                 built = await factory._build_tool(binding)
             except McpToolSkipped:
                 continue
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "signal_broker_tool_build_failed",
+                    error=str(exc)[:240],
+                    tool_id=str(binding.tool_definition_id),
+                )
                 continue
             callables = built if isinstance(built, list) else [built]
             for fn in callables:
@@ -1547,7 +1682,12 @@ class SignalEngineService:
                 continue
             try:
                 return await invoke_tool(fn, kwargs)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "signal_broker_tool_invoke_failed",
+                    tool=name,
+                    error=str(exc)[:240],
+                )
                 return None
         return None
 
@@ -1564,42 +1704,78 @@ class SignalEngineService:
         *,
         prefer: str | None = None,
     ) -> dict[str, Any]:
+        symbols = [s for s in symbols if s]
+        if not symbols:
+            return {}
         cached_key = f"quote:{prefer or 'auto'}:{','.join(symbols)}"
         tenant_id = _tenant_key(self.context)
         hit = await _cache_get(tenant_id, cached_key)
         if hit is not None:
+            self._last_quote_error = None
             return hit
 
-        # Live ticker book overlays REST so LTP/OI stay hot without dropping IV.
-        ticker_partial: dict[str, Any] = {}
+        # Per-symbol book (ticker + REST-seeded). Screener batches write here so
+        # Options Lab / Signal single-symbol lookups do not re-hit the sandbox.
+        book_partial: dict[str, Any] = {}
+        ticker_live: dict[str, Any] = {}
+        write_rest_quote_book = None
+        overlay_ticker_rows = None
         try:
             from app.domains.kite_ticker_hub import (
                 assemble_quotes_from_book,
-                overlay_ticker_rows,
+                overlay_ticker_rows as _overlay_ticker_rows,
+                write_rest_quote_book as _write_rest_quote_book,
             )
 
-            ticker_partial = (
-                await assemble_quotes_from_book(tenant_id, symbols, require_all=False)
+            overlay_ticker_rows = _overlay_ticker_rows
+            write_rest_quote_book = _write_rest_quote_book
+            book_partial = (
+                await assemble_quotes_from_book(
+                    tenant_id,
+                    symbols,
+                    require_all=False,
+                    require_alive=False,
+                )
+                or {}
+            )
+            ticker_live = (
+                await assemble_quotes_from_book(
+                    tenant_id,
+                    symbols,
+                    require_all=False,
+                    require_alive=True,
+                )
                 or {}
             )
         except Exception:
-            ticker_partial = {}
+            book_partial = {}
+            ticker_live = {}
 
-        # Ticker-only is fine for LTP-style callers. get_quote always hits REST so
-        # Options Lab / chain IV-greeks stay intact; ticker then overlays LTP/OI.
-        if (
-            prefer != "get_quote"
-            and ticker_partial
-            and len(ticker_partial) == len(symbols)
-        ):
-            await _cache_set(tenant_id, cached_key, "broker", ticker_partial)
-            return ticker_partial
+        def _row_reusable(symbol: str) -> bool:
+            """Reuse book rows; get_quote needs REST-shaped rows (ohlc/depth)."""
+            row = _find_quote_row(book_partial, symbol) or {}
+            if _pick_float(row, "last_price", "ltp", "last") is None:
+                return False
+            if prefer != "get_quote":
+                return True
+            return isinstance(row.get("ohlc"), dict) or "depth" in row
+
+        missing = [sym for sym in symbols if not _row_reusable(sym)]
+        # Full book hit: reuse without another sandbox round-trip.
+        if book_partial and not missing:
+            reused = book_partial
+            if ticker_live and overlay_ticker_rows is not None:
+                reused = overlay_ticker_rows(book_partial, ticker_live)
+            await _cache_set(tenant_id, cached_key, "broker", reused)
+            self._last_quote_error = None
+            return reused
 
         fns = await self._quote_tools()
         if not fns:
-            if ticker_partial:
-                await _cache_set(tenant_id, cached_key, "broker", ticker_partial)
-                return ticker_partial
+            if book_partial:
+                await _cache_set(tenant_id, cached_key, "broker", book_partial)
+                self._last_quote_error = None
+                return book_partial
             return {}
 
         if prefer:
@@ -1610,20 +1786,280 @@ class SignalEngineService:
                 key=lambda fn: QUOTE_TOOL_PRIORITY.get(getattr(fn, "__name__", ""), 99)
             )
 
+        fetch_symbols = missing or symbols
         merged: dict[str, Any] = {}
-        for fn in fns:
-            for kwargs in quote_call_attempts(fn, symbols):
-                try:
-                    result = await invoke_tool(fn, kwargs)
-                except Exception:
-                    continue
-                merged.update(_normalize_quote_payload(result))
+        # One retry: signal + Options Lab share the sandbox slot pool; brief
+        # concurrency spikes should not leave the chain offline.
+        quote_timeout_s = 25.0
+        for _attempt in range(2):
+            for fn in fns:
+                for kwargs in quote_call_attempts(fn, fetch_symbols):
+                    try:
+                        # Shield + bound wait: SSE cancel must not orphan a
+                        # sandbox slot for the full wall clock.
+                        result = await asyncio.wait_for(
+                            asyncio.shield(invoke_tool(fn, kwargs)),
+                            timeout=quote_timeout_s,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except TimeoutError:
+                        self._last_quote_error = "quote tool timed out"
+                        logger.warning(
+                            "broker_quote_invoke_timeout",
+                            tool=getattr(fn, "__name__", "?"),
+                            symbols=fetch_symbols[:8],
+                            timeout_s=quote_timeout_s,
+                        )
+                        continue
+                    except Exception as exc:
+                        err = str(exc)
+                        self._last_quote_error = err
+                        logger.warning(
+                            "broker_quote_invoke_failed",
+                            tool=getattr(fn, "__name__", "?"),
+                            symbols=fetch_symbols[:8],
+                            error=err[:240],
+                        )
+                        continue
+                    if isinstance(result, dict) and result.get("ok") is False:
+                        err = str(
+                            result.get("error")
+                            or result.get("message")
+                            or "quote tool returned ok=false"
+                        )
+                        self._last_quote_error = err
+                        logger.warning(
+                            "broker_quote_tool_not_ok",
+                            tool=getattr(fn, "__name__", "?"),
+                            error=err[:240],
+                        )
+                        continue
+                    merged.update(_normalize_quote_payload(result))
+                if merged:
+                    break
             if merged:
                 break
-        if ticker_partial:
-            merged = overlay_ticker_rows(merged, ticker_partial)
-        await _cache_set(tenant_id, cached_key, "broker", merged)
+            await asyncio.sleep(0.35)
+        # Prefer live ticker LTP over REST; fall back to REST book on total miss.
+        if ticker_live and overlay_ticker_rows is not None:
+            merged = overlay_ticker_rows(merged, ticker_live)
+        if book_partial and not merged:
+            merged = dict(book_partial)
+        elif book_partial and merged:
+            # Keep already-known symbols when this fetch only covered `missing`.
+            for key, row in book_partial.items():
+                if key not in merged and isinstance(row, dict):
+                    merged[key] = row
+        # Never cache empty broker misses — a transient sandbox/token failure
+        # must not poison Options Lab / signal ticks for the quote TTL window.
+        if merged:
+            self._last_quote_error = None
+            await _cache_set(tenant_id, cached_key, "broker", merged)
+            if write_rest_quote_book is not None:
+                try:
+                    await write_rest_quote_book(
+                        tenant_id,
+                        {
+                            key: row
+                            for key, row in merged.items()
+                            if key != "_flat" and isinstance(row, dict)
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "rest_quote_book_write_failed",
+                        error=str(exc)[:200],
+                    )
         return merged
+
+    async def _tier_a_quotes(self, symbols: list[str]) -> dict[str, Any]:
+        """Assemble underlying/FUT/CE/PE from the live ticker book; REST only for gaps.
+
+        When the ticker heartbeat is dead, REST gap-fill is rate-limited
+        (``TIER_A_REST_GAP_FILL_MS``) so a 200ms worker loop cannot stampede the
+        sandbox. Prefer stale/REST-seeded book rows over a fresh sandbox call.
+        """
+        symbols = list(dict.fromkeys(s for s in symbols if s))
+        if not symbols:
+            return {}
+        tenant_id = _tenant_key(self.context)
+        book: dict[str, Any] = {}
+        soft_book: dict[str, Any] = {}
+        ticker_alive = False
+        assemble_quotes_from_book = None
+        try:
+            from app.domains.kite_ticker_hub import (
+                TICKER_ALIVE_KEY,
+                assemble_quotes_from_book as _assemble,
+            )
+
+            assemble_quotes_from_book = _assemble
+            alive = await cache.get_metric(tenant_id, TICKER_ALIVE_KEY)
+            ticker_alive = isinstance(alive, dict)
+            book = (
+                await assemble_quotes_from_book(
+                    tenant_id,
+                    symbols,
+                    require_all=False,
+                    require_alive=True,
+                )
+                or {}
+            )
+        except Exception:
+            book = {}
+            ticker_alive = False
+
+        out = dict(book)
+        missing = [
+            sym
+            for sym in symbols
+            if _pick_float(
+                _find_quote_row(out, sym) or {},
+                "last_price",
+                "ltp",
+                "last",
+            )
+            is None
+        ]
+        if missing and assemble_quotes_from_book is not None:
+            # Reuse REST-seeded / recently written rows without the alive gate.
+            try:
+                soft_book = (
+                    await assemble_quotes_from_book(
+                        tenant_id,
+                        missing,
+                        require_all=False,
+                        require_alive=False,
+                    )
+                    or {}
+                )
+            except Exception:
+                soft_book = {}
+            for sym in list(missing):
+                row = _find_quote_row(soft_book, sym)
+                if (
+                    row is not None
+                    and _pick_float(row, "last_price", "ltp", "last") is not None
+                ):
+                    out[sym] = row
+            missing = [
+                sym
+                for sym in missing
+                if _pick_float(
+                    _find_quote_row(out, sym) or {},
+                    "last_price",
+                    "ltp",
+                    "last",
+                )
+                is None
+            ]
+
+        if not missing:
+            return out
+
+        # Ticker alive + partial miss (e.g. new ATM CE/PE) → fill immediately.
+        # Ticker dead → negative-cache REST so 5 Hz ticks do not hammer sandbox.
+        if not ticker_alive:
+            gate = await cache.get_metric(tenant_id, "tier_a_rest_gap")
+            if gate is not None:
+                return out
+            await cache.set_metric(
+                tenant_id,
+                "tier_a_rest_gap",
+                "broker",
+                {"missing": missing[:8], "ts": int(time.time())},
+                ttl_ms=TIER_A_REST_GAP_FILL_MS,
+            )
+
+        out.update(await self._fetch_quote(missing))
+        return out
+
+    async def refresh_tier_b_context(self, config: SignalEngineConfig) -> None:
+        """Refresh crude / VIX / aux quote caches off the Tier A critical path.
+
+        Safe to call from a background task; uses medium-tier TTLs so repeats
+        within ~60s are no-ops via cache hits.
+        """
+        if config.mock:
+            return
+        tenant_id = _tenant_key(self.context)
+
+        # Dow — slow/manual only (never broker-fetch here).
+        if config.dow_change_pct is not None:
+            await _cache_set(tenant_id, "dow_jones", "slow", config.dow_change_pct)
+
+        crude_cached = await _cache_get(tenant_id, "crude_oil")
+        if crude_cached is None and config.crude_symbol:
+            crude_q = await self._fetch_quote([config.crude_symbol])
+            crude_row = _find_quote_row(crude_q, config.crude_symbol)
+            if crude_row:
+                ltp = _pick_float(crude_row, "last_price", "ltp", "last")
+                prev = _pick_float(crude_row, "close", "previous_close")
+                ohlc = (
+                    crude_row.get("ohlc")
+                    if isinstance(crude_row.get("ohlc"), dict)
+                    else {}
+                )
+                if prev is None and isinstance(ohlc, dict):
+                    prev = _pick_float(ohlc, "close")
+                await _cache_set(
+                    tenant_id,
+                    "crude_oil",
+                    "medium",
+                    {"crude_ltp": ltp, "crude_prev_close": prev},
+                )
+
+        if config.india_vix is None and config.india_vix_symbol:
+            vix_cached = await _cache_get(tenant_id, "india_vix")
+            if vix_cached is None:
+                vix_q = await self._fetch_quote([config.india_vix_symbol])
+                vix_row = _find_quote_row(vix_q, config.india_vix_symbol)
+                if vix_row:
+                    vix_ltp = _pick_float(vix_row, "last_price", "ltp", "last")
+                    if vix_ltp is not None:
+                        await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
+
+        aux_cached = await _cache_get(tenant_id, "aux_quotes")
+        if not isinstance(aux_cached, dict):
+            aux_symbols = list(
+                dict.fromkeys(
+                    [
+                        *INDEX_KITE_SYMBOLS.values(),
+                        *STOCK_KITE_SYMBOLS.values(),
+                        USD_INR_KITE_SYMBOL,
+                    ]
+                )
+            )
+            aux_quotes = await self._fetch_quote(aux_symbols) if aux_symbols else {}
+            aux_payload: dict[str, Any] = {}
+            scratch: dict[str, Any] = {}
+            _apply_quote_pct_map(scratch, aux_quotes, INDEX_KITE_SYMBOLS)
+            _apply_quote_pct_map(scratch, aux_quotes, STOCK_KITE_SYMBOLS)
+            for key, val in scratch.items():
+                if key.startswith(("index_", "stock_")):
+                    aux_payload[key] = val
+            usd_row = _find_quote_row(aux_quotes, USD_INR_KITE_SYMBOL)
+            usd_ltp = _pick_float(usd_row or {}, "last_price", "ltp", "last")
+            if usd_ltp is not None:
+                aux_payload["usd_inr"] = usd_ltp
+            sensex_row = _find_quote_row(
+                aux_quotes, INDEX_KITE_SYMBOLS["index_sensex_chg"]
+            )
+            if sensex_row:
+                sensex_ltp = _pick_float(sensex_row, "last_price", "ltp", "last")
+                ohlc = (
+                    sensex_row.get("ohlc")
+                    if isinstance(sensex_row.get("ohlc"), dict)
+                    else {}
+                )
+                sensex_open = _pick_float(ohlc, "open") if ohlc else None
+                if sensex_ltp is not None and sensex_open is not None:
+                    aux_payload["sensex_points_move"] = round(
+                        sensex_ltp - sensex_open, 2
+                    )
+            if aux_payload:
+                await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
 
     async def _build_feed(self, config: SignalEngineConfig) -> dict[str, Any]:
         tenant_id = _tenant_key(self.context)
@@ -1633,7 +2069,7 @@ class SignalEngineService:
 
         feed: dict[str, Any] = {"source": "live"}
 
-        # Slow — Dow Jones (manual override or cached once per hour)
+        # Slow — Dow Jones (manual override or cached once per hour); never REST here.
         dow_cached = await _cache_get(tenant_id, "dow_jones")
         if dow_cached is not None:
             feed["dow_change_pct"] = dow_cached
@@ -1645,7 +2081,7 @@ class SignalEngineService:
         if config.fii_net is not None:
             feed["fii_net"] = config.fii_net
 
-        # Fast — batch broker quotes for this tick (one API call when cache cold)
+        # Fast — Tier A from live ticker book; REST only for missing LTP rows / IV.
         atm_strike: int | None = None
         spot_row: dict[str, Any] | None = None
         fast_symbols: list[str] = []
@@ -1653,15 +2089,15 @@ class SignalEngineService:
             fast_symbols.append(config.underlying_symbol)
         if config.nifty_fut_symbol:
             fast_symbols.append(config.nifty_fut_symbol)
-        # CE/PE symbols resolved after ATM is known; seed configured symbols for first pass.
-        if config.ce_symbol:
-            fast_symbols.append(config.ce_symbol)
-        if config.pe_symbol:
-            fast_symbols.append(config.pe_symbol)
+        # CE/PE resolved after ATM; seed only real option contracts (never FUT).
+        ce_seed = _sanitize_option_symbol(config.ce_symbol)
+        pe_seed = _sanitize_option_symbol(config.pe_symbol)
+        if ce_seed:
+            fast_symbols.append(ce_seed)
+        if pe_seed:
+            fast_symbols.append(pe_seed)
         fast_symbols = list(dict.fromkeys(fast_symbols))
-        fast_quotes: dict[str, Any] = (
-            await self._fetch_quote(fast_symbols) if fast_symbols else {}
-        )
+        fast_quotes: dict[str, Any] = await self._tier_a_quotes(fast_symbols)
 
         # Underlying LTP → ATM
         if not config.underlying_symbol:
@@ -1697,14 +2133,14 @@ class SignalEngineService:
         if pe_symbol:
             feed["pe_symbol"] = pe_symbol
 
-        # Re-fetch when auto ATM symbols differ from the first batch.
+        # Re-fetch when auto ATM symbols differ from the first batch (book-first).
         extra_symbols = [
             sym
             for sym in (ce_symbol, pe_symbol)
             if sym and _find_quote_row(fast_quotes, sym) is None
         ]
         if extra_symbols:
-            fast_quotes.update(await self._fetch_quote(extra_symbols))
+            fast_quotes.update(await self._tier_a_quotes(extra_symbols))
 
         ce_row: dict[str, Any] | None = None
         pe_row: dict[str, Any] | None = None
@@ -1737,8 +2173,24 @@ class SignalEngineService:
             iv_from_ce = _pick_float(ce_row, "implied_volatility", "iv")
             if iv_from_ce is not None:
                 feed["iv"] = iv_from_ce
+        # Ticker packets usually lack IV — REST when needed, medium-cached.
+        if feed.get("iv") is None and (ce_symbol or pe_symbol):
+            iv_cached = await _cache_get(tenant_id, "atm_iv")
+            if iv_cached is not None:
+                feed["iv"] = iv_cached
+            else:
+                iv_syms = [s for s in (ce_symbol, pe_symbol) if s]
+                iv_quotes = await self._fetch_quote(iv_syms, prefer="get_quote")
+                if ce_symbol:
+                    ce_row = _find_quote_row(iv_quotes, ce_symbol) or ce_row
+                if pe_symbol:
+                    pe_row = _find_quote_row(iv_quotes, pe_symbol) or pe_row
+                iv_val = _merge_option_iv(ce_row, pe_row)
+                if iv_val is not None:
+                    feed["iv"] = iv_val
+                    await _cache_set(tenant_id, "atm_iv", "medium", iv_val)
 
-        # OI — nearest fut if configured (requires full quote, not LTP-only)
+        # OI — nearest fut if configured (book first; REST only when OI missing)
         fut_row: dict[str, Any] | None = None
         if config.nifty_fut_symbol:
             fut_row = _find_quote_row(fast_quotes, config.nifty_fut_symbol)
@@ -1748,7 +2200,7 @@ class SignalEngineService:
                     [config.nifty_fut_symbol],
                     prefer="get_quote",
                 )
-                fut_row = _find_quote_row(fut_quotes, config.nifty_fut_symbol)
+                fut_row = _find_quote_row(fut_quotes, config.nifty_fut_symbol) or fut_row
                 oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
             if oi_val is not None:
                 feed["oi"] = oi_val
@@ -1763,22 +2215,10 @@ class SignalEngineService:
             if basis is not None:
                 feed["fut_basis"] = basis
 
-        # Crude — medium tier cache
+        # Tier B — read-only from caches (background worker refreshes).
         crude_cached = await _cache_get(tenant_id, "crude_oil")
-        if crude_cached is not None:
+        if isinstance(crude_cached, dict):
             feed.update(crude_cached)
-        elif config.crude_symbol:
-            crude_q = await self._fetch_quote([config.crude_symbol])
-            crude_row = _find_quote_row(crude_q, config.crude_symbol)
-            if crude_row:
-                ltp = _pick_float(crude_row, "last_price", "ltp", "last")
-                prev = _pick_float(crude_row, "close", "previous_close")
-                ohlc = crude_row.get("ohlc") if isinstance(crude_row.get("ohlc"), dict) else {}
-                if prev is None and isinstance(ohlc, dict):
-                    prev = _pick_float(ohlc, "close")
-                payload = {"crude_ltp": ltp, "crude_prev_close": prev}
-                feed.update(payload)
-                await _cache_set(tenant_id, "crude_oil", "medium", payload)
 
         # IV day-high + session open for iv_chg
         iv = feed.get("iv")
@@ -1872,19 +2312,11 @@ class SignalEngineService:
             mock=False,
         )
 
-        # India VIX quote (medium tier) when not set manually
+        # India VIX — cached Tier B only (background refresh).
         if feed.get("india_vix") is None and config.india_vix_symbol:
             vix_cached = await _cache_get(tenant_id, "india_vix")
             if vix_cached is not None:
                 feed["india_vix"] = vix_cached
-            else:
-                vix_q = await self._fetch_quote([config.india_vix_symbol])
-                vix_row = _find_quote_row(vix_q, config.india_vix_symbol)
-                if vix_row:
-                    vix_ltp = _pick_float(vix_row, "last_price", "ltp", "last")
-                    if vix_ltp is not None:
-                        feed["india_vix"] = vix_ltp
-                        await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
         if feed.get("india_vix") is not None and feed.get("vix_chg") is None:
             vix_ltp = float(feed["india_vix"])
             session_vix = await cache.get_session_value(tenant_id, _session_dated_key("vix_session_open"))
@@ -1893,43 +2325,10 @@ class SignalEngineService:
                 session_vix = vix_ltp
             feed["vix_chg"] = round(vix_ltp - float(session_vix), 3)
 
-        # Index / stock / USD-INR — medium tier batch
+        # Index / stock / USD-INR — cached Tier B only.
         aux_cached = await _cache_get(tenant_id, "aux_quotes")
         if isinstance(aux_cached, dict):
             feed.update(aux_cached)
-        else:
-            aux_symbols = list(
-                dict.fromkeys(
-                    [
-                        *INDEX_KITE_SYMBOLS.values(),
-                        *STOCK_KITE_SYMBOLS.values(),
-                        USD_INR_KITE_SYMBOL,
-                    ]
-                )
-            )
-            aux_quotes = await self._fetch_quote(aux_symbols) if aux_symbols else {}
-            aux_payload: dict[str, Any] = {}
-            _apply_quote_pct_map(feed, aux_quotes, INDEX_KITE_SYMBOLS)
-            _apply_quote_pct_map(feed, aux_quotes, STOCK_KITE_SYMBOLS)
-            for key, val in feed.items():
-                if key.startswith(("index_", "stock_")):
-                    aux_payload[key] = val
-            usd_row = _find_quote_row(aux_quotes, USD_INR_KITE_SYMBOL)
-            usd_ltp = _pick_float(usd_row or {}, "last_price", "ltp", "last")
-            if usd_ltp is not None:
-                feed["usd_inr"] = usd_ltp
-                aux_payload["usd_inr"] = usd_ltp
-            sensex_row = _find_quote_row(aux_quotes, INDEX_KITE_SYMBOLS["index_sensex_chg"])
-            if sensex_row:
-                sensex_ltp = _pick_float(sensex_row, "last_price", "ltp", "last")
-                ohlc = sensex_row.get("ohlc") if isinstance(sensex_row.get("ohlc"), dict) else {}
-                sensex_open = _pick_float(ohlc, "open") if ohlc else None
-                if sensex_ltp is not None and sensex_open is not None:
-                    feed["sensex_points_move"] = round(sensex_ltp - sensex_open, 2)
-                    aux_payload["sensex_points_move"] = feed["sensex_points_move"]
-            if aux_payload:
-                feed.update(aux_payload)
-                await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
 
         await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
         await _merge_yahoo_timing_tier(tenant_id, feed, mock=False)
@@ -1963,8 +2362,13 @@ class SignalEngineService:
             payload["has_broker"] = has_broker
             payload["team_slug"] = SIGNAL_TEAM_SLUG
             payload["live_warnings"] = _live_setup_warnings(
-                config, feed, has_broker=has_broker, team_ready=team_ready
+                config,
+                feed,
+                has_broker=has_broker,
+                team_ready=team_ready,
+                quote_error=self._last_quote_error,
             )
+            payload["live_quote_missing"] = False
             payload["underlying"] = {
                 "symbol": config.underlying_symbol,
                 "label": config.underlying_label or config.underlying_symbol or "—",
@@ -1982,8 +2386,14 @@ class SignalEngineService:
         payload["has_broker"] = has_broker
         payload["team_slug"] = SIGNAL_TEAM_SLUG
         payload["live_warnings"] = _live_setup_warnings(
-            config, feed, has_broker=has_broker, team_ready=team_ready
+            config,
+            feed,
+            has_broker=has_broker,
+            team_ready=team_ready,
+            quote_error=self._last_quote_error,
         )
+        # Explicit flag so the desk badge does not regex-match warning prose.
+        payload["live_quote_missing"] = (not config.mock) and feed.get("nifty_ltp") is None
         payload["underlying"] = {
             "symbol": config.underlying_symbol,
             "label": config.underlying_label or config.underlying_symbol or "—",

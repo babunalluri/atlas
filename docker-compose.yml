@@ -106,7 +106,7 @@ services:
       SANDBOX_ALLOWED_PROXY_PREFIXES: http://backend:7777/
       DOCKER_BIN: docker
       SANDBOX_PYTHON_IMAGE: atlas-sandbox-python:local
-      SANDBOX_MAX_CONCURRENT: "8"
+      SANDBOX_MAX_CONCURRENT: "16"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     # Internal-only — do not publish 8090 to the host.
@@ -174,6 +174,7 @@ services:
       SANDBOX_MANAGER_URL: http://sandbox-manager:8090
       SANDBOX_CALLBACK_BASE_URL: http://backend:7777
       SANDBOX_PYTHON_IMAGE: atlas-sandbox-python:local
+      SANDBOX_TENANT_CONCURRENCY: "12"
       # Desk: pre-warm Signal Engine snapshots + shared Kite WS quotes.
       SIGNAL_ENGINE_TICKER_ENABLED: "true"
       KITE_TICKER_ENABLED: "true"

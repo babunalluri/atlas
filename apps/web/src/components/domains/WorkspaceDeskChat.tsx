@@ -21,6 +21,7 @@ import { useDeskChatDraftOptional } from "@/components/domains/DeskChatDraftCont
 import type { DomainBrokerTool, DomainChatTarget } from "@/lib/api/admin";
 import type { ChatMessage } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
+import { randomUuid } from "@/lib/random-uuid";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -97,7 +98,7 @@ export function WorkspaceDeskChat({
   const deskDraft = useDeskChatDraftOptional();
   const [teamId, setTeamId] = useState(targets[0]?.id ?? "");
   const team = targets.find((row) => row.id === teamId) ?? targets[0] ?? null;
-  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
+  const [sessionId, setSessionId] = useState(() => randomUuid());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [composerDraft, setComposerDraft] = useState<string | null>(null);
   const clearComposerDraft = useCallback(() => setComposerDraft(null), []);
@@ -144,7 +145,7 @@ export function WorkspaceDeskChat({
     setStreaming(false);
     setPaused(false);
     setError(null);
-    setSessionId(crypto.randomUUID());
+    setSessionId(randomUuid());
     setMessages(welcome(team));
     // Reset conversation when the selected desk team changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps

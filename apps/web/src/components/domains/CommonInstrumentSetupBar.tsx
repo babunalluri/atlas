@@ -199,7 +199,13 @@ export function CommonInstrumentSetupBar({
           <SearchableSelect
             id={`${idPrefix}-strike-step`}
             className="tnum"
-            value={String(config.strike_step ?? 50)}
+            value={String(
+              config.strike_step != null &&
+                Number.isFinite(config.strike_step) &&
+                config.strike_step > 0
+                ? config.strike_step
+                : 50,
+            )}
             disabled={presetLocked}
             onChange={onStrikeStepChange}
             options={strikeOptions}

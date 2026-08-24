@@ -154,6 +154,17 @@ def test_gates_entry_only_counts_gated_rules() -> None:
     assert result["evaluable"] <= len(gated)
 
 
+def test_find_quote_row_resolves_kite_index_aliases() -> None:
+    payload = {
+        "NSE:NIFTY BANK": {"last_price": 52100.5, "open_interest": 0},
+        "NSE:NIFTY 50": {"last_price": 24200.0},
+    }
+    bank = _find_quote_row(payload, "NSE:BANKNIFTY")
+    nifty = _find_quote_row(payload, "NSE:NIFTY")
+    assert bank is not None and bank["last_price"] == 52100.5
+    assert nifty is not None and nifty["last_price"] == 24200.0
+
+
 def test_normalize_groww_ltp_payload() -> None:
     payload = _normalize_quote_payload(
         {
@@ -253,6 +264,88 @@ def test_resolve_option_symbols_prefers_auto_atm() -> None:
     ce, pe = _resolve_option_symbols(config, 24500)
     assert ce == "NFO:NIFTY26AUG24500CE"
     assert pe == "NFO:NIFTY26AUG24500PE"
+
+
+def test_sanitize_drops_fut_pasted_as_ce_pe() -> None:
+    from app.domains.signal_engine import _sanitize_option_symbol
+
+    assert _sanitize_option_symbol("NFO:NIFTY26AUGFUT") == ""
+    assert _sanitize_option_symbol("NFO:NIFTY26AUG24150CE") == "NFO:NIFTY26AUG24150CE"
+    # Index names that happen to end in "CE" must not look like options.
+    assert _sanitize_option_symbol("NSE:NIFTY FIN SERVICE") == ""
+    assert _sanitize_option_symbol("NSE:NIFTY MID SELECT") == ""
+    config = SignalEngineConfig.from_settings(
+        {
+            "nifty_fut_symbol": "NFO:NIFTY26AUGFUT",
+            "ce_symbol": "NFO:NIFTY26AUGFUT",
+            "pe_symbol": "NFO:NIFTY26AUGFUT",
+            "auto_atm_symbols": True,
+        }
+    )
+    assert config.ce_symbol == ""
+    assert config.pe_symbol == ""
+    ce, pe = _resolve_option_symbols(config, 24150)
+    assert ce == "NFO:NIFTY26AUG24150CE"
+    assert pe == "NFO:NIFTY26AUG24150PE"
+
+
+@pytest.mark.asyncio
+async def test_state_live_quote_missing_flag() -> None:
+    """Desk badge depends on live_quote_missing — lock True on miss, False on mock."""
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    service = SignalEngineService(session, context)
+    service._last_quote_error = None
+
+    live_cfg = SignalEngineConfig(
+        mock=False,
+        engine_enabled=True,
+        underlying_symbol="NSE:NIFTY 50",
+    )
+    mock_cfg = SignalEngineConfig(mock=True, engine_enabled=True)
+
+    async def load_live():
+        return live_cfg, True, True
+
+    async def load_mock():
+        return mock_cfg, True, True
+
+    async def feed_no_ltp(_config):
+        return {"source": "live"}
+
+    async def feed_with_ltp(_config):
+        return {"source": "mock", "nifty_ltp": 24300.0}
+
+    service._load_setup = AsyncMock(side_effect=load_live)
+    service._build_feed = AsyncMock(side_effect=feed_no_ltp)
+    missing = await service.state()
+    assert missing["live_quote_missing"] is True
+    assert missing["engine_active"] is True
+
+    service._load_setup = AsyncMock(side_effect=load_mock)
+    service._build_feed = AsyncMock(side_effect=feed_with_ltp)
+    mocked = await service.state()
+    assert mocked["live_quote_missing"] is False
+    assert mocked["mock"] is True
+
+    service._load_setup = AsyncMock(side_effect=load_live)
+    service._build_feed = AsyncMock(side_effect=feed_with_ltp)
+    present = await service.state()
+    assert present["live_quote_missing"] is False
+    assert present["engine_active"] is True
 
 
 def test_estimate_pcr_from_atm_oi() -> None:
@@ -545,3 +638,257 @@ async def test_merge_yahoo_fetches_all_plus_crypto_only(monkeypatch: pytest.Monk
 
     await _merge_yahoo_slow_tier("tenant-x", {}, mock=False)
     assert len(seen) == 2
+
+
+def test_signal_active_tick_ms_is_book_first_cadence() -> None:
+    from app.domains.signal_engine_constants import (
+        SIGNAL_ACTIVE_TICK_MS,
+        TIER_A_REST_GAP_FILL_MS,
+    )
+
+    assert SIGNAL_ACTIVE_TICK_MS == 200
+    assert TIER_A_REST_GAP_FILL_MS == 5_000
+
+
+@pytest.mark.asyncio
+async def test_tier_a_quotes_does_not_fetch_when_book_has_ltp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+    import uuid
+
+    tenant = uuid.uuid4()
+    symbols = ["NSE:NIFTY 50", "NFO:NIFTYFUT"]
+
+    async def fake_book(_tenant, syms, *, require_all=True, require_alive=True):
+        return {
+            "NSE:NIFTY 50": {"last_price": 24500.0, "instrument_token": 1},
+            "NFO:NIFTYFUT": {"last_price": 24510.0, "oi": 100, "instrument_token": 2},
+        }
+
+    async def fake_get_metric(_tenant, key):
+        if key == "quote:ticker:alive":
+            return {"ts": 1}
+        return None
+
+    fetch = AsyncMock(return_value={})
+    monkeypatch.setattr(
+        "app.domains.kite_ticker_hub.assemble_quotes_from_book",
+        fake_book,
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.get_metric",
+        fake_get_metric,
+    )
+    session = MagicMock()
+    session.info = {"tenant_id": tenant}
+    ctx = TenantContext(
+        tenant_id=tenant,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = fetch
+    out = await service._tier_a_quotes(symbols)
+    assert out["NSE:NIFTY 50"]["last_price"] == 24500.0
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tier_a_rest_gap_fill_rate_limited_when_ticker_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dead ticker must not sandbox-fan-out on every 200ms worker tick."""
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+    import uuid
+
+    tenant = uuid.uuid4()
+    symbols = ["NSE:NIFTY 50"]
+    metrics: dict[str, object] = {}
+
+    async def fake_book(_tenant, syms, *, require_all=True, require_alive=True):
+        return {}
+
+    async def fake_get_metric(_tenant, key):
+        return metrics.get(key)
+
+    async def fake_set_metric(_tenant, key, _tier, value, *, ttl_ms=None):
+        metrics[key] = value
+
+    fetch = AsyncMock(
+        return_value={"NSE:NIFTY 50": {"last_price": 100.0}}
+    )
+    monkeypatch.setattr(
+        "app.domains.kite_ticker_hub.assemble_quotes_from_book",
+        fake_book,
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.get_metric",
+        fake_get_metric,
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.set_metric",
+        fake_set_metric,
+    )
+    session = MagicMock()
+    session.info = {"tenant_id": tenant}
+    ctx = TenantContext(
+        tenant_id=tenant,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = fetch
+
+    first = await service._tier_a_quotes(symbols)
+    assert first["NSE:NIFTY 50"]["last_price"] == 100.0
+    assert fetch.await_count == 1
+    assert "tier_a_rest_gap" in metrics
+
+    # Second tick while gate is set — no sandbox call.
+    second = await service._tier_a_quotes(symbols)
+    assert fetch.await_count == 1
+    assert "NSE:NIFTY 50" not in second  # empty book, gated, no soft rows
+
+
+@pytest.mark.asyncio
+async def test_tier_a_uses_soft_book_before_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+    import uuid
+
+    tenant = uuid.uuid4()
+    symbols = ["NSE:NIFTY 50"]
+
+    async def fake_book(_tenant, syms, *, require_all=True, require_alive=True):
+        if require_alive:
+            return {}
+        return {"NSE:NIFTY 50": {"last_price": 24444.0}}
+
+    async def fake_get_metric(_tenant, key):
+        return None  # ticker dead, no gap gate yet
+
+    fetch = AsyncMock(return_value={})
+    monkeypatch.setattr(
+        "app.domains.kite_ticker_hub.assemble_quotes_from_book",
+        fake_book,
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.get_metric",
+        fake_get_metric,
+    )
+    session = MagicMock()
+    session.info = {"tenant_id": tenant}
+    ctx = TenantContext(
+        tenant_id=tenant,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = fetch
+    out = await service._tier_a_quotes(symbols)
+    assert out["NSE:NIFTY 50"]["last_price"] == 24444.0
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_feed_reads_tier_b_cache_without_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineConfig, SignalEngineService
+    from app.tenancy.context import TenantContext
+    import uuid
+
+    tenant_id = uuid.uuid4()
+    caches = {
+        "dow_jones": -0.4,
+        "crude_oil": {"crude_ltp": 71.2, "crude_prev_close": 70.0},
+        "india_vix": 13.5,
+        "aux_quotes": {"usd_inr": 83.1},
+    }
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return caches.get(metric)
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def fake_nse(*_a, **_k):
+        return None
+
+    async def fake_yahoo(*_a, **_k):
+        return None
+
+    async def fake_chain(*_a, **_k):
+        return None
+
+    async def fake_levels(*_a, **_k):
+        return None
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_secondary(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):
+        return {
+            "NSE:NIFTY 50": {
+                "last_price": 24500.0,
+                "ohlc": {"open": 24400.0},
+            }
+        }
+
+    fetch = AsyncMock(return_value={})
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_nse)
+    monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_slow_tier", fake_yahoo)
+    monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_timing_tier", fake_yahoo)
+    monkeypatch.setattr("app.domains.signal_engine._merge_option_chain_tier", fake_chain)
+    monkeypatch.setattr("app.domains.signal_engine._merge_levels_tier", fake_levels)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(
+        "app.domains.signal_engine._merge_secondary_ce_pe_quotes", fake_secondary
+    )
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = fetch
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+        crude_symbol="MCX:CRUDEOILM",
+        india_vix_symbol="NSE:INDIA VIX",
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24500.0
+    assert feed["crude_ltp"] == 71.2
+    assert feed["india_vix"] == 13.5
+    assert feed["usd_inr"] == 83.1
+    assert feed["dow_change_pct"] == -0.4
+    # No REST for Tier B on the critical path.
+    fetch.assert_not_awaited()

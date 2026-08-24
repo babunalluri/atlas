@@ -1536,35 +1536,39 @@ export function OptionsLabStrategyPanel({
           {pnlTable && pnlTable.spots.length > 0 ? (
             <Button
               type="button"
-              size="sm"
+              size="icon"
               variant="secondary"
               icon={<TableIcon />}
+              title="P&L table"
+              aria-label="P&L table"
               onClick={() => setPnlOpen(true)}
-            >
-              P&amp;L table
-            </Button>
+            />
           ) : null}
           {legs.length > 0 && onQueuePortfolioSave ? (
             <Button
               type="button"
-              size="sm"
+              size="icon"
               variant="secondary"
               icon={<SaveIcon />}
+              title="Save draft"
+              aria-label="Save draft"
               onClick={handleBuyDraft}
-            >
-              Save draft
-            </Button>
+            />
           ) : null}
           {legs.length > 0 ? (
             <Button
               type="button"
-              size="sm"
+              size="icon"
               icon={<CheckIcon />}
               disabled={orderBusy || missingQuotes}
+              title={
+                orderBusy ? "Placing…" : snapshot?.mock ? "Buy (mock)" : "Buy"
+              }
+              aria-label={
+                orderBusy ? "Placing…" : snapshot?.mock ? "Buy (mock)" : "Buy"
+              }
               onClick={() => void handleBuyLive()}
-            >
-              {orderBusy ? "Placing…" : snapshot?.mock ? "Buy (mock)" : "Buy"}
-            </Button>
+            />
           ) : null}
         </span>
       </div>

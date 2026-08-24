@@ -86,7 +86,11 @@ export default async function RootLayout({
       <body
         className={`${syne.variable} ${plexSans.variable} ${plexMono.variable} ${noto.variable} ${notoDeva.variable} ${notoArabic.variable} ${notoSc.variable} font-sans`}
       >
-        <SessionProvider refetchInterval={4 * 60} refetchOnWindowFocus>
+        <SessionProvider
+          refetchInterval={4 * 60}
+          refetchOnWindowFocus={false}
+          refetchWhenOffline={false}
+        >
           {children}
         </SessionProvider>
       </body>

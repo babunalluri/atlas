@@ -551,8 +551,9 @@ class AgentFactoryService:
             headers: dict[str, str] = {}
             credential_provider: str | None = None
             credential_value: str | None = None
-            if definition.credential_id is not None:
-                credential = await self.credentials.get(definition.credential_id)
+            cred_id = definition.credential_id or getattr(binding, "credential_id", None)
+            if cred_id is not None:
+                credential = await self.credentials.get(cred_id)
                 if credential is None:
                     raise ValueError("Tool credential was not found for tenant")
                 credential_provider = credential.provider
