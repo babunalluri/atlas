@@ -160,8 +160,28 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
                 await apply_tenant_guc(session, tenant_id)
                 service = SignalEngineService(session, context)
                 payload = await service.state()
+                # Persist auto-ATM CE/PE into tool settings when derived.
+                await service.maybe_persist_auto_atm_symbols(payload)
         payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
         await cache.set_snapshot(tenant_key, payload)
+        # EOD / intraday shared-metric history for Param Chart overlays.
+        try:
+            from app.domains.param_chart import ParamChartService
+
+            async with SessionFactory() as session:
+                async with session.begin():
+                    await apply_tenant_guc(session, tenant_id)
+                    await ParamChartService(
+                        session, context
+                    ).persist_metrics_from_signal_snapshot(
+                        force=False, snapshot=payload
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "param_chart_metrics_from_signal_failed",
+                tenant_id=tenant_key,
+                error=str(exc)[:160],
+            )
         return True
     except Exception as exc:
         logger.warning("signal_ticker_refresh_failed", tenant_id=str(tenant_id), error=str(exc))

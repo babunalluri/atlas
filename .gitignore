@@ -33,3 +33,5 @@ packages/contracts/openapi.json
 packages/contracts/src/openapi.ts
 data/
 *.log
+# Customer WhatsApp param screenshots (PII / holdings) — provenance is local only.
+testdata/params-ref/
