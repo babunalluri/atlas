@@ -6,6 +6,7 @@ import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
 import { OptionsLabPanel } from "@/components/domains/OptionsLabPanel";
+import { ParamChartPanel } from "@/components/domains/ParamChartPanel";
 import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
 import { Button } from "@/components/ui/Button";
@@ -16,7 +17,7 @@ import { cn } from "@/lib/utils";
 const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
 const DESK_MAIN_TAB_KEY = "atlas-desk-main-tab";
 
-type DeskMainTab = "signals" | "options-lab";
+type DeskMainTab = "signals" | "param-chart" | "options-lab";
 
 function useDeskMainTab() {
   const [tab, setTabState] = useState<DeskMainTab>("signals");
@@ -24,7 +25,11 @@ function useDeskMainTab() {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DESK_MAIN_TAB_KEY);
-      if (stored === "options-lab" || stored === "signals") {
+      if (
+        stored === "options-lab" ||
+        stored === "signals" ||
+        stored === "param-chart"
+      ) {
         setTabState(stored);
       } else if (stored === "automations") {
         // Former Automations desk tab → Options Lab (Bot overlay).
@@ -178,7 +183,7 @@ export function StockBrokerWorkspace({
             <div
               role="tablist"
               aria-label="Trading desk views"
-              className="grid w-full shrink-0 grid-cols-2 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
+              className="grid w-full shrink-0 grid-cols-3 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
             >
               {(
                 [
@@ -186,6 +191,11 @@ export function StockBrokerWorkspace({
                     id: "signals" as const,
                     label: "Signal Engine",
                     hint: "Checklist & live feeds",
+                  },
+                  {
+                    id: "param-chart" as const,
+                    label: "Param Chart",
+                    hint: "Monthly OHLC & shared params",
                   },
                   {
                     id: "options-lab" as const,
@@ -230,6 +240,10 @@ export function StockBrokerWorkspace({
                   fetchedAt={data.fetched_at}
                   rangeDays={data.range_days}
                 />
+              </div>
+            ) : deskTab === "param-chart" ? (
+              <div className="mt-3 min-h-0 flex-1">
+                <ParamChartPanel active />
               </div>
             ) : (
               <div className="mt-3 min-h-0 flex-1">

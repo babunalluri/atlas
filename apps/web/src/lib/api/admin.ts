@@ -3730,6 +3730,170 @@ export async function publishSignalEntry(
   });
 }
 
+export interface ParamChartAdminConfig {
+  underlying_symbol: string;
+  underlying_label: string;
+  fut_symbol: string;
+  strike_step: number;
+  strike: number | null;
+  entry_ce_premium: number;
+  entry_pe_premium: number;
+  ce_symbol: string;
+  pe_symbol: string;
+  year: number;
+  month: number;
+  interval?: "1m" | "5m" | "15m" | "1H" | "1D" | "1W" | "1M" | string;
+}
+
+export interface ParamChartSharedMetric {
+  id: string;
+  check_no: number;
+  category: string;
+  label: string;
+  rule?: string | null;
+  hint?: string | null;
+}
+
+export interface ParamChartMetricValue {
+  id: string;
+  value?: unknown;
+  passed?: boolean | null;
+  label?: string | null;
+  category?: string | null;
+  check_no?: number | null;
+}
+
+export interface ParamChartDay {
+  date: string;
+  day_index: number;
+  weekday: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume?: number | null;
+  /** Day-over-day close change (for bottom Δ histogram). */
+  chg?: number | null;
+  ce: number | null;
+  pe: number | null;
+  total: number | null;
+  pct_vs_entry: number | null;
+  metrics: Record<string, ParamChartMetricValue>;
+  is_today?: boolean;
+}
+
+export interface ParamChartConfigResponse {
+  ok: boolean;
+  error?: string;
+  config: ParamChartAdminConfig;
+  presets: SignalUnderlyingPreset[];
+  shared_metrics: ParamChartSharedMetric[];
+  shared_categories: string[];
+  intervals?: Array<{ id: string; label: string; kite?: string }>;
+  tool_bound: boolean;
+  has_broker: boolean;
+  team_ready: boolean;
+}
+
+export interface ParamChartMonthSnapshot {
+  ok: boolean;
+  error?: string;
+  building?: boolean;
+  /** SSE tick with today bars only — merge into the REST hist pack client-side. */
+  stream_patch?: boolean;
+  year: number;
+  month: number;
+  interval?: string;
+  underlying_symbol?: string;
+  underlying_label?: string;
+  strike?: number | null;
+  entry_ce_premium?: number;
+  entry_pe_premium?: number;
+  entry_total?: number;
+  ce_symbol?: string;
+  pe_symbol?: string;
+  fut_symbol?: string;
+  days: ParamChartDay[];
+  today?: string;
+  /** Calendar-day → shared checklist metrics (prefer over per-bar ``metrics``). */
+  metrics_by_day?: Record<string, Record<string, ParamChartMetricValue>>;
+  live_metrics?: Record<string, ParamChartMetricValue>;
+  config?: ParamChartAdminConfig;
+  shared_metrics?: ParamChartSharedMetric[];
+  shared_categories?: string[];
+  poll_ms?: number;
+  fetched_at?: number;
+  stream_interval_ms?: number;
+  data_source?: string;
+  kite?: {
+    source?: string;
+    spot_token?: number | null;
+    ce_token?: number | null;
+    pe_token?: number | null;
+    ohlc_days?: number;
+    premium_days?: number;
+    errors?: string[];
+  };
+  kite_live?: {
+    source?: string;
+    spot?: number | null;
+    ce?: number | null;
+    pe?: number | null;
+    error?: string | null;
+  };
+  stale?: boolean;
+}
+
+export async function getParamChartConfig(
+  accessToken: string,
+): Promise<ParamChartConfigResponse> {
+  return apiFetch<ParamChartConfigResponse>("/admin/param-chart/config", {
+    accessToken,
+  });
+}
+
+export async function patchParamChartConfig(
+  accessToken: string,
+  config: Partial<ParamChartAdminConfig>,
+): Promise<ParamChartConfigResponse> {
+  return apiFetch("/admin/param-chart/config", {
+    accessToken,
+    method: "PATCH",
+    body: config,
+  });
+}
+
+export async function getParamChartMonth(
+  accessToken: string,
+  opts?: { year?: number; month?: number; refresh?: boolean },
+): Promise<ParamChartMonthSnapshot> {
+  const params = new URLSearchParams();
+  if (opts?.year != null) params.set("year", String(opts.year));
+  if (opts?.month != null) params.set("month", String(opts.month));
+  if (opts?.refresh) params.set("refresh", "true");
+  const qs = params.toString();
+  return apiFetch<ParamChartMonthSnapshot>(
+    `/admin/param-chart/month${qs ? `?${qs}` : ""}`,
+    { accessToken },
+  );
+}
+
+export async function persistParamChartMetrics(
+  accessToken: string,
+): Promise<{
+  ok: boolean;
+  persisted?: boolean;
+  eod_at?: number;
+  metrics_persisted_at?: number;
+  day?: string | null;
+}> {
+  return apiFetch("/admin/param-chart/persist-metrics", {
+    accessToken,
+    method: "POST",
+    body: {},
+  });
+}
+
 export interface OptionsLabAdminConfig {
   underlying_symbol: string;
   underlying_label: string;
