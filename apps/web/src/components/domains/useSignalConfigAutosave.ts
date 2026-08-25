@@ -158,11 +158,13 @@ export function useSignalConfigAutosave(
       if (!preset) return;
       const fut =
         preset.fut_symbol?.trim() || suggestFutSymbol(preset.symbol) || "";
+      // Backend mirrors fut→nifty_fut and clears CE/PE when underlying/FUT changes.
+      // Do not send nifty_fut_symbol / empty ce_symbol (breaks tsc + clearing guard).
       patchConfig({
         underlying_symbol: preset.symbol,
         underlying_label: preset.label,
         strike_step: preset.strike_step,
-        ...(fut ? { fut_symbol: fut } : {}),
+        fut_symbol: fut,
       });
     },
     [patchConfig, presets],

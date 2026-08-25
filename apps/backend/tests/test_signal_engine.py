@@ -289,6 +289,138 @@ def test_sanitize_drops_fut_pasted_as_ce_pe() -> None:
     assert pe == "NFO:NIFTY26AUG24150PE"
 
 
+def test_from_settings_drops_nifty_options_on_sensex_fut() -> None:
+    """Preset switch leftover: NIFTY CE/PE must not stick when FUT is SENSEX."""
+    config = SignalEngineConfig.from_settings(
+        {
+            "underlying_symbol": "BSE:SENSEX",
+            "nifty_fut_symbol": "BFO:SENSEX26AUGFUT",
+            "ce_symbol": "NFO:NIFTY26AUG24000CE",
+            "pe_symbol": "NFO:NIFTY26AUG24000PE",
+            "strike_step": 100,
+            "auto_atm_symbols": True,
+        }
+    )
+    assert config.ce_symbol == ""
+    assert config.pe_symbol == ""
+    ce, pe = _resolve_option_symbols(config, 77700)
+    assert ce == "BFO:SENSEX26AUG77700CE"
+    assert pe == "BFO:SENSEX26AUG77700PE"
+
+
+def test_option_matches_fut_rejects_niftynxt50_on_nifty() -> None:
+    """Longest-root compare — NIFTYNXT50 must not prefix-match as NIFTY."""
+    from app.domains.signal_engine import _option_matches_fut
+
+    assert (
+        _option_matches_fut("NFO:NIFTYNXT5026AUG25000CE", "NFO:NIFTY26AUGFUT")
+        is False
+    )
+    assert (
+        _option_matches_fut("NFO:NIFTY26AUG24500CE", "NFO:NIFTY26AUGFUT") is True
+    )
+    assert (
+        _option_matches_fut("NFO:NIFTYNXT5026AUG25000CE", "NFO:NIFTYNXT5026AUGFUT")
+        is True
+    )
+
+
+def test_from_settings_keeps_unknown_root_pairs() -> None:
+    """Hand-typed underlyings (e.g. BANKEX) must not be wiped on load."""
+    config = SignalEngineConfig.from_settings(
+        {
+            "fut_symbol": "BFO:BANKEX26AUGFUT",
+            "nifty_fut_symbol": "BFO:BANKEX26AUGFUT",
+            "ce_symbol": "BFO:BANKEX26AUG60000CE",
+            "pe_symbol": "BFO:BANKEX26AUG60000PE",
+        }
+    )
+    assert config.ce_symbol == "BFO:BANKEX26AUG60000CE"
+    assert config.pe_symbol == "BFO:BANKEX26AUG60000PE"
+
+    # Truly unknown root also fails open.
+    config2 = SignalEngineConfig.from_settings(
+        {
+            "fut_symbol": "NFO:FOOBAR26AUGFUT",
+            "ce_symbol": "NFO:FOOBAR26AUG100CE",
+            "pe_symbol": "NFO:FOOBAR26AUG100PE",
+        }
+    )
+    assert config2.ce_symbol == "NFO:FOOBAR26AUG100CE"
+    assert config2.pe_symbol == "NFO:FOOBAR26AUG100PE"
+
+
+@pytest.mark.asyncio
+async def test_maybe_persist_auto_atm_fills_empty_ce_pe(monkeypatch) -> None:
+    """Auto-ATM should write derived CE/PE into tool settings when empty."""
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    service = SignalEngineService(session, context)
+    cfg = SignalEngineConfig(
+        underlying_symbol="BSE:SENSEX",
+        nifty_fut_symbol="BFO:SENSEX26AUGFUT",
+        ce_symbol="",
+        pe_symbol="",
+        auto_atm_symbols=True,
+        strike_step=100,
+    )
+    written: dict = {}
+
+    async def _load_config():
+        return cfg
+
+    async def _signal_tool():
+        return MagicMock()
+
+    def _settings(_tool):
+        return {
+            "underlying_symbol": "BSE:SENSEX",
+            "nifty_fut_symbol": "BFO:SENSEX26AUGFUT",
+            "auto_atm_symbols": True,
+        }
+
+    async def _write(_tool, settings):
+        written.update(settings)
+
+    monkeypatch.setattr(service, "_load_config", _load_config)
+    monkeypatch.setattr(service, "_signal_engine_tool", _signal_tool)
+    monkeypatch.setattr(service, "_tool_settings", _settings)
+    monkeypatch.setattr(service, "_write_tool_settings", _write)
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.get_metric",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.set_metric",
+        AsyncMock(),
+    )
+
+    ok = await service.maybe_persist_auto_atm_symbols(
+        {
+            "ce_symbol": "BFO:SENSEX26AUG77700CE",
+            "pe_symbol": "BFO:SENSEX26AUG77700PE",
+            "atm": 77700,
+        }
+    )
+    assert ok is True
+    assert written["ce_symbol"] == "BFO:SENSEX26AUG77700CE"
+    assert written["pe_symbol"] == "BFO:SENSEX26AUG77700PE"
+
+
 @pytest.mark.asyncio
 async def test_state_live_quote_missing_flag() -> None:
     """Desk badge depends on live_quote_missing — lock True on miss, False on mock."""
@@ -757,6 +889,12 @@ async def test_tier_a_rest_gap_fill_rate_limited_when_ticker_dead(
     second = await service._tier_a_quotes(symbols)
     assert fetch.await_count == 1
     assert "NSE:NIFTY 50" not in second  # empty book, gated, no soft rows
+
+    # Newly derived ATM CE/PE must still REST-fill (not blocked by under gate).
+    fetch.return_value = {"NFO:NIFTY26AUG24350CE": {"last_price": 12.5}}
+    third = await service._tier_a_quotes(["NFO:NIFTY26AUG24350CE"])
+    assert fetch.await_count == 2
+    assert third["NFO:NIFTY26AUG24350CE"]["last_price"] == 12.5
 
 
 @pytest.mark.asyncio

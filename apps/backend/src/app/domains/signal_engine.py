@@ -269,7 +269,7 @@ class SignalEngineConfig:
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any] | None) -> SignalEngineConfig:
-        raw = settings or {}
+        raw = _drop_mismatched_option_symbols(dict(settings or {}))
         metrics = normalize_metrics(list(DEFAULT_METRICS))
         override = raw.get("metrics_json")
         if override:
@@ -438,6 +438,69 @@ def _sanitize_option_symbol(symbol: str | None) -> str:
     if not raw or _option_side_from_symbol(raw) is None:
         return ""
     return raw
+
+
+def _fut_root(fut_symbol: str) -> str:
+    """``BFO:SENSEX26AUGFUT`` → ``SENSEX``; ``NFO:NIFTY26AUGFUT`` → ``NIFTY``.
+
+    Longest-first so ``NIFTYNXT50`` wins over ``NIFTY``. Returns ``""`` when
+    the root is not in the known index set.
+    """
+    body = fut_symbol.strip().upper().split(":", 1)[-1]
+    if body.endswith("FUT"):
+        body = body[:-3]
+    elif body.endswith("CE") or body.endswith("PE"):
+        body = body[:-2]
+        # Strip trailing strike digits: NIFTY26AUG24500 → NIFTY26AUG
+        while body and body[-1].isdigit():
+            body = body[:-1]
+    known_roots = (
+        "MIDCPNIFTY",
+        "NIFTYNXT50",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "NIFTY50",
+        "NIFTY",
+        "SENSEX",
+        "BANKEX",
+    )
+    for root in known_roots:
+        if body.startswith(root):
+            return root
+    return ""
+
+
+def _option_matches_fut(option_symbol: str, fut_symbol: str) -> bool:
+    """True when CE/PE share the FUT option root (blocks NIFTY CE on SENSEX FUT)."""
+    opt = _sanitize_option_symbol(option_symbol)
+    fut = (fut_symbol or "").strip()
+    if not opt or not fut:
+        return False
+    fut_root = _fut_root(fut)
+    opt_root = _fut_root(opt)
+    if not fut_root or not opt_root:
+        # Unknown roots: do not claim a match (caller decides fail-open vs wipe).
+        return False
+    return fut_root == opt_root
+
+
+def _drop_mismatched_option_symbols(settings: dict[str, Any]) -> dict[str, Any]:
+    """Clear CE/PE that belong to a different underlying than the configured FUT.
+
+    Unknown FUT roots (hand-typed underlyings not in the known list) fail open —
+    leave CE/PE alone rather than silently wiping valid pairs.
+    """
+    out = dict(settings)
+    fut = str(out.get("nifty_fut_symbol") or out.get("fut_symbol") or "").strip()
+    if not fut:
+        return out
+    if not _fut_root(fut):
+        return out
+    for key in ("ce_symbol", "pe_symbol"):
+        raw = str(out.get(key) or "").strip()
+        if raw and not _option_matches_fut(raw, fut):
+            out.pop(key, None)
+    return out
 
 
 def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None:
@@ -1594,6 +1657,16 @@ class SignalEngineService:
                 merged.pop(key, None)
             else:
                 merged[key] = val
+        # Switching underlying/FUT without new CE/PE must not keep foreign options
+        # (e.g. NFO:NIFTY…CE while FUT is BFO:SENSEX…).
+        under_changed = bool(
+            patch.get("underlying_symbol")
+            or patch.get("fut_symbol")
+            or patch.get("nifty_fut_symbol")
+        )
+        if under_changed and "ce_symbol" not in patch and "pe_symbol" not in patch:
+            merged.pop("ce_symbol", None)
+            merged.pop("pe_symbol", None)
         # CE/PE must be option contracts (…CE / …PE), never a FUT paste.
         for opt_key in ("ce_symbol", "pe_symbol"):
             if opt_key in merged:
@@ -1607,6 +1680,9 @@ class SignalEngineService:
             merged["nifty_symbol"] = merged["underlying_symbol"]
         if merged.get("fut_symbol"):
             merged["nifty_fut_symbol"] = merged["fut_symbol"]
+        elif merged.get("nifty_fut_symbol") and not merged.get("fut_symbol"):
+            merged["fut_symbol"] = merged["nifty_fut_symbol"]
+        merged = _drop_mismatched_option_symbols(merged)
         await self._write_tool_settings(tool, merged)
         tenant_id = _tenant_key(self.context)
         if patch.get("engine_enabled") is False:
@@ -1623,6 +1699,65 @@ class SignalEngineService:
             # linger for SNAPSHOT_TTL_MS.
             await cache.touch_watcher(tenant_id)
         return {"ok": True, **await self.get_admin_config()}
+
+    async def maybe_persist_auto_atm_symbols(self, payload: dict[str, Any]) -> bool:
+        """Write derived ATM CE/PE into tool settings when auto-ATM filled empty/mismatched slots.
+
+        Keeps ticker sync + UI fields aligned with what the feed is quoting (esp. SENSEX).
+        """
+        config = await self._load_config()
+        if not config.auto_atm_symbols or not config.nifty_fut_symbol:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        feed = payload.get("feed") if isinstance(payload.get("feed"), dict) else {}
+        ce = _sanitize_option_symbol(
+            str(payload.get("ce_symbol") or feed.get("ce_symbol") or "")
+        )
+        pe = _sanitize_option_symbol(
+            str(payload.get("pe_symbol") or feed.get("pe_symbol") or "")
+        )
+        if not ce or not pe:
+            return False
+        if not _option_matches_fut(ce, config.nifty_fut_symbol):
+            return False
+        if not _option_matches_fut(pe, config.nifty_fut_symbol):
+            return False
+        if ce == config.ce_symbol and pe == config.pe_symbol:
+            return False
+        # Throttle DB writes when ATM drifts during the session.
+        tenant_id = _tenant_key(self.context)
+        filling_empty = not config.ce_symbol or not config.pe_symbol
+        if not filling_empty:
+            if await cache.get_metric(tenant_id, "auto_atm_persist_gate") is not None:
+                return False
+        tool = await self._signal_engine_tool()
+        if tool is None:
+            return False
+        current = self._tool_settings(tool)
+        merged = {
+            **current,
+            "ce_symbol": ce,
+            "pe_symbol": pe,
+            "fut_symbol": current.get("fut_symbol") or config.nifty_fut_symbol,
+            "nifty_fut_symbol": config.nifty_fut_symbol,
+        }
+        merged = _drop_mismatched_option_symbols(merged)
+        if (
+            str(merged.get("ce_symbol") or "") == config.ce_symbol
+            and str(merged.get("pe_symbol") or "") == config.pe_symbol
+        ):
+            return False
+        await self._write_tool_settings(tool, merged)
+        if not filling_empty:
+            await cache.set_metric(tenant_id, "auto_atm_persist_gate", "medium", True)
+        logger.info(
+            "signal_auto_atm_persisted",
+            tenant_id=tenant_id,
+            ce=ce,
+            pe=pe,
+        )
+        return True
 
     async def _write_tool_settings(self, definition: Any, settings: dict[str, Any]) -> None:
         config = dict(definition.config or {})
@@ -1959,16 +2094,35 @@ class SignalEngineService:
             return out
 
         # Ticker alive + partial miss (e.g. new ATM CE/PE) → fill immediately.
-        # Ticker dead → negative-cache REST so 5 Hz ticks do not hammer sandbox.
+        # Ticker dead → rate-limit REST, but still allow symbols we have not
+        # recently gap-filled (auto-ATM CE/PE derived after the under/FUT fetch).
         if not ticker_alive:
             gate = await cache.get_metric(tenant_id, "tier_a_rest_gap")
-            if gate is not None:
-                return out
+            if isinstance(gate, dict):
+                recently = {
+                    str(s) for s in (gate.get("missing") or []) if s
+                }
+                fresh_missing = [s for s in missing if s not in recently]
+                if not fresh_missing:
+                    return out
+                missing = fresh_missing
             await cache.set_metric(
                 tenant_id,
                 "tier_a_rest_gap",
                 "broker",
-                {"missing": missing[:8], "ts": int(time.time())},
+                {
+                    "missing": list(
+                        {
+                            *(
+                                list((gate or {}).get("missing") or [])
+                                if isinstance(gate, dict)
+                                else []
+                            ),
+                            *missing,
+                        }
+                    )[:16],
+                    "ts": int(time.time()),
+                },
                 ttl_ms=TIER_A_REST_GAP_FILL_MS,
             )
 
@@ -2134,13 +2288,17 @@ class SignalEngineService:
             feed["pe_symbol"] = pe_symbol
 
         # Re-fetch when auto ATM symbols differ from the first batch (book-first).
+        # Use get_quote directly so dead-ticker REST gap gates from the under/FUT
+        # fetch cannot skip newly derived CE/PE for the rest of the window.
         extra_symbols = [
             sym
             for sym in (ce_symbol, pe_symbol)
             if sym and _find_quote_row(fast_quotes, sym) is None
         ]
         if extra_symbols:
-            fast_quotes.update(await self._tier_a_quotes(extra_symbols))
+            fast_quotes.update(
+                await self._fetch_quote(extra_symbols, prefer="get_quote")
+            )
 
         ce_row: dict[str, Any] | None = None
         pe_row: dict[str, Any] | None = None
@@ -2400,6 +2558,22 @@ class SignalEngineService:
         }
         payload["broker_poll_ms"] = BROKER_QUOTE_TTL_MS
         payload["stream"] = True
+        # Surface resolved ATM options for UI + auto-persist.
+        if feed.get("ce_symbol"):
+            payload["ce_symbol"] = feed.get("ce_symbol")
+        if feed.get("pe_symbol"):
+            payload["pe_symbol"] = feed.get("pe_symbol")
+        if feed.get("atm") is not None:
+            payload["atm"] = feed.get("atm")
+        # Persist empty/mismatched CE/PE so setup bar + ticker stay in sync.
+        try:
+            await self.maybe_persist_auto_atm_symbols(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signal_auto_atm_persist_failed",
+                tenant_id=_tenant_key(self.context),
+                error=str(exc)[:160],
+            )
         return payload
 
     async def publish_entry(
