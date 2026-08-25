@@ -138,6 +138,49 @@ Align with `.env.example`, sourced from Vault in production:
 | ElastiCache | OCI Cache (Redis) |
 | ECS RunTask + deny-all SG | OKE Job + deny-all NetworkPolicy |
 
+## Param Chart candle dumps (Kite → Object Storage)
+
+Param Chart pulls **daily** OHLC / fixed-strike CE·PE closes from Kite once per
+token/month, then caches them so desk loads do not re-hit `get_historical_candles`
+(quota + lag). Production on OCI should use **Object Storage** through the
+**Amazon S3 Compatibility API** — same boto3 path as knowledge documents / MinIO.
+
+| Env | Value (OCI) |
+| --- | --- |
+| `DOCUMENT_BUCKET` | private bucket, e.g. `atlas-documents` (create in home region; Mumbai preferred for India desk) |
+| `AWS_ENDPOINT_URL` | `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com` |
+| `AWS_REGION` | OCI region id matching the endpoint (e.g. `ap-mumbai-1`) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Customer Secret Key pair for the Object Storage user |
+| (optional) checksum | store sets `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` for newer botocore + OCI |
+
+Object keys (deterministic, not knowledge UUID uploads):
+
+```text
+param-chart/candles/<instrument_token>/<YYYY-MM>.json
+param-chart/candles/<instrument_token>/1m/<YYYY-MM>.json
+param-chart/candles/<instrument_token>/1H/<YYYY-MM>.json
+param-chart/candles/<instrument_token>/1M/<YYYY>.json
+param-chart/metrics/<tenant_id>/<YYYY-MM>.json
+param-chart/symbol-tokens/<exchange>/<tradingsymbol>.json
+```
+
+Candle dumps are per instrument token + interval; metrics dumps are per
+tenant/month (interval-agnostic shared-checklist overlay history). Symbol-token
+maps remember F&O ``instrument_token`` while contracts are live so past-month
+CE/PE premium trails can still call ``get_historical_candles`` after expiry.
+Use these prefixes in lifecycle / backup / tenant-purge rules.
+
+Hot path stays Redis month pack + live Kite quotes; Object Storage is the
+**cold** hist dump. Pilot VM may keep Compose MinIO (`DOCUMENT_BUCKET=atlas-documents`,
+`AWS_ENDPOINT_URL=http://minio:9000`) until you cut over.
+
+### Hist warehouse (paused)
+
+A scheduled **“all Nifty 50 + desk indices”** pre-seed is **not** implemented.
+Dumps remain on-demand per instrument the desk opens. See
+[`param-chart-hist-warehouse.md`](./param-chart-hist-warehouse.md) for the paused
+proposal, cost sketch, and resume checklist.
+
 ## Out of scope for this doc
 
 - Terraform/Helm charts (add under `infra/` when productized)

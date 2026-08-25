@@ -225,6 +225,7 @@ is compatible with OCI Cache when you upgrade — switch `REDIS_URL` to
 | Manual snapshots | Automated backups + restore drills |
 | 10 Mbps LB | Higher bandwidth / WAF |
 | `ENVIRONMENT=staging` | `ENVIRONMENT=production` + Vault secrets |
+| Param Chart candle dumps (local/`DOCUMENT_BUCKET`) | Same bucket via **OCI Object Storage S3 Compatibility API** |
 
 Estimated production floor: **~$200+/month** depending on scale — see
 [`oci-deployment.md`](./oci-deployment.md).
