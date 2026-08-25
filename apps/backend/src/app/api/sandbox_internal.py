@@ -40,15 +40,48 @@ async def sandbox_http_proxy(
     body: ProxyBody,
     x_sandbox_internal_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    """Mediate guest HttpProxy calls.
+
+    Auth may arrive either as:
+    - process-local ``_RUN_REQUESTS`` headers (same worker),
+    - short-lived sealed ``headers_enc`` in Redis (other worker / reload), or
+    - headers on this callback body (guest toolkit usually sends Authorization).
+    """
     _require_internal_token(x_sandbox_internal_token)
     orchestrator, request, meta = await resolve_proxy_handler(run_id)
     if orchestrator is None:
         raise HTTPException(status_code=404, detail="Unknown sandbox run")
 
-    # Local owner has secrets in _RUN_REQUESTS.
     from app.tools.sandbox import orchestrator as orch_mod
 
-    if run_id in orch_mod._RUN_REQUESTS:
+    local = run_id in orch_mod._RUN_REQUESTS
+    guest_has_auth = any(
+        k.lower()
+        in {
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "api-key",
+            "x-auth-token",
+        }
+        for k in (body.headers or {})
+    )
+    sealed_has_auth = bool(
+        request
+        and any(
+            k.lower()
+            in {
+                "authorization",
+                "proxy-authorization",
+                "x-api-key",
+                "api-key",
+                "x-auth-token",
+            }
+            for k in (request.headers or {})
+        )
+    )
+
+    if local or sealed_has_auth or guest_has_auth or request is not None:
         try:
             return await orchestrator.handle_http_proxy(
                 run_id,
@@ -57,11 +90,12 @@ async def sandbox_http_proxy(
                 headers=body.headers,
                 json_body=body.json_body,
                 form_body=body.form_body,
+                bound_request=None if local else request,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    # Non-owner: forward to the instance that holds credentials (never invent secrets).
+    # No local state / sealed / guest auth — forward to owning replica if distinct.
     owner = str((meta or {}).get("owner_url") or "").rstrip("/")
     if owner and owner != _instance_url():
         return await _forward_proxy_to_owner(
@@ -73,7 +107,4 @@ async def sandbox_http_proxy(
             json_body=body.json_body,
             form_body=body.form_body,
         )
-    if request is None:
-        raise HTTPException(status_code=404, detail="Unknown sandbox run")
-    # Same-instance metadata without local secrets (process restarted mid-run).
     raise HTTPException(status_code=404, detail="Sandbox run is not owned by this instance")

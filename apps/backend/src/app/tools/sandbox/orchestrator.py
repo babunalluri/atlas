@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import uuid
@@ -10,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.redis_client import get_redis
 from app.core.settings import get_settings
@@ -20,8 +23,10 @@ logger = logging.getLogger(__name__)
 MAX_RESULT_CHARS = 200_000
 DEFAULT_WALL_SECONDS = 30
 
-# Secrets (Authorization headers) stay process-local. Redis only holds non-secret
-# routing metadata so another replica can forward the proxy callback to the owner.
+# Secrets (Authorization headers) stay process-local when possible. Redis may hold
+# a short-lived Fernet seal (keyed by SANDBOX_INTERNAL_TOKEN) so another worker /
+# uvicorn --reload child can still complete HttpProxy callbacks. Plaintext tokens
+# are never written to Redis.
 _ACTIVE: dict[str, "SandboxOrchestrator"] = {}
 _RUN_REQUESTS: dict[str, "SandboxRunRequest"] = {}
 _TENANT_SLOTS: dict[str, asyncio.Semaphore] = {}
@@ -51,6 +56,39 @@ def _proxy_allowed_methods(url: str, *, mutating: bool) -> tuple[str, ...]:
     if any(path == prefix or path.startswith(prefix + "/") for prefix in _READ_POST_PATH_PREFIXES):
         return ("GET", "HEAD", "POST")
     return ("GET", "HEAD")
+
+
+def _fernet_for_sandbox() -> Fernet:
+    """Derive a Fernet key from the shared sandbox internal token."""
+    token = get_settings().sandbox_internal_token.get_secret_value().encode("utf-8")
+    digest = hashlib.sha256(b"atlas-sandbox-headers-v1:" + token).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _seal_sensitive_headers(headers: dict[str, str]) -> str | None:
+    sensitive = {
+        key: value
+        for key, value in headers.items()
+        if key.lower() in _SENSITIVE_HEADER_NAMES and value
+    }
+    if not sensitive:
+        return None
+    raw = json.dumps(sensitive, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return _fernet_for_sandbox().encrypt(raw).decode("ascii")
+
+
+def _unseal_sensitive_headers(blob: str | None) -> dict[str, str]:
+    if not blob:
+        return {}
+    try:
+        raw = _fernet_for_sandbox().decrypt(blob.encode("ascii"))
+        data = json.loads(raw.decode("utf-8"))
+    except (InvalidToken, json.JSONDecodeError, ValueError, TypeError):
+        logger.warning("sandbox_headers_unseal_failed")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v is not None}
 
 
 @dataclass(slots=True)
@@ -154,11 +192,11 @@ class SandboxOrchestrator:
             _RUN_REQUESTS.pop(run_id, None)
 
     async def _register_run(self, run_id: str, request: SandboxRunRequest) -> None:
-        """Publish non-secret routing metadata only. Auth headers stay in _RUN_REQUESTS."""
+        """Publish routing metadata + sealed sensitive headers (never plaintext)."""
         client = await get_redis()
         if client is None:
             return
-        payload = {
+        payload: dict[str, Any] = {
             "allowed_hosts": sorted(self.client.allowed_hosts),
             "max_response_bytes": self.client.max_response_bytes,
             "timeout_seconds": float(
@@ -169,7 +207,11 @@ class SandboxOrchestrator:
             "owner_url": _instance_url(),
             # Non-sensitive guest headers only (never Authorization / API keys).
             "public_headers": _public_headers(request.headers),
+            "mutating": bool(request.mutating),
         }
+        sealed = _seal_sensitive_headers(request.headers)
+        if sealed:
+            payload["headers_enc"] = sealed
         ttl = max(request.timeout_seconds + 60, 90)
         await client.set(_run_redis_key(run_id), json.dumps(payload), ex=ttl)
 
@@ -206,27 +248,48 @@ class SandboxOrchestrator:
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | list[Any] | None = None,
         form_body: dict[str, Any] | None = None,
+        bound_request: SandboxRunRequest | None = None,
     ) -> dict[str, Any]:
-        request = _RUN_REQUESTS.get(run_id)
+        request = bound_request or _RUN_REQUESTS.get(run_id)
         rest_client = self.client
         if request is None:
-            # Non-owner replica: never has secrets. Forward to the owning instance.
+            # Non-owner replica / reload child: rebuild from sealed Redis meta.
             meta = await _load_meta_from_redis(run_id)
             if meta is None:
                 raise LookupError("Unknown sandbox run")
-            owner = str(meta.get("owner_url") or "").rstrip("/")
-            self_url = _instance_url()
-            if owner and owner != self_url:
-                return await _forward_proxy_to_owner(
-                    owner,
-                    run_id,
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json_body=json_body,
-                    form_body=form_body,
+            sealed = _unseal_sensitive_headers(
+                str(meta.get("headers_enc") or "") or None
+            )
+            public = dict(meta.get("public_headers") or {})
+            if not sealed and not public:
+                owner = str(meta.get("owner_url") or "").rstrip("/")
+                self_url = _instance_url()
+                if owner and owner != self_url:
+                    return await _forward_proxy_to_owner(
+                        owner,
+                        run_id,
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        json_body=json_body,
+                        form_body=form_body,
+                    )
+                raise LookupError("Sandbox run is not owned by this instance")
+            request = SandboxRunRequest(
+                source_code="",
+                settings={},
+                capability="",
+                arguments={},
+                headers={**public, **sealed},
+                mutating=bool(meta.get("mutating")),
+            )
+            hosts = set(meta.get("allowed_hosts") or [])
+            if hosts:
+                rest_client = SafeRestClient(
+                    hosts,
+                    max_response_bytes=int(meta.get("max_response_bytes") or 1_000_000),
+                    timeout_seconds=float(meta.get("timeout_seconds") or 10),
                 )
-            raise LookupError("Sandbox run is not owned by this instance")
         merged = {**request.headers, **(headers or {})}
         allowed = _proxy_allowed_methods(url, mutating=request.mutating)
         try:
@@ -366,7 +429,7 @@ def get_orchestrator_for_run(run_id: str) -> SandboxOrchestrator | None:
 async def resolve_proxy_handler(
     run_id: str,
 ) -> tuple[SandboxOrchestrator | None, SandboxRunRequest | None, dict[str, Any] | None]:
-    """Resolve local owner state, or Redis metadata for forward-to-owner."""
+    """Resolve local owner state, or Redis metadata (with sealed headers) for proxy."""
     orch = _ACTIVE.get(run_id)
     if orch is not None:
         return orch, _RUN_REQUESTS.get(run_id), None
@@ -379,13 +442,15 @@ async def resolve_proxy_handler(
         max_response_bytes=int(meta.get("max_response_bytes") or 1_000_000),
         timeout_seconds=float(meta.get("timeout_seconds") or 10),
     )
-    # No secrets — public headers only. Credentialed proxy must forward to owner.
+    sealed = _unseal_sensitive_headers(str(meta.get("headers_enc") or "") or None)
+    public = dict(meta.get("public_headers") or {})
     request = SandboxRunRequest(
         source_code="",
         settings={},
         capability="",
         arguments={},
-        headers=dict(meta.get("public_headers") or {}),
+        headers={**public, **sealed},
+        mutating=bool(meta.get("mutating")),
     )
     stub = SandboxOrchestrator(manager_url="", client=rest)
     return stub, request, meta

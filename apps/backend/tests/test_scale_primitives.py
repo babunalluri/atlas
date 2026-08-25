@@ -154,7 +154,7 @@ async def test_scheduler_leader_redis_nx(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sandbox_redis_stores_no_authorization(monkeypatch):
-    """H1 fix: Redis must never hold tenant bearer tokens."""
+    """H1 fix: Redis must never hold plaintext tenant bearer tokens."""
     import json
 
     stored: dict[str, str] = {}
@@ -203,8 +203,45 @@ async def test_sandbox_redis_stores_no_authorization(monkeypatch):
     data = json.loads(raw)
     assert data["public_headers"] == {"X-Trace": "1"}
     assert data["owner_url"] == "http://owner:7777"
-    assert "headers_enc" not in data
     assert "headers" not in data
+    # Short-lived Fernet seal is allowed so reload/other workers can proxy.
+    assert isinstance(data.get("headers_enc"), str) and data["headers_enc"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_proxy_unseals_headers_on_other_worker(monkeypatch):
+    """Sealed Redis headers let a non-owner worker complete HttpProxy."""
+    import json
+
+    from app.tools.sandbox.orchestrator import _seal_sensitive_headers
+
+    sealed = _seal_sensitive_headers({"Authorization": "Bearer super-secret"})
+    payload = {
+        "allowed_hosts": ["api.example.com"],
+        "public_headers": {"X-Trace": "1"},
+        "headers_enc": sealed,
+        "max_response_bytes": 1000,
+        "timeout_seconds": 10,
+        "owner_url": "http://other-owner:7777",
+        "mutating": False,
+    }
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=json.dumps(payload))
+
+    monkeypatch.setattr(
+        "app.tools.sandbox.orchestrator.get_redis", AsyncMock(return_value=redis)
+    )
+    monkeypatch.setattr(
+        "app.tools.sandbox.orchestrator._instance_url",
+        lambda: "http://this:7777",
+    )
+
+    orch, req, meta = await resolve_proxy_handler("missing-locally")
+    assert orch is not None
+    assert req is not None
+    assert meta is not None
+    assert req.headers.get("Authorization") == "Bearer super-secret"
+    assert req.headers.get("X-Trace") == "1"
 
 
 @pytest.mark.asyncio
