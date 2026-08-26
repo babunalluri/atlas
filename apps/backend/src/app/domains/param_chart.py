@@ -507,7 +507,7 @@ class ParamChartService:
         tool = await self.engine._signal_engine_tool()
         if tool is None:
             return ParamChartConfig()
-        settings = self.engine._tool_settings(tool)
+        settings = await self.engine._tool_settings(tool)
         nested = settings.get(PARAM_CHART_SETTINGS_KEY)
         if isinstance(nested, dict):
             return ParamChartConfig.from_dict(nested)
@@ -537,7 +537,7 @@ class ParamChartService:
                 "ok": False,
                 "error": "Signal engine tool not bound on Signals ops team.",
             }
-        current = self.engine._tool_settings(tool)
+        current = await self.engine._tool_settings(tool)
         chart = ParamChartConfig.from_dict(
             current.get(PARAM_CHART_SETTINGS_KEY)
             if isinstance(current.get(PARAM_CHART_SETTINGS_KEY), dict)
@@ -586,6 +586,9 @@ class ParamChartService:
                 merged["ce_symbol"] = ""
             if "pe_symbol" not in patch:
                 merged["pe_symbol"] = ""
+            # Stale BankNifty 57000 (etc.) must not rederive NIFTY…57000CE.
+            if "strike" not in patch:
+                merged["strike"] = None
 
         year = int(merged.get("year") or _ist_today().year)
         month = int(merged.get("month") or _ist_today().month)
@@ -625,8 +628,10 @@ class ParamChartService:
         if not merged.get("fut_symbol"):
             merged["fut_symbol"] = suggest_fut_symbol(str(merged["underlying_symbol"]))
 
-        nested = {**current, PARAM_CHART_SETTINGS_KEY: merged}
-        await self.engine._write_tool_settings(tool, nested)
+        # Patch only our nested subtree — never rewrite Signal / Options Lab keys.
+        await self.engine._patch_tool_settings(
+            tool, {PARAM_CHART_SETTINGS_KEY: merged}
+        )
         # Only invalidate Redis month pack when candle-affecting fields change.
         # Candle OHLC itself stays on disk (OCI/S3 dump) and is reused — we do
         # NOT re-fetch Kite for past months, and current month at most hourly.

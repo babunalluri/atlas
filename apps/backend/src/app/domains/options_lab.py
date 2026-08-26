@@ -857,7 +857,7 @@ def mock_chain_snapshot(config: OptionsLabConfig, *, wings: int) -> dict[str, An
     spot = 24312.5
     atm = _round_strike(spot, config.strike_step)
     strikes = strike_ladder(atm, config.strike_step, wings)
-    fut = config.fut_symbol or "NFO:NIFTY26AUGFUT"
+    fut = config.fut_symbol or suggest_fut_symbol(config.underlying_symbol or "NSE:NIFTY 50") or "NFO:NIFTY26SEPFUT"
     _, ce_syms, pe_syms = build_chain_symbols(fut, atm, config.strike_step, wings)
     rows: list[dict[str, Any]] = []
     ce_oi_total = pe_oi_total = 0.0
@@ -922,8 +922,13 @@ async def chain_state_for_stream(
 ) -> dict[str, Any]:
     """Coalesce concurrent Options Lab stream readers to one chain tick per key."""
     wings = _clamp_wings(wings)
-    config = await service._read_config()
     tenant_id = _tenant_key(service.context)
+    # Prefer Signal when both desks are open on a small VM.
+    from app.domains import signal_engine_cache as signal_cache
+
+    if tenant_id in set(await signal_cache.list_watched_tenant_ids()):
+        wings = min(wings, MIN_WINGS)
+    config = await service._read_config()
     fingerprint = config.cache_fingerprint()
 
     snapshot = await ol_cache.get_snapshot(
@@ -986,7 +991,7 @@ class OptionsLabService:
         tool = await self.engine._signal_engine_tool()
         if tool is None:
             return OptionsLabConfig()
-        settings = self.engine._tool_settings(tool)
+        settings = await self.engine._tool_settings(tool)
         nested = settings.get(OPTIONS_LAB_SETTINGS_KEY)
         if isinstance(nested, dict):
             return OptionsLabConfig.from_dict(nested)
@@ -1074,7 +1079,7 @@ class OptionsLabService:
                 "ok": False,
                 "error": "Signal engine tool not bound on Signals ops team.",
             }
-        current = self.engine._tool_settings(tool)
+        current = await self.engine._tool_settings(tool)
         lab = OptionsLabConfig.from_dict(
             current.get(OPTIONS_LAB_SETTINGS_KEY)
             if isinstance(current.get(OPTIONS_LAB_SETTINGS_KEY), dict)
@@ -1116,9 +1121,10 @@ class OptionsLabService:
             if not _fut_matches_underlying(incoming_fut, symbol):
                 merged_lab["fut_symbol"] = suggested
         next_config = OptionsLabConfig.from_dict(merged_lab)
-        await self.engine._write_tool_settings(
+        # Patch only our nested subtree — never rewrite Signal / Param Chart keys.
+        await self.engine._patch_tool_settings(
             tool,
-            {**current, OPTIONS_LAB_SETTINGS_KEY: next_config.to_admin_dict()},
+            {OPTIONS_LAB_SETTINGS_KEY: next_config.to_admin_dict()},
         )
         return {"ok": True, **await self.get_admin_config()}
 

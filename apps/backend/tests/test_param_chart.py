@@ -359,6 +359,76 @@ def test_param_chart_config_defaults() -> None:
 
 
 @pytest.mark.asyncio
+async def test_param_chart_clears_strike_on_underlying_change(monkeypatch) -> None:
+    """BANKNIFTY strike 57000 must not rederive NIFTY…57000CE after switch."""
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.db.models import Role
+    from app.domains.param_chart import ParamChartService
+    from app.domains.param_chart_constants import PARAM_CHART_SETTINGS_KEY
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    svc = ParamChartService(session, context)
+    written: dict = {}
+
+    async def _settings(_tool):
+        return {
+            PARAM_CHART_SETTINGS_KEY: {
+                "underlying_symbol": "NSE:NIFTY BANK",
+                "underlying_label": "BANKNIFTY",
+                "fut_symbol": "NFO:BANKNIFTY26AUGFUT",
+                "strike_step": 100,
+                "strike": 57000,
+                "ce_symbol": "NFO:BANKNIFTY26AUG57000CE",
+                "pe_symbol": "NFO:BANKNIFTY26AUG57000PE",
+                "year": 2026,
+                "month": 8,
+                "interval": "1D",
+            },
+            "engine_enabled": True,
+            "options_lab": {"mock": True},
+        }
+
+    async def _patch(_tool, patch):
+        written.clear()
+        written.update(patch)
+        return patch
+
+    tool = MagicMock()
+    monkeypatch.setattr(svc.engine, "_signal_engine_tool", AsyncMock(return_value=tool))
+    monkeypatch.setattr(svc.engine, "_tool_settings", _settings)
+    monkeypatch.setattr(svc.engine, "_patch_tool_settings", _patch)
+    monkeypatch.setattr(svc.engine, "_load_setup", AsyncMock(return_value=(None, True, True)))
+    monkeypatch.setattr(
+        svc,
+        "get_admin_config",
+        AsyncMock(return_value={"ok": True, "config": {}}),
+    )
+
+    result = await svc.update_admin_config({"underlying_symbol": "NSE:NIFTY 50"})
+    assert result["ok"] is True
+    chart = written[PARAM_CHART_SETTINGS_KEY]
+    assert chart["underlying_symbol"] == "NSE:NIFTY 50"
+    assert chart["strike"] == 24000
+    assert "57000" not in chart["ce_symbol"]
+    assert chart["ce_symbol"].endswith("24000CE")
+    assert chart["pe_symbol"].endswith("24000PE")
+    # Must not rewrite sibling desk keys.
+    assert "engine_enabled" not in written
+    assert "options_lab" not in written
+
+
+@pytest.mark.asyncio
 async def test_candle_dump_local_roundtrip(tmp_path, monkeypatch) -> None:
     from app.domains import param_chart_candle_store as store
 

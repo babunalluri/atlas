@@ -37,8 +37,8 @@ from app.db.models import (
     TenantCredential,
     ToolDefinition,
     ToolDefinitionVersion,
-    UserVaultEntry,
     UserNotification,
+    UserVaultEntry,
     VerificationChallenge,
     WorkflowAssignment,
     WorkflowConfig,
@@ -2417,13 +2417,13 @@ class ToolDefinitionRepository(TenantRepository):
         )
         return rows.all()
 
-    async def get(self, definition_id: uuid.UUID) -> ToolDefinition | None:
-        return await self.session.scalar(
-            self.scoped(
-                select(ToolDefinition).where(ToolDefinition.id == definition_id),
-                ToolDefinition,
-            )
-        )
+    async def get(
+        self, definition_id: uuid.UUID, *, lock: bool = False
+    ) -> ToolDefinition | None:
+        statement = select(ToolDefinition).where(ToolDefinition.id == definition_id)
+        if lock:
+            statement = statement.with_for_update()
+        return await self.session.scalar(self.scoped(statement, ToolDefinition))
 
     async def get_by_slug(self, slug: str) -> ToolDefinition | None:
         return await self.session.scalar(
@@ -2519,28 +2519,34 @@ class ToolDefinitionVersionRepository(TenantRepository):
         )
         return rows.all()
 
-    async def get(self, version_id: uuid.UUID) -> ToolDefinitionVersion | None:
+    async def get(
+        self, version_id: uuid.UUID, *, lock: bool = False
+    ) -> ToolDefinitionVersion | None:
+        statement = select(ToolDefinitionVersion).where(
+            ToolDefinitionVersion.id == version_id
+        )
+        if lock:
+            statement = statement.with_for_update()
         return await self.session.scalar(
-            self.scoped(
-                select(ToolDefinitionVersion).where(ToolDefinitionVersion.id == version_id),
-                ToolDefinitionVersion,
-            )
+            self.scoped(statement, ToolDefinitionVersion)
         )
 
     async def latest_draft(
-        self, tool_definition_id: uuid.UUID
+        self, tool_definition_id: uuid.UUID, *, lock: bool = False
     ) -> ToolDefinitionVersion | None:
-        return await self.session.scalar(
-            self.scoped(
-                select(ToolDefinitionVersion)
-                .where(
-                    ToolDefinitionVersion.tool_definition_id == tool_definition_id,
-                    ToolDefinitionVersion.status.in_(("draft", "validated")),
-                )
-                .order_by(ToolDefinitionVersion.version.desc())
-                .limit(1),
-                ToolDefinitionVersion,
+        statement = (
+            select(ToolDefinitionVersion)
+            .where(
+                ToolDefinitionVersion.tool_definition_id == tool_definition_id,
+                ToolDefinitionVersion.status.in_(("draft", "validated")),
             )
+            .order_by(ToolDefinitionVersion.version.desc())
+            .limit(1)
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return await self.session.scalar(
+            self.scoped(statement, ToolDefinitionVersion)
         )
 
     async def next_version_number(self, tool_definition_id: uuid.UUID) -> int:

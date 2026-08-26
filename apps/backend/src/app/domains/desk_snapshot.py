@@ -1062,6 +1062,9 @@ KITE_QUOTE_ALIASES: dict[str, str] = {
     "NSE:FINNIFTY": "NSE:NIFTY FIN SERVICE",
     "NSE:NIFTYNXT50": "NSE:NIFTY NEXT 50",
     "NSE:MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+    # India VIX — desk + Kite sometimes omit the space.
+    "NSE:INDIAVIX": "NSE:INDIA VIX",
+    "NSE:INDIA_VIX": "NSE:INDIA VIX",
 }
 
 

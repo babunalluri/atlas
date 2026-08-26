@@ -223,6 +223,13 @@ class OptionsLabWorker:
             for tenant_id, auth_org_id in rows:
                 org_by_tenant[str(tenant_id)] = auth_org_id
 
+        # When Signal Engine is also live for a tenant, shrink Options Lab
+        # wings so sandbox quote storms cannot starve Signal compute.
+        from app.domains import signal_engine_cache as signal_cache
+        from app.domains.options_lab import MIN_WINGS
+
+        signal_watched = set(await signal_cache.list_watched_tenant_ids())
+
         refresh_tasks: list[asyncio.Task[bool]] = []
         for tenant_id, wings in watched:
             if tenant_id not in org_by_tenant:
@@ -231,12 +238,21 @@ class OptionsLabWorker:
                 tid = uuid.UUID(tenant_id)
             except ValueError:
                 continue
+            effective_wings = wings
+            if tenant_id in signal_watched:
+                effective_wings = min(int(wings), MIN_WINGS)
+                logger.info(
+                    "options_lab_yield_to_signal",
+                    tenant_id=tenant_id,
+                    wings=wings,
+                    effective_wings=effective_wings,
+                )
             refresh_tasks.append(
                 asyncio.create_task(
                     refresh_options_lab_snapshot(
                         tid,
                         auth_org_id=org_by_tenant[tenant_id],
-                        wings=wings,
+                        wings=effective_wings,
                     )
                 )
             )
