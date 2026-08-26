@@ -15,6 +15,25 @@ CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
 
 FROM base AS builder
 ENV NEXT_TELEMETRY_DISABLED=1
+# NEXT_PUBLIC_* are inlined into the client bundle at build time, so a
+# production image must be built with the deploy's real URLs — runtime
+# `environment:` entries are ignored once `npm run build` has run.
+ARG NEXT_PUBLIC_AGENTOS_URL
+ARG NEXT_PUBLIC_APP_URL
+ARG NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER
+ARG NEXT_PUBLIC_DEV_AUTH="false"
+ARG NEXT_PUBLIC_USE_MOCKS="false"
+ENV NEXT_PUBLIC_AGENTOS_URL=$NEXT_PUBLIC_AGENTOS_URL \
+    NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
+    NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER=$NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER \
+    NEXT_PUBLIC_DEV_AUTH=$NEXT_PUBLIC_DEV_AUTH \
+    NEXT_PUBLIC_USE_MOCKS=$NEXT_PUBLIC_USE_MOCKS
+# Build context is only `apps/web` (WORKDIR /app). Pin tracing to the app dir
+# so standalone emits `/app/.next/standalone/server.js` — matching the
+# production stage `COPY .next/standalone ./` + `CMD ["node", "server.js"]`.
+# Without this, default monorepo root nesting puts server.js under
+# `standalone/apps/web/` and the web container crash-loops.
+ENV NEXT_OUTPUT_TRACING_ROOT=/app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

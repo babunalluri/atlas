@@ -1,0 +1,67 @@
+# Example host-local pilot overlay for the OCI Always Free VM (IP desk).
+#
+# DO NOT rsync this over the VM blindly — the live host file is operator-owned.
+# When ready to switch off `next dev`, copy/adapt onto the VM as
+# `docker-compose.pilot.yml`, then (explicit deploy):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.pilot.yml up -d --build web backend
+#
+# Verify production image (expect server.js; no next-dev process):
+#   docker exec atlas-web-1 ls /app/server.js
+#   docker inspect atlas-web-1 --format '{{json .Config.Cmd}}'
+#
+# Why this exists: a thin IP-only overlay leaves base compose `next dev`
+# (~1–5 GiB), which starves the Signal worker on 2 OCPU / 12 GB.
+
+services:
+  backend:
+    command: >
+      sh -c "python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
+      alembic upgrade head &&
+      python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
+      uvicorn app.main:app --host 0.0.0.0 --port 7777"
+    environment:
+      CORS_ORIGINS: http://137.23.61.107:3000
+      APP_PUBLIC_URL: http://137.23.61.107:3000
+      SANDBOX_TENANT_CONCURRENCY: "12"
+      WEB_CONCURRENCY: "1"
+
+  sandbox-manager:
+    environment:
+      SANDBOX_MAX_CONCURRENT: "16"
+
+  keycloak:
+    environment:
+      KC_HOSTNAME: http://137.23.61.107:8080
+      KC_HOSTNAME_STRICT: "false"
+
+  web:
+    build:
+      context: ./apps/web
+      target: production
+      args:
+        NEXT_PUBLIC_AGENTOS_URL: http://137.23.61.107:7777
+        NEXT_PUBLIC_APP_URL: http://137.23.61.107:3000
+        NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: http://137.23.61.107:8080/realms/atlas
+        NEXT_PUBLIC_DEV_AUTH: "false"
+        NEXT_PUBLIC_USE_MOCKS: "false"
+    # Production stage is /app/server.js; bind mounts would shadow it.
+    volumes: !reset []
+    command: !reset null
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_AGENTOS_URL: http://137.23.61.107:7777
+      NEXT_PUBLIC_APP_URL: http://137.23.61.107:3000
+      NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: http://137.23.61.107:8080/realms/atlas
+      NEXT_PUBLIC_DEV_AUTH: "false"
+      NEXT_PUBLIC_USE_MOCKS: "false"
+      AGENTOS_INTERNAL_URL: http://backend:7777
+      AUTH_URL: http://137.23.61.107:3000
+      AUTH_KEYCLOAK_ISSUER: http://137.23.61.107:8080/realms/atlas
+      AUTH_KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/atlas
+      # Must come from host .env — base compose used to hardcode a dev placeholder
+      # which production NODE_ENV rejects (desk 500s).
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+      AUTH_KEYCLOAK_ID: ${AUTH_KEYCLOAK_ID:-atlas-web}
+      AUTH_KEYCLOAK_SECRET: ${AUTH_KEYCLOAK_SECRET:?set AUTH_KEYCLOAK_SECRET}
+      WATCHPACK_POLLING: "false"

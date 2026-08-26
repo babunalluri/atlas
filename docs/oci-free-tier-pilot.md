@@ -135,18 +135,62 @@ In `docker-compose.yml`, override Keycloak for production-like hostnames
 (via Compose override file or env):
 
 ```yaml
-# docker-compose.pilot.yml (example override)
+# docker-compose.pilot.yml (example override — keep this file host-local; do not rsync)
 services:
   keycloak:
     environment:
       KC_HOSTNAME: https://auth.pilot.example.com
       KC_HOSTNAME_STRICT: "true"
-  web:
+  backend:
     environment:
+      TZ: Asia/Kolkata
+      WEB_CONCURRENCY: "1"
+  web:
+    # Prefer production Next image on Always Free (next dev ≈ 4–5 GiB).
+    # Prefer the IP-ready template `docker-compose.pilot.oci.example.yml` on the
+    # host (operator-owned; never blind rsync). Plain `volumes: []` does NOT
+    # clear base bind mounts — use Compose `!reset` (requires Compose >= 2.24):
+    build:
+      context: ./apps/web
+      target: production
+    environment:
+      TZ: Asia/Kolkata
       AUTH_KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/atlas
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET}
+      AUTH_KEYCLOAK_SECRET: ${AUTH_KEYCLOAK_SECRET:?set AUTH_KEYCLOAK_SECRET}
+    volumes: !reset []
+    command: !reset null
 ```
 
+> **Verified Aug 2026 (OCI pilot `137.23.61.107`):** the live host
+> `docker-compose.pilot.yml` was a **thin IP-only** overlay (CORS / Keycloak /
+> `NEXT_PUBLIC_*`). Compose still used the base **`next dev`** web service
+> (`Cmd=npm run dev`, no `/app/server.js`, ~1.3 GiB `next-server` RSS at idle).
+> That matches the “event loop starvation / OOM” risk on 2 OCPU / 12 GB.
+>
+> Copy [`docker-compose.pilot.oci.example.yml`](../docker-compose.pilot.oci.example.yml)
+> to the host as `docker-compose.pilot.yml` (operator copy — never blind rsync).
+> Then rebuild web:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.pilot.yml up -d --build web
+> docker exec atlas-web-1 ls /app/server.js          # must exist
+> docker exec atlas-web-1 ls /app/node_modules/next  # must exist (standalone deps)
+> docker inspect atlas-web-1 --format '{{json .Config.Cmd}}'  # expect ["node","server.js"]
+> ```
+>
+> Also ensure base `docker-compose.yml` passes `AUTH_KEYCLOAK_SECRET` from `.env`
+> (not the hardcoded `atlas-web-dev-secret-change-me`); production `NODE_ENV`
+> rejects that placeholder and the desk returns 500.
+>
+> Signal Engine stays **UI-driven** (SSE watch); production web only frees CPU/RAM
+> so the worker can keep `ticker.path=ws` under load.
 Register Keycloak redirect URIs for `https://pilot.example.com/*`.
+
+> **Desk tip:** On a 2 OCPU / 12 GB VM, keep Options Lab on **Mock** (or closed)
+> while Signal Engine is live — live Lab wings are auto-clamped when Signal is
+> watching, but sandbox load still adds up. Refresh Kite `access_token` ~daily
+> around 06:00 IST.
 
 ## 3. Build sandbox image and start
 
@@ -200,13 +244,17 @@ adjust Keycloak `KC_HOSTNAME` accordingly — OIDC in browsers prefers HTTPS.
 | Postgres | ~1 GB |
 | Keycloak | ~1 GB |
 | Backend (2 workers) | ~1–1.5 GB |
-| Web (Next.js) | ~512 MB–1 GB |
+| Web (Next.js) | ~512 MB–1 GB (**production** target); `next dev` can use **4–5 GiB** — avoid on Always Free |
 | Redis | ~256 MB |
 | MinIO + sandbox-manager | ~512 MB |
 | OS + Docker | ~1 GB |
 
-Total ≈ **5–6 GB** — comfortable headroom for pilot. If tight, stop unused
-services or reduce `WEB_CONCURRENCY` to `1`.
+Total ≈ **5–6 GB** with production web — comfortable headroom for pilot. If
+tight, stop unused services, set `WEB_CONCURRENCY=1`, and do not run Options Lab
+live + Signal live together.
+
+Set container `TZ=Asia/Kolkata` (Compose defaults this) so backend/web logs match
+the IST desk clock; the host timezone alone is not enough.
 
 ## Redis on pilot
 
@@ -238,8 +286,10 @@ Estimated production floor: **~$200+/month** depending on scale — see
 | CORS errors | `CORS_ORIGINS` includes exact web origin |
 | Signal engine frozen | Start engine; mock mode still requires engine **Running** |
 | Scheduler silent | `REDIS_URL` must be real Redis (not `memory://`) when `ENVIRONMENT=staging` |
-| OOM / slow VM | `docker stats`; reduce workers or restart stack |
+| OOM / slow VM | `docker stats`; use web `target: production` (not `npm run dev`); reduce workers; Mock Options Lab while Signal is live |
 | Ampere capacity error | Try another AD in home region or retry off-peak |
+| Signal Start flips back to Stopped | Autosave must not PATCH `engine_enabled`; check Redis snapshot `feed_source` and published toolkit settings |
+| Stream connected, board empty | Compute lock / Options Lab starvation — Mock Lab or wait for `starting` → Running; check sandbox load |
 
 ## Related docs
 

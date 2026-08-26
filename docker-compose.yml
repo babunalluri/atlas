@@ -167,6 +167,8 @@ services:
       DB_MAX_OVERFLOW: "10"
       CORS_ORIGINS: http://localhost:3000
       ENVIRONMENT: development
+      # Desk / ops logs in IST when host is India-facing (override per deploy).
+      TZ: ${TZ:-Asia/Kolkata}
       EMAIL_INBOUND_DOMAIN: ${EMAIL_INBOUND_DOMAIN:-}
       RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
@@ -181,6 +183,8 @@ services:
       OPTIONS_LAB_TICKER_ENABLED: "true"
       # Armed paper bots (~60s). Requires WEB_CONCURRENCY=1 (default uvicorn).
       OPTIONS_LAB_BOTS_ENABLED: "true"
+      # Pin single worker — Kite WS hub + paper bots disable themselves if >1.
+      WEB_CONCURRENCY: "1"
     ports:
       - "7777:7777"
     volumes:
@@ -222,8 +226,8 @@ services:
       AGENTOS_INTERNAL_URL: http://backend:7777
       AUTH_URL: ${AUTH_URL:-http://localhost:3000}
       AUTH_SECRET: ${AUTH_SECRET:-dev-only-auth-secret-change-me-please}
-      AUTH_KEYCLOAK_ID: atlas-web
-      AUTH_KEYCLOAK_SECRET: atlas-web-dev-secret-change-me
+      AUTH_KEYCLOAK_ID: ${AUTH_KEYCLOAK_ID:-atlas-web}
+      AUTH_KEYCLOAK_SECRET: ${AUTH_KEYCLOAK_SECRET:-atlas-web-dev-secret-change-me}
       # Browser-facing issuer (authorization redirect + token `iss`).
       AUTH_KEYCLOAK_ISSUER: http://localhost:8080/realms/atlas
       # In-network issuer for Auth.js token/userinfo/jwks inside the web container.
@@ -235,6 +239,7 @@ services:
       NEXT_PUBLIC_DEV_TENANT_ID: "11111111-1111-1111-1111-111111111111"
       NEXT_PUBLIC_DEV_USER_ID: "dev-admin"
       NEXT_PUBLIC_DEV_ROLE: "tenant_admin"
+      TZ: ${TZ:-Asia/Kolkata}
       WATCHPACK_POLLING: "true"
     ports:
       - "3000:3000"

@@ -10,7 +10,12 @@ const localeSegment = `(${locales.join("|")})`;
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  outputFileTracingRoot: path.join(__dirname, "../.."),
+  // Monorepo root by default so tracing picks up hoisted deps. The Docker
+  // build context is only `apps/web`, so images set this to the app dir —
+  // otherwise the standalone entrypoint nests under `standalone/apps/web/`
+  // and the production stage's `node server.js` cannot find it.
+  outputFileTracingRoot:
+    process.env.NEXT_OUTPUT_TRACING_ROOT || path.join(__dirname, "../.."),
   async redirects() {
     const legacyAdminRedirects = [
       { from: "activities", to: "traces" },

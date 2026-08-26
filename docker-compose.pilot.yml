@@ -1,0 +1,71 @@
+# Pilot overlay for the OCI Always Free VM (2 OCPU / 12 GB).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.pilot.yml up -d --build
+#
+# The base compose is a laptop dev stack: `web` runs `next dev` (~4-5 GiB RSS,
+# constant recompiles) and `backend` runs `uvicorn --reload` (inotify watchers
+# over the whole source tree + a supervisor process). On a 2 OCPU box that
+# competes with the sandbox runners and the Kite ticker for the same cores,
+# which shows up as UI lag and slow cold Signal snapshots.
+#
+# This overlay switches both to their production forms. Nothing else changes:
+# same images, same env, same volumes for data.
+#
+# Requires Docker Compose >= 2.24 for the `!reset` tag.
+#
+# Set these on the host (e.g. in .env next to this file) before building —
+# NEXT_PUBLIC_* is compiled into the browser bundle, so they are BUILD args,
+# not runtime env. Rebuild `web` whenever they change.
+#
+#   PUBLIC_WEB_URL=https://desk.example.com
+#   PUBLIC_AGENTOS_URL=https://desk.example.com/api
+#   PUBLIC_KEYCLOAK_ISSUER=https://desk.example.com/realms/atlas
+
+services:
+  backend:
+    # Identical bootstrap to the base stack, minus `--reload`.
+    command: >
+      sh -c "python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
+      alembic upgrade head &&
+      python -c 'import asyncio; from app.core.settings import get_settings; from app.db.roles import ensure_app_db_role; asyncio.run(ensure_app_db_role(get_settings()))' &&
+      uvicorn app.main:app --host 0.0.0.0 --port 7777"
+    environment:
+      # The Kite WS hub and the paper-bot loop both assume a single process.
+      WEB_CONCURRENCY: "1"
+      CORS_ORIGINS: ${PUBLIC_WEB_URL:?set PUBLIC_WEB_URL}
+      APP_PUBLIC_URL: ${PUBLIC_WEB_URL}
+    # The ./apps/backend bind mount stays: deploys are `git pull` + restart.
+    # Without --reload it costs nothing at runtime.
+
+  web:
+    build:
+      context: ./apps/web
+      target: production
+      args:
+        NEXT_PUBLIC_AGENTOS_URL: ${PUBLIC_AGENTOS_URL:?set PUBLIC_AGENTOS_URL}
+        NEXT_PUBLIC_APP_URL: ${PUBLIC_WEB_URL:?set PUBLIC_WEB_URL}
+        NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:?set PUBLIC_KEYCLOAK_ISSUER}
+        NEXT_PUBLIC_DEV_AUTH: "false"
+        NEXT_PUBLIC_USE_MOCKS: "false"
+    # The production stage ships a prebuilt standalone server at /app; the dev
+    # bind mounts would shadow it and the container would fail to start.
+    volumes: !reset []
+    # Use the image CMD (`node server.js`) instead of the dev `npm install && next dev`.
+    command: !reset null
+    environment:
+      NODE_ENV: production
+      # Mirrors of the build args above. The browser bundle already has these
+      # compiled in — these exist only so `docker compose config` / `printenv`
+      # do not still report the dev localhost values while debugging.
+      NEXT_PUBLIC_AGENTOS_URL: ${PUBLIC_AGENTOS_URL:?set PUBLIC_AGENTOS_URL}
+      NEXT_PUBLIC_APP_URL: ${PUBLIC_WEB_URL:?set PUBLIC_WEB_URL}
+      NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:?set PUBLIC_KEYCLOAK_ISSUER}
+      NEXT_PUBLIC_DEV_AUTH: "false"
+      NEXT_PUBLIC_USE_MOCKS: "false"
+      # Server-side only (not inlined), so runtime values are fine here.
+      AGENTOS_INTERNAL_URL: http://backend:7777
+      AUTH_URL: ${PUBLIC_WEB_URL:?set PUBLIC_WEB_URL}
+      AUTH_KEYCLOAK_ISSUER: ${PUBLIC_KEYCLOAK_ISSUER:?set PUBLIC_KEYCLOAK_ISSUER}
+      AUTH_KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/atlas
+      # Dev-only file watcher polling; pure CPU burn once the build is static.
+      WATCHPACK_POLLING: "false"
