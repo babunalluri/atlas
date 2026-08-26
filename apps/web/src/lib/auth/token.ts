@@ -35,6 +35,27 @@ type CachedToken = {
 };
 
 let memoryCache: CachedToken | null = null;
+/** Coalesce concurrent cold-cache getSession() calls (401 / multi-stream storm). */
+let sessionInflight: Promise<AtlasSession | null> | null = null;
+/** Identity for inflight clear — avoids TDZ on comparing the promise to itself in finally. */
+let sessionInflightEpoch = 0;
+
+async function fetchAtlasSession(): Promise<AtlasSession | null> {
+  if (sessionInflight) return sessionInflight;
+  const epoch = ++sessionInflightEpoch;
+  const pending: Promise<AtlasSession | null> = (async () => {
+    try {
+      return (await getSession()) as AtlasSession | null;
+    } finally {
+      // Only clear if we are still the active inflight (invalidate / newer call may have replaced us).
+      if (sessionInflightEpoch === epoch) {
+        sessionInflight = null;
+      }
+    }
+  })();
+  sessionInflight = pending;
+  return pending;
+}
 
 function accessTokenExpiresAtMs(accessToken: string): number | null {
   try {
@@ -98,7 +119,7 @@ export async function getAccessToken(): Promise<string | null> {
     return packFromAccessToken(memoryCache!.rawAccessToken);
   }
   try {
-    const session = (await getSession()) as AtlasSession | null;
+    const session = await fetchAtlasSession();
     if (session?.error === "RefreshAccessTokenError") {
       memoryCache = null;
       return null;
@@ -159,7 +180,7 @@ export function useAgentOsToken() {
     }
 
     // Near expiry / missing — hit /api/auth/session so JWT refresh can run.
-    const session = (await getSession()) as AtlasSession | null;
+    const session = await fetchAtlasSession();
     if (session?.error === "RefreshAccessTokenError") {
       memoryCache = null;
       throw new Error("Session expired — sign in again");
@@ -179,7 +200,15 @@ export function useAgentOsToken() {
   };
 }
 
-/** Test helper — clear the module cache between cases. */
-export function resetAccessTokenCacheForTests(): void {
+/** Clear the in-memory JWT cache (tests + 401 retry). */
+export function invalidateAccessTokenCache(): void {
   memoryCache = null;
+  // Drop any in-flight getSession() so a 401 retry does not adopt a pre-401 result.
+  sessionInflight = null;
+  sessionInflightEpoch += 1;
+}
+
+/** @deprecated Use invalidateAccessTokenCache */
+export function resetAccessTokenCacheForTests(): void {
+  invalidateAccessTokenCache();
 }

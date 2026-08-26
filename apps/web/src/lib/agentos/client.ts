@@ -5,6 +5,10 @@ import type {
   ConversationSession,
 } from "@/lib/api/types";
 import { unpackAccessContext } from "@/lib/auth/access-context";
+import {
+  getAccessToken,
+  invalidateAccessTokenCache,
+} from "@/lib/auth/token";
 import { randomUuid } from "@/lib/random-uuid";
 
 function agentOsBaseUrl(): string {
@@ -214,6 +218,43 @@ export function summarizeApiErrorBody(
   return truncateMessage(text);
 }
 
+async function doApiFetch(
+  path: string,
+  accessToken: string,
+  method: string,
+  body: unknown | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
+  const access = unpackAccessContext(accessToken);
+  const platformTenantId = path.startsWith("/admin/platform")
+    ? undefined
+    : access.platformTenantId;
+  return fetch(agentOsUrl(path), {
+    method,
+    signal,
+    headers: {
+      Authorization: `Bearer ${access.token}`,
+      Accept: "application/json",
+      ...(platformTenantId
+        ? { "X-Platform-Tenant-ID": platformTenantId }
+        : {}),
+      ...(process.env.NEXT_PUBLIC_DEV_AUTH === "true"
+        ? {
+            "X-Dev-Tenant-ID":
+              process.env.NEXT_PUBLIC_DEV_TENANT_ID ??
+              "11111111-1111-1111-1111-111111111111",
+            "X-Dev-User-ID":
+              process.env.NEXT_PUBLIC_DEV_USER_ID ?? "dev-admin",
+            "X-Dev-Role":
+              process.env.NEXT_PUBLIC_DEV_ROLE ?? "tenant_admin",
+          }
+        : {}),
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 export async function apiFetch<T>(
   path: string,
   options: {
@@ -224,38 +265,28 @@ export async function apiFetch<T>(
   },
 ): Promise<T> {
   const { accessToken, method = "GET", body, signal } = options;
-  const access = unpackAccessContext(accessToken);
-  const platformTenantId = path.startsWith("/admin/platform")
-    ? undefined
-    : access.platformTenantId;
   let response: Response;
   try {
-    response = await fetch(agentOsUrl(path), {
-      method,
-      signal,
-      headers: {
-        Authorization: `Bearer ${access.token}`,
-        Accept: "application/json",
-        ...(platformTenantId
-          ? { "X-Platform-Tenant-ID": platformTenantId }
-          : {}),
-        ...(process.env.NEXT_PUBLIC_DEV_AUTH === "true"
-          ? {
-              "X-Dev-Tenant-ID":
-                process.env.NEXT_PUBLIC_DEV_TENANT_ID ??
-                "11111111-1111-1111-1111-111111111111",
-              "X-Dev-User-ID":
-                process.env.NEXT_PUBLIC_DEV_USER_ID ?? "dev-admin",
-              "X-Dev-Role":
-                process.env.NEXT_PUBLIC_DEV_ROLE ?? "tenant_admin",
-            }
-          : {}),
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    response = await doApiFetch(path, accessToken, method, body, signal);
   } catch (reason) {
     throw describeFetchFailure(reason, method, path);
+  }
+
+  // Mid-session JWT expiry: drop cache, refresh once, retry.
+  if (response.status === 401 && typeof window !== "undefined") {
+    invalidateAccessTokenCache();
+    try {
+      const fresh = await getAccessToken();
+      if (fresh && fresh !== accessToken) {
+        try {
+          response = await doApiFetch(path, fresh, method, body, signal);
+        } catch (reason) {
+          throw describeFetchFailure(reason, method, path);
+        }
+      }
+    } catch {
+      // fall through to original 401
+    }
   }
 
   if (!response.ok) {

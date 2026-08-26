@@ -92,4 +92,44 @@ describe("getAccessToken caching", () => {
     expect(second).toBe(token);
     expect(second).not.toContain("::atlas-platform-tenant=");
   });
+
+  it("dedupes concurrent cold getSession calls", async () => {
+    let release!: (session: { accessToken: string }) => void;
+    const gate = new Promise<{ accessToken: string }>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(getSession).mockImplementation(() => gate as never);
+
+    const token = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+    const p1 = getAccessToken();
+    const p2 = getAccessToken();
+    release({ accessToken: token });
+    const [a, b] = await Promise.all([p1, p2]);
+
+    expect(a).toBeTruthy();
+    expect(b).toBe(a);
+    expect(getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidateAccessTokenCache drops in-flight session so retry does not reuse it", async () => {
+    const { invalidateAccessTokenCache } = await import("@/lib/auth/token");
+    let release!: (session: { accessToken: string }) => void;
+    const gate = new Promise<{ accessToken: string }>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(getSession).mockImplementation(() => gate as never);
+
+    const stale = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+    const fresh = jwtWithExp(Math.floor(Date.now() / 1000) + 7200);
+    const first = getAccessToken();
+    invalidateAccessTokenCache();
+    vi.mocked(getSession).mockResolvedValue({ accessToken: fresh } as never);
+    const second = await getAccessToken();
+    release({ accessToken: stale });
+    await first.catch(() => undefined);
+
+    expect(second).toBeTruthy();
+    expect(String(second)).toContain(fresh.split(".")[1].slice(0, 8));
+    expect(getSession).toHaveBeenCalledTimes(2);
+  });
 });
