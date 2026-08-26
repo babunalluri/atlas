@@ -21,7 +21,11 @@ from app.domains.kite_ticker_hub import (
     resolve_kite_credentials,
     token_map_from_quotes,
 )
-from app.domains.signal_engine import SignalEngineService, _compute_state_payload
+from app.domains.signal_engine import (
+    SignalEngineService,
+    _compute_state_payload,
+    seed_engine_enabled_metric,
+)
 from app.domains.signal_engine_constants import (
     SIGNAL_ACTIVE_TICK_MS,
     SIGNAL_TICK_DEADLINE_SECONDS,
@@ -183,6 +187,10 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
         # shows "retrying" instead of a silently aging frame. Never force a
         # ``starting`` frame over a live board (set_snapshot refuses that).
         await cache.set_snapshot(tenant_key, payload)
+        await seed_engine_enabled_metric(
+            tenant_key,
+            bool(payload.get("engine_enabled", config.engine_enabled)),
+        )
         # Tier B after the live board publishes — reuses caches on next tick.
         asyncio.create_task(
             refresh_tier_b_for_tenant(tenant_id, auth_org_id=auth_org_id)

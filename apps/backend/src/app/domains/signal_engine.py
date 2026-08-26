@@ -36,6 +36,7 @@ from app.domains.signal_engine_constants import (
     BROKER_QUOTE_TTL_MS,
     ENGINE_STARTING_SNAPSHOT_MS,
     SNAPSHOT_FRESH_MS,
+    SNAPSHOT_TTL_MS,
     STATE_COMPUTE_TIMEOUT_MS,
     STREAM_COMPUTE_WAIT_MS,
     STREAM_INTERVAL_MS,
@@ -117,8 +118,13 @@ def _apply_engine_stopped_overlay(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _engine_starting_payload(config: "SignalEngineConfig") -> dict[str, Any]:
-    """Provisional SSE frame so Start never leaves the desk on a stale stopped snapshot."""
+    """Provisional SSE frame so Start never leaves the desk on a stale stopped snapshot.
+
+    Includes a full metric skeleton (null values) so the UI paints the board
+    immediately instead of ``Waiting for signal stream…``.
+    """
     now_ms = int(time.time() * 1000)
+    evaluated = evaluate_signal_state(config, {"source": "starting"})
     return {
         "engine_enabled": True,
         "engine_active": True,
@@ -128,9 +134,11 @@ def _engine_starting_payload(config: "SignalEngineConfig") -> dict[str, Any]:
         "feed_source": "starting",
         "live_quote_missing": False,
         "live_warnings": ["Starting engine — warming live quotes…"],
-        "metrics": [],
-        "passed": 0,
-        "evaluable": 0,
+        "metrics": evaluated["metrics"],
+        "passed": evaluated["passed"],
+        "evaluable": evaluated["evaluable"],
+        "entry_ready": evaluated.get("entry_ready", False),
+        "entry": evaluated.get("entry"),
         "has_broker": True,
         "team_slug": SIGNAL_TEAM_SLUG,
         "underlying": {
@@ -141,6 +149,59 @@ def _engine_starting_payload(config: "SignalEngineConfig") -> dict[str, Any]:
         "computed_at_ms": now_ms,
         "broker_poll_ms": BROKER_QUOTE_TTL_MS,
     }
+
+
+async def seed_engine_enabled_metric(tenant_id: str, enabled: bool) -> None:
+    """Keep ``engine_enabled`` alive as long as the snapshot (not medium 60s)."""
+    await cache.set_metric(
+        tenant_id,
+        "engine_enabled",
+        "medium",
+        bool(enabled),
+        ttl_ms=SNAPSHOT_TTL_MS,
+    )
+
+
+async def seed_stream_cold_frame(
+    service: "SignalEngineService",
+) -> tuple[dict[str, Any], bool]:
+    """Open a DB-backed SSE cold frame without awaiting ``state()``.
+
+    Returns ``(payload, should_refresh)``. Caller schedules
+    ``refresh_tenant_snapshot`` when ``should_refresh`` is True so the generator
+    can yield the starting skeleton immediately.
+    """
+    tenant_id = _tenant_key(service.context)
+    config = await service._load_config()
+    await seed_engine_enabled_metric(tenant_id, config.engine_enabled)
+
+    if not config.engine_enabled:
+        await cache.clear_watcher(tenant_id)
+        existing = await cache.get_snapshot(tenant_id)
+        if existing is not None:
+            return _apply_engine_stopped_overlay(existing), False
+        stopped = _apply_engine_stopped_overlay(_engine_starting_payload(config))
+        await cache.set_snapshot(tenant_id, stopped, force=True)
+        return stopped, False
+
+    await cache.touch_watcher(tenant_id)
+    existing = await cache.get_snapshot(tenant_id)
+    if existing is not None:
+        computing = await cache.compute_lock_held(tenant_id)
+        need_refresh = existing.get("feed_source") in (None, "starting") and not computing
+        return (
+            _annotate_snapshot_freshness(existing, computing=computing),
+            need_refresh,
+        )
+
+    starting = _engine_starting_payload(config)
+    await cache.set_snapshot(
+        tenant_id,
+        starting,
+        ttl_ms=ENGINE_STARTING_SNAPSHOT_MS,
+        force=True,
+    )
+    return _annotate_snapshot_freshness(starting, computing=True), True
 
 
 def _annotate_snapshot_freshness(
@@ -247,9 +308,7 @@ async def state_for_stream(
         config = await service._load_config()
     # Boolean-only cache: Lab/Param Chart patches do not invalidate signal
     # metrics, so we must not stash the full config blob here.
-    await cache.set_metric(
-        tenant_id, "engine_enabled", "medium", bool(config.engine_enabled)
-    )
+    await seed_engine_enabled_metric(tenant_id, config.engine_enabled)
     computing = await cache.compute_lock_held(tenant_id)
 
     snapshot = await cache.get_snapshot(tenant_id)
@@ -324,6 +383,8 @@ async def stream_frame_from_cache(tenant_id: str) -> dict[str, Any] | None:
         return None
     if enabled:
         await cache.touch_watcher(tenant_id)
+        # Re-stamp so open desks do not fall back to Postgres every medium TTL.
+        await seed_engine_enabled_metric(tenant_id, True)
         computing = await cache.compute_lock_held(tenant_id)
         return _annotate_snapshot_freshness(snapshot, computing=computing)
     return _apply_engine_stopped_overlay(snapshot)
@@ -1904,11 +1965,9 @@ class SignalEngineService:
             await cache.clear_watcher(tenant_id)
         await _invalidate_tenant_signal_cache(tenant_id)
         # Re-seed boolean after invalidate so SSE fast path does not cold-load
-        # for up to medium TTL after Start/Stop.
-        await cache.set_metric(
+        # after Start/Stop.
+        await seed_engine_enabled_metric(
             tenant_id,
-            "engine_enabled",
-            "medium",
             bool(SignalEngineConfig.from_settings(merged).engine_enabled),
         )
         if patch.get("engine_enabled") is False:

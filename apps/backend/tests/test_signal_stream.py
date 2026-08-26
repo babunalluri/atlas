@@ -230,6 +230,79 @@ def test_apply_engine_stopped_overlay() -> None:
     assert out["feed_source"] == "stopped"
 
 
+@pytest.mark.asyncio
+async def test_engine_starting_payload_has_metric_skeleton() -> None:
+    from app.domains.signal_engine import SignalEngineConfig, _engine_starting_payload
+
+    payload = _engine_starting_payload(SignalEngineConfig(engine_enabled=True))
+    assert payload["feed_source"] == "starting"
+    assert payload["engine_computing"] is True
+    assert len(payload["metrics"]) > 0
+    assert all("id" in row and "label" in row for row in payload["metrics"])
+    # Values stay empty until the live tick lands.
+    assert all(row.get("value") is None or row.get("rule") == "before_time" for row in payload["metrics"])
+
+
+@pytest.mark.asyncio
+async def test_seed_stream_cold_frame_does_not_compute_state() -> None:
+    from app.domains.signal_engine import SignalEngineConfig, seed_stream_cold_frame
+
+    tenant = "tenant-cold-seed"
+
+    class _StubService:
+        context = type(
+            "Ctx",
+            (),
+            {"tenant_id": tenant, "auth_org_id": "org"},
+        )()
+
+        async def _load_config(self):
+            return SignalEngineConfig(engine_enabled=True, underlying_symbol="NSE:NIFTY 50")
+
+        async def state(self):
+            raise AssertionError("SSE cold path must not await state()")
+
+    payload, should_refresh = await seed_stream_cold_frame(_StubService())  # type: ignore[arg-type]
+    assert should_refresh is True
+    assert payload["feed_source"] == "starting"
+    assert len(payload["metrics"]) > 0
+    assert await cache.get_metric(tenant, "engine_enabled") is True
+    snap = await cache.get_snapshot(tenant)
+    assert snap is not None
+    assert snap["feed_source"] == "starting"
+
+
+@pytest.mark.asyncio
+async def test_seed_stream_cold_frame_reuses_existing_snapshot() -> None:
+    from app.domains.signal_engine import SignalEngineConfig, seed_stream_cold_frame
+
+    tenant = "tenant-cold-reuse"
+    await cache.set_snapshot(
+        tenant,
+        {
+            "engine_enabled": True,
+            "feed_source": "live",
+            "passed": 7,
+            "metrics": [{"id": "atm"}],
+            "computed_at_ms": 1_700_000_000_000,
+        },
+    )
+
+    class _StubService:
+        context = type("Ctx", (), {"tenant_id": tenant, "auth_org_id": "org"})()
+
+        async def _load_config(self):
+            return SignalEngineConfig(engine_enabled=True)
+
+        async def state(self):
+            raise AssertionError("must not compute when snapshot warm")
+
+    payload, should_refresh = await seed_stream_cold_frame(_StubService())  # type: ignore[arg-type]
+    assert should_refresh is False
+    assert payload["passed"] == 7
+    assert payload["feed_source"] == "live"
+
+
 def test_annotate_snapshot_freshness_marks_stale_before_ttl() -> None:
     """Age past FRESH but under TTL must still be servable as stale."""
     import time

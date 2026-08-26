@@ -19,6 +19,7 @@ from app.domains import signal_engine_cache as cache
 from app.domains.signal_engine import (
     STREAM_INTERVAL_MS,
     SignalEngineService,
+    seed_stream_cold_frame,
     state_for_stream,
     stream_frame_from_cache,
 )
@@ -27,6 +28,15 @@ from app.domains.sse_frames import SSE_KEEPALIVE, stream_revision
 from app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/admin/signals", tags=["admin-signals"])
+# Strong refs so background cold refreshes are not GC'd mid-flight.
+_BG_SNAPSHOT_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _track_bg_snapshot(task: asyncio.Task[Any]) -> None:
+    _BG_SNAPSHOT_TASKS.add(task)
+    task.add_done_callback(_BG_SNAPSHOT_TASKS.discard)
+
+
 AdminContext = Annotated[
     TenantContext,
     Depends(
@@ -133,19 +143,25 @@ async def stream_signal_state(
                 if await request.is_disconnected():
                     break
                 # Steady state: Redis only (no Postgres). Cold path opens a
-                # short-lived session when engine_enabled or snapshot is missing.
+                # short-lived session to seed starting / engine_enabled, then
+                # hands compute to refresh_tenant_snapshot (does not await state()).
                 payload = await stream_frame_from_cache(tenant_key)
                 if payload is None:
                     async with SessionFactory() as session:
                         async with session.begin():
                             await apply_tenant_guc(session, context.tenant_id)
                             service = SignalEngineService(session, context)
-                            # Heartbeat BEFORE state_for_stream — a slow sandbox
-                            # tick must not outlive WATCH_TTL mid-frame.
-                            config = await service._load_config()
-                            if config.engine_enabled:
-                                await cache.touch_watcher(tenant_key)
-                            payload = await state_for_stream(service, config=config)
+                            payload, should_refresh = await seed_stream_cold_frame(
+                                service
+                            )
+                    if should_refresh:
+                        task = asyncio.create_task(
+                            refresh_tenant_snapshot(
+                                context.tenant_id,
+                                auth_org_id=context.auth_org_id,
+                            )
+                        )
+                        _track_bg_snapshot(task)
                 if not payload.get("engine_enabled", False):
                     await cache.clear_watcher(tenant_key)
                 rev = stream_revision(payload)
