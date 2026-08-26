@@ -1120,7 +1120,7 @@ def _extract_candle_rows(result: Any) -> list[Any]:
 async def _merge_nse_slow_tier(
     tenant_id: str,
     feed: dict[str, Any],
-    config: SignalEngineConfig,
+    _config: SignalEngineConfig,
     *,
     mock: bool,
 ) -> None:
@@ -1129,18 +1129,15 @@ async def _merge_nse_slow_tier(
         return
     cached = await _cache_get(tenant_id, "nse_slow")
     if cached is not None:
-        if config.fii_net is None and cached.get("fii_net") is not None:
-            feed["fii_net"] = cached["fii_net"]
-        if cached.get("advance_decline_ratio") is not None:
-            feed["advance_decline_ratio"] = cached["advance_decline_ratio"]
+        # Merge the full slow payload (FII/DII, A/D, calendar/holiday fields).
+        # Manual config.fii_net is re-applied by the caller after this returns.
+        if isinstance(cached, dict):
+            feed.update(cached)
         return
     payload = await asyncio.to_thread(fetch_nse_slow_fields)
     if not payload:
         return
-    if config.fii_net is None and payload.get("fii_net") is not None:
-        feed["fii_net"] = payload["fii_net"]
-    if payload.get("advance_decline_ratio") is not None:
-        feed["advance_decline_ratio"] = payload["advance_decline_ratio"]
+    feed.update(payload)
     await _cache_set(tenant_id, "nse_slow", "slow", payload)
 
 
@@ -1970,10 +1967,8 @@ class SignalEngineService:
         await _invalidate_tenant_signal_cache(tenant_id)
         # Re-seed boolean after invalidate so SSE fast path does not cold-load
         # after Start/Stop.
-        await seed_engine_enabled_metric(
-            tenant_id,
-            bool(SignalEngineConfig.from_settings(merged).engine_enabled),
-        )
+        enabled = bool(SignalEngineConfig.from_settings(merged).engine_enabled)
+        await seed_engine_enabled_metric(tenant_id, enabled)
         if patch.get("engine_enabled") is False:
             stopped = _apply_engine_stopped_overlay(
                 await self.state()
@@ -1993,6 +1988,10 @@ class SignalEngineService:
                 ttl_ms=ENGINE_STARTING_SNAPSHOT_MS,
                 force=True,
             )
+        elif enabled:
+            # Parameter-only edits (PCR/VIX/CE/PE/…) while the desk is running:
+            # keep the watcher alive so the worker refreshes the board quickly.
+            await cache.touch_watcher(tenant_id)
         return {"ok": True, **await self.get_admin_config()}
 
     async def maybe_persist_auto_atm_symbols(self, payload: dict[str, Any]) -> bool:

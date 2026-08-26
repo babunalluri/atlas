@@ -3681,6 +3681,10 @@ export interface SignalEngineState {
   live_quote_missing?: boolean;
   team_slug: string;
   underlying?: { symbol: string; label: string };
+  /** Resolved ATM options from the live feed (may auto-persist into config). */
+  ce_symbol?: string;
+  pe_symbol?: string;
+  atm?: number;
   /** Live ticker health from the shared Kite hub (ws | rest). */
   ticker?: {
     connected?: boolean;

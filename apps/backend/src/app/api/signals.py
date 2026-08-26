@@ -107,9 +107,12 @@ async def patch_signal_config(
     result = await SignalEngineService(session, context).update_admin_config(patch)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Update failed"))
-    # After the request transaction commits: warm Redis so SSE can avoid a cold
-    # state() on the critical path. Must not run mid-request (uncommitted config).
-    if patch.get("engine_enabled") is True:
+    # After the request transaction commits: warm Redis so SSE reflects the new
+    # parameters (overrides, symbols, Start) without waiting on a cold tick.
+    cfg = result.get("config") if isinstance(result.get("config"), dict) else {}
+    if patch.get("engine_enabled") is True or (
+        cfg.get("engine_enabled") and patch.get("engine_enabled") is not False
+    ):
         background_tasks.add_task(
             refresh_tenant_snapshot,
             context.tenant_id,

@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
+import {
+  mergeResolvedOptionSymbols,
+  signalConfigSnapshot,
+} from "@/components/domains/signal-resolved-options";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import {
   getSignalConfig,
@@ -14,10 +18,6 @@ import {
 const SAVE_DEBOUNCE_MS = 650;
 
 export type SignalConfigSaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
-
-function configSnapshot(config: SignalEngineAdminConfig): string {
-  return JSON.stringify(config);
-}
 
 /** Fields autosave may PATCH. Never include engine_enabled — Start/Stop only. */
 function diffConfigPatch(
@@ -63,7 +63,7 @@ export function useSignalConfigAutosave(
 
   const persist = useCallback(
     async (next: SignalEngineAdminConfig, epoch: number) => {
-      const snapshot = configSnapshot(next);
+      const snapshot = signalConfigSnapshot(next);
       if (snapshot === lastSavedRef.current) return;
 
       const patch = diffConfigPatch(lastSavedRef.current, next);
@@ -79,10 +79,20 @@ export function useSignalConfigAutosave(
         const token = await getAccessToken();
         if (!token) return;
         if (epoch !== immediateEpochRef.current) return;
-        await patchSignalConfig(token, patch);
+        const result = await patchSignalConfig(token, patch);
         if (seq !== saveSeqRef.current) return;
         if (epoch !== immediateEpochRef.current) return;
-        lastSavedRef.current = snapshot;
+        // Server may sanitize (drop mismatched CE/PE, mirror FUT). Prefer that.
+        if (result?.config) {
+          setConfig(result.config);
+          lastSavedRef.current = signalConfigSnapshot(result.config);
+          const match = presets.find(
+            (p) => p.symbol === result.config.underlying_symbol,
+          );
+          setPresetKey(match ? match.symbol : CUSTOM_PRESET);
+        } else {
+          lastSavedRef.current = snapshot;
+        }
         setSaveStatus("saved");
       } catch (err) {
         if (seq !== saveSeqRef.current) return;
@@ -90,13 +100,13 @@ export function useSignalConfigAutosave(
         setError(err instanceof Error ? err.message : "Save failed");
       }
     },
-    [getAccessToken],
+    [getAccessToken, presets],
   );
 
   const scheduleSave = useCallback(
     (next: SignalEngineAdminConfig) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      const snapshot = configSnapshot(next);
+      const snapshot = signalConfigSnapshot(next);
       if (snapshot === lastSavedRef.current) {
         setSaveStatus("idle");
         return;
@@ -118,7 +128,7 @@ export function useSignalConfigAutosave(
       const data = await getSignalConfig(token);
       setPresets(data.presets);
       setConfig(data.config);
-      lastSavedRef.current = configSnapshot(data.config);
+      lastSavedRef.current = signalConfigSnapshot(data.config);
       const match = data.presets.find(
         (p) => p.symbol === data.config.underlying_symbol,
       );
@@ -170,15 +180,24 @@ export function useSignalConfigAutosave(
         return next;
       });
       if (!next) return;
-      const snapshot = configSnapshot(next);
+      const snapshot = signalConfigSnapshot(next);
       setSaveStatus("saving");
       setError(null);
       try {
         const token = await getAccessToken();
         if (!token) return;
-        await patchSignalConfig(token, patch);
+        const result = await patchSignalConfig(token, patch);
         if (epoch !== immediateEpochRef.current) return;
-        lastSavedRef.current = snapshot;
+        if (result?.config) {
+          setConfig(result.config);
+          lastSavedRef.current = signalConfigSnapshot(result.config);
+          const match = presets.find(
+            (p) => p.symbol === result.config.underlying_symbol,
+          );
+          setPresetKey(match ? match.symbol : CUSTOM_PRESET);
+        } else {
+          lastSavedRef.current = snapshot;
+        }
         setSaveStatus("saved");
       } catch (err) {
         setSaveStatus("error");
@@ -186,7 +205,34 @@ export function useSignalConfigAutosave(
         throw err;
       }
     },
-    [getAccessToken],
+    [getAccessToken, presets],
+  );
+
+  /**
+   * Pull resolved CE/PE from the live SSE snapshot into the setup bar.
+   * Caller must gate on matching underlying (stale NIFTY frames must not
+   * refill a SENSEX setup). Auto-ATM persists on the server but the form
+   * never reloads without this.
+   */
+  const syncResolvedOptions = useCallback(
+    (resolved: { ce_symbol?: string | null; pe_symbol?: string | null }) => {
+      if (saveStatus === "pending" || saveStatus === "saving") return;
+      const ce = (resolved.ce_symbol || "").trim();
+      const pe = (resolved.pe_symbol || "").trim();
+      if (!ce && !pe) return;
+
+      let merged: SignalEngineAdminConfig | null = null;
+      setConfig((prev) => {
+        if (!prev) return prev;
+        merged = mergeResolvedOptionSymbols(prev, resolved, lastSavedRef.current);
+        return merged ?? prev;
+      });
+      // Keep lastSaved outside the updater (React may invoke updaters twice).
+      if (merged) {
+        lastSavedRef.current = signalConfigSnapshot(merged);
+      }
+    },
+    [saveStatus],
   );
 
   const onPresetChange = useCallback(
@@ -280,5 +326,6 @@ export function useSignalConfigAutosave(
     patchConfigImmediate,
     onPresetChange,
     applyInstrumentSelection,
+    syncResolvedOptions,
   };
 }

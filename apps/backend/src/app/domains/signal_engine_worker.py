@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 import uuid
+from typing import Any
 
 from sqlalchemy import select
 
@@ -143,6 +144,15 @@ async def refresh_tier_b_for_tenant(tenant_id: uuid.UUID, *, auth_org_id: str) -
         )
 
 
+def should_preserve_computed_at_ms(payload: dict[str, Any]) -> bool:
+    """True for keep-last-good timeout frames — do not fake a fresh stamp."""
+    return (
+        bool(payload.get("engine_computing"))
+        and payload.get("feed_source") not in (None, "starting", "stopped")
+        and payload.get("computed_at_ms") is not None
+    )
+
+
 async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> bool:
     """Compute one signal snapshot for a tenant. Returns True when stored."""
     tenant_key = str(tenant_id)
@@ -182,7 +192,12 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
                 # Persist auto-ATM CE/PE into tool settings when derived.
                 if payload.get("feed_source") == "live":
                     await service.maybe_persist_auto_atm_symbols(payload)
-        payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
+        # Fresh successful ticks get a new computed_at_ms. Keep-last-good timeout
+        # frames must retain the original stamp so the desk shows Stale / age and
+        # SSE dedupe collapses identical frozen boards (no fake "0s Running").
+        keep_last_good = should_preserve_computed_at_ms(payload)
+        if not keep_last_good:
+            payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
         # Timeout may return last_good with a warning — still publish so the desk
         # shows "retrying" instead of a silently aging frame. Never force a
         # ``starting`` frame over a live board (set_snapshot refuses that).

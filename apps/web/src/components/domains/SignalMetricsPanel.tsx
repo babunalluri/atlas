@@ -632,10 +632,15 @@ function EditableOverrideValue({
         "w-full truncate text-right text-sm tnum tabular-nums hover:underline",
         override != null && "font-semibold text-info",
       )}
-      title={row.hint || "Click to override"}
+      title={
+        override != null
+          ? `Manual override ${formatValue(override)} (click to edit)`
+          : row.hint || "Click to override"
+      }
       onClick={() => setEditing(true)}
     >
-      {formatValue(row.value)}
+      {/* Show the saved override immediately; SSE live value lags a tick. */}
+      {formatValue(override != null ? override : row.value)}
     </button>
   );
 }
@@ -859,10 +864,30 @@ export function SignalMetricsPanel({
     patchConfigImmediate,
     onPresetChange,
     applyInstrumentSelection,
+    syncResolvedOptions,
   } = useSignalConfigAutosave(getAccessToken, isLoaded && isSignedIn);
 
   const configRef = useRef(config);
   configRef.current = config;
+
+  useEffect(() => {
+    if (!state) return;
+    // Same guard as metricsAtmAligned: ignore stale SSE while underlying switches.
+    if (
+      !config?.underlying_symbol ||
+      state.underlying?.symbol !== config.underlying_symbol
+    ) {
+      return;
+    }
+    syncResolvedOptions({
+      ce_symbol: state.ce_symbol,
+      pe_symbol: state.pe_symbol,
+    });
+  }, [
+    state,
+    config?.underlying_symbol,
+    syncResolvedOptions,
+  ]);
 
   const engineEnabled =
     config?.engine_enabled ?? state?.engine_enabled ?? false;

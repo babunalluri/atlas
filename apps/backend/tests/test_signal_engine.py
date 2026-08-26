@@ -1144,13 +1144,105 @@ async def test_compute_state_payload_keeps_last_good_on_timeout(monkeypatch) -> 
         "evaluable": 20,
         "metrics": [{"id": "atm", "value": 24300}],
         "live_warnings": [],
+        "computed_at_ms": 1_700_000_000_000,
     }
     cfg = SignalEngineConfig(engine_enabled=True, underlying_symbol="NSE:NIFTY 50")
     out = await _compute_state_payload(service, config=cfg, last_good=last_good)
     assert out["feed_source"] == "live"
     assert out["passed"] == 12
     assert out["engine_computing"] is True
+    assert out["computed_at_ms"] == 1_700_000_000_000
     assert any("timed out under load" in str(w) for w in (out.get("live_warnings") or []))
+
+
+def test_should_preserve_computed_at_ms_for_keep_last_good() -> None:
+    from app.domains.signal_engine_worker import should_preserve_computed_at_ms
+
+    assert should_preserve_computed_at_ms(
+        {
+            "engine_computing": True,
+            "feed_source": "live",
+            "computed_at_ms": 1_700_000_000_000,
+        }
+    )
+    assert not should_preserve_computed_at_ms(
+        {
+            "engine_computing": False,
+            "feed_source": "live",
+            "computed_at_ms": 1_700_000_000_000,
+        }
+    )
+    assert not should_preserve_computed_at_ms(
+        {
+            "engine_computing": True,
+            "feed_source": "starting",
+            "computed_at_ms": 1_700_000_000_000,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_merge_nse_slow_tier_updates_full_payload(monkeypatch) -> None:
+    """Live NSE path must merge calendar/DII fields, not only FII + A/D."""
+    from app.domains.signal_engine import SignalEngineConfig, _merge_nse_slow_tier
+
+    payload = {
+        "fii_net": 100.0,
+        "dii_net": -50.0,
+        "advance_decline_ratio": 1.2,
+        "market_holiday_any": 0.0,
+        "macro_events_next_7d": 2.0,
+        "macro_event_risk_score": 1.0,
+        "nse_corp_events_today": 1.0,
+        "fed_meeting_proximity_days": 3.0,
+        "fed_meeting_today": 0.0,
+        "nse_holiday_today": 0.0,
+        "us_holiday_today": 0.0,
+        "uk_holiday_today": 0.0,
+    }
+    cached_hits: list[dict] = []
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        if metric == "nse_slow":
+            return None
+        return None
+
+    async def fake_cache_set(_tenant: str, metric: str, _tier: str, value):
+        if metric == "nse_slow":
+            cached_hits.append(dict(value))
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr(
+        "app.domains.signal_engine.fetch_nse_slow_fields",
+        lambda: payload,
+    )
+
+    feed: dict = {}
+    await _merge_nse_slow_tier(
+        "tenant",
+        feed,
+        SignalEngineConfig(engine_enabled=True),
+        mock=False,
+    )
+    for key, val in payload.items():
+        assert feed.get(key) == val
+    assert cached_hits and cached_hits[0]["dii_net"] == -50.0
+
+    # Cached branch also merges fully.
+    async def fake_cache_hit(_tenant: str, metric: str):
+        return payload if metric == "nse_slow" else None
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_hit)
+    feed2: dict = {}
+    await _merge_nse_slow_tier(
+        "tenant",
+        feed2,
+        SignalEngineConfig(engine_enabled=True),
+        mock=False,
+    )
+    assert feed2.get("macro_events_next_7d") == 2.0
+    assert feed2.get("nse_corp_events_today") == 1.0
 
 
 @pytest.mark.asyncio
