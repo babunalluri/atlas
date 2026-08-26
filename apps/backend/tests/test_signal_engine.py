@@ -101,6 +101,44 @@ def test_signal_settings_patch_skips_nested_desk_keys() -> None:
     assert "param_chart" not in patch
 
 
+def test_config_fields_changed_ignores_echoed_same_values() -> None:
+    """Autosave often re-sends underlying — must not look like a switch."""
+    from app.domains.signal_engine import _config_fields_changed
+
+    current = {
+        "underlying_symbol": "NSE:NIFTY 50",
+        "nifty_fut_symbol": "NFO:NIFTY26AUGFUT",
+        "strike_step": 50,
+        "pcr": 1.1,
+    }
+    assert (
+        _config_fields_changed(
+            current,
+            {
+                "underlying_symbol": "NSE:NIFTY 50",
+                "nifty_fut_symbol": "NFO:NIFTY26AUGFUT",
+                "pcr": 1.25,
+            },
+            "underlying_symbol",
+            "fut_symbol",
+            "nifty_fut_symbol",
+            "strike_step",
+        )
+        is False
+    )
+    assert (
+        _config_fields_changed(
+            current,
+            {"underlying_symbol": "BSE:SENSEX"},
+            "underlying_symbol",
+            "fut_symbol",
+            "nifty_fut_symbol",
+        )
+        is True
+    )
+    assert _config_fields_changed(current, {"strike_step": 100}, "strike_step") is True
+
+
 def test_mock_feed_evaluate_not_ready() -> None:
     config = SignalEngineConfig(mock=True)
     feed = _mock_feed(config)

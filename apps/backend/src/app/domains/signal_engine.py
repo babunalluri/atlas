@@ -795,6 +795,24 @@ def _signal_settings_patch(
     return patch
 
 
+def _config_fields_changed(
+    current: dict[str, Any], patch: dict[str, Any], *keys: str
+) -> bool:
+    """True when any listed key is present in ``patch`` with a value ≠ current."""
+    for key in keys:
+        if key not in patch:
+            continue
+        new = patch[key]
+        old = current.get(key)
+        if new is None or new == "":
+            if old not in (None, ""):
+                return True
+            continue
+        if str(old if old is not None else "") != str(new):
+            return True
+    return False
+
+
 def _strike_plausible_for_fut(fut_symbol: str, strike: int) -> bool:
     """Reject cross-index ATM (e.g. SENSEX ~77k on a NIFTY FUT).
 
@@ -2008,11 +2026,15 @@ class SignalEngineService:
                 merged[key] = val
         # Switching underlying/FUT without new CE/PE must not keep foreign options
         # (e.g. NFO:NIFTY…CE while FUT is BFO:SENSEX…).
-        under_changed = bool(
-            patch.get("underlying_symbol")
-            or patch.get("fut_symbol")
-            or patch.get("nifty_fut_symbol")
+        under_changed = _config_fields_changed(
+            current,
+            patch,
+            "underlying_symbol",
+            "fut_symbol",
+            "nifty_fut_symbol",
         )
+        strike_changed = _config_fields_changed(current, patch, "strike_step")
+        structural = under_changed or strike_changed
         if under_changed and "ce_symbol" not in patch and "pe_symbol" not in patch:
             merged.pop("ce_symbol", None)
             merged.pop("pe_symbol", None)
@@ -2040,29 +2062,36 @@ class SignalEngineService:
         await self.session.flush()
         await self.session.refresh(tool)
         tenant_id = _tenant_key(self.context)
+        prev_enabled = bool(SignalEngineConfig.from_settings(current).engine_enabled)
+        enabled = bool(SignalEngineConfig.from_settings(merged).engine_enabled)
+        engine_toggled = "engine_enabled" in patch and prev_enabled != enabled
         if patch.get("engine_enabled") is False:
             await cache.clear_watcher(tenant_id)
-        # Always scoped — Yahoo/NSE/VIX are not tenant-config-dependent. A full
-        # wipe on Stop reopened the multi-minute slow-tier rebuild on Start.
-        await _invalidate_tenant_signal_cache(tenant_id)
-        epoch = await cache.bump_config_epoch(tenant_id)
+        # Only structural / Start-Stop flushes + epoch bumps. PCR / CE/PE / VIX
+        # autosaves must not discard an in-flight tick (stale_config_drop loop).
+        if structural or engine_toggled:
+            await _invalidate_tenant_signal_cache(tenant_id)
+            epoch = await cache.bump_config_epoch(tenant_id)
+        else:
+            epoch = await cache.get_config_epoch(tenant_id)
+            # Drop setup memo so the next tick loads the new overrides.
+            await cache.delete_metric(tenant_id, "setup")
         # Re-seed boolean after invalidate so SSE fast path does not cold-load
         # after Start/Stop.
-        enabled = bool(SignalEngineConfig.from_settings(merged).engine_enabled)
         await seed_engine_enabled_metric(tenant_id, enabled)
-        if patch.get("engine_enabled") is False:
+        if patch.get("engine_enabled") is False and engine_toggled:
             stopped = _apply_engine_stopped_overlay(
                 await self.state()
             )
             stopped = {**stopped, "config_epoch": epoch}
             await cache.set_snapshot(tenant_id, stopped, force=True)
-        elif patch.get("engine_enabled") is True or under_changed:
+        elif (patch.get("engine_enabled") is True and engine_toggled) or structural:
             # Start desk watching immediately. Snapshot warm is scheduled from the
             # API via BackgroundTasks after the request transaction commits — a
             # create_task here can race and cache a stopped snapshot.
             await cache.touch_watcher(tenant_id)
-            # Paint immediately after Start or underlying/FUT change so SSE does
-            # not sit on an empty Redis key while the cold tick runs.
+            # Paint immediately after Start or underlying/FUT/strike change so SSE
+            # does not sit on an empty Redis key while the cold tick runs.
             starting = _engine_starting_payload(SignalEngineConfig.from_settings(merged))
             starting = {**starting, "config_epoch": epoch}
             await cache.set_snapshot(
