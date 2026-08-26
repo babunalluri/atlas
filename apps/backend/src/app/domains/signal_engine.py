@@ -2426,7 +2426,8 @@ class SignalEngineService:
         """Refresh crude / VIX / aux quote caches off the Tier A critical path.
 
         Safe to call from a background task; uses medium-tier TTLs so repeats
-        within ~60s are no-ops via cache hits.
+        within ~60s are no-ops via cache hits. Independent broker fetches run
+        concurrently so sandbox slot waits do not stack serially.
         """
         if config.mock:
             return
@@ -2436,53 +2437,62 @@ class SignalEngineService:
         if config.dow_change_pct is not None:
             await _cache_set(tenant_id, "dow_jones", "slow", config.dow_change_pct)
 
-        crude_cached = await _cache_get(tenant_id, "crude_oil")
-        if crude_cached is None and config.crude_symbol:
+        async def _refresh_crude() -> None:
+            crude_cached = await _cache_get(tenant_id, "crude_oil")
+            if crude_cached is not None or not config.crude_symbol:
+                return
             crude_q = await self._fetch_quote([config.crude_symbol])
             crude_row = _find_quote_row(crude_q, config.crude_symbol)
-            if crude_row:
-                ltp = _pick_float(crude_row, "last_price", "ltp", "last")
-                prev = _pick_float(crude_row, "close", "previous_close")
-                ohlc = (
-                    crude_row.get("ohlc")
-                    if isinstance(crude_row.get("ohlc"), dict)
-                    else {}
-                )
-                if prev is None and isinstance(ohlc, dict):
-                    prev = _pick_float(ohlc, "close")
-                await _cache_set(
-                    tenant_id,
-                    "crude_oil",
-                    "medium",
-                    {"crude_ltp": ltp, "crude_prev_close": prev},
-                )
+            if not crude_row:
+                return
+            ltp = _pick_float(crude_row, "last_price", "ltp", "last")
+            prev = _pick_float(crude_row, "close", "previous_close")
+            ohlc = (
+                crude_row.get("ohlc")
+                if isinstance(crude_row.get("ohlc"), dict)
+                else {}
+            )
+            if prev is None and isinstance(ohlc, dict):
+                prev = _pick_float(ohlc, "close")
+            await _cache_set(
+                tenant_id,
+                "crude_oil",
+                "medium",
+                {"crude_ltp": ltp, "crude_prev_close": prev},
+            )
 
-        if config.india_vix is None and config.india_vix_symbol:
+        async def _refresh_vix() -> None:
+            if config.india_vix is not None or not config.india_vix_symbol:
+                return
             vix_cached = await _cache_get(tenant_id, "india_vix")
-            if vix_cached is None:
-                vix_symbols = list(
-                    dict.fromkeys(
-                        [
-                            config.india_vix_symbol,
-                            resolve_kite_instrument(config.india_vix_symbol),
-                            "NSE:INDIA VIX",
-                            "NSE:INDIAVIX",
-                        ]
-                    )
+            if vix_cached is not None:
+                return
+            vix_symbols = list(
+                dict.fromkeys(
+                    [
+                        config.india_vix_symbol,
+                        resolve_kite_instrument(config.india_vix_symbol),
+                        "NSE:INDIA VIX",
+                        "NSE:INDIAVIX",
+                    ]
                 )
-                vix_q = await self._fetch_quote(vix_symbols, prefer="get_ltp")
-                vix_row = None
-                for sym in vix_symbols:
-                    vix_row = _find_quote_row(vix_q, sym)
-                    if vix_row:
-                        break
+            )
+            vix_q = await self._fetch_quote(vix_symbols, prefer="get_ltp")
+            vix_row = None
+            for sym in vix_symbols:
+                vix_row = _find_quote_row(vix_q, sym)
                 if vix_row:
-                    vix_ltp = _pick_float(vix_row, "last_price", "ltp", "last")
-                    if vix_ltp is not None:
-                        await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
+                    break
+            if not vix_row:
+                return
+            vix_ltp = _pick_float(vix_row, "last_price", "ltp", "last")
+            if vix_ltp is not None:
+                await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
 
-        aux_cached = await _cache_get(tenant_id, "aux_quotes")
-        if not isinstance(aux_cached, dict):
+        async def _refresh_aux() -> None:
+            aux_cached = await _cache_get(tenant_id, "aux_quotes")
+            if isinstance(aux_cached, dict):
+                return
             aux_symbols = list(
                 dict.fromkeys(
                     [
@@ -2526,6 +2536,8 @@ class SignalEngineService:
                     )
             if aux_payload:
                 await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
+
+        await asyncio.gather(_refresh_crude(), _refresh_vix(), _refresh_aux())
 
     async def _build_feed(self, config: SignalEngineConfig) -> dict[str, Any]:
         tenant_id = _tenant_key(self.context)

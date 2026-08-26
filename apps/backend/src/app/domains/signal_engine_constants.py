@@ -9,7 +9,9 @@ Tier = Literal["slow", "medium", "fast", "broker"]
 # UI stream cadence (~8 Hz). Broker fetches are throttled separately.
 STREAM_INTERVAL_MS = 125
 # Book-first Tier A ticks (ticker hub alive) — ~5 Hz worker floor.
-# SSE still uses STREAM_INTERVAL_MS; cold REST/IV remains slower.
+# SSE may poll faster at STREAM_INTERVAL_MS; duplicate frames are suppressed
+# via stream_revision() so 8 Hz does not force identical React updates.
+# Cold REST/IV remains slower.
 SIGNAL_ACTIVE_TICK_MS = 200
 BROKER_QUOTE_TTL_MS = 500
 # When the live ticker book is empty/dead, REST gap-fill is capped to this

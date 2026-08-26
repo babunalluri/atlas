@@ -23,6 +23,7 @@ from app.domains.signal_engine import (
     stream_frame_from_cache,
 )
 from app.domains.signal_engine_worker import refresh_tenant_snapshot
+from app.domains.sse_frames import SSE_KEEPALIVE, stream_revision
 from app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/admin/signals", tags=["admin-signals"])
@@ -126,6 +127,7 @@ async def stream_signal_state(
 
     async def event_stream() -> AsyncIterator[bytes]:
         tenant_key = str(context.tenant_id)
+        last_rev: tuple[Any, ...] | None = None
         try:
             while True:
                 if await request.is_disconnected():
@@ -146,8 +148,15 @@ async def stream_signal_state(
                             payload = await state_for_stream(service, config=config)
                 if not payload.get("engine_enabled", False):
                     await cache.clear_watcher(tenant_key)
-                frame = json.dumps(payload, separators=(",", ":"))
-                yield f"data: {frame}\n\n".encode()
+                rev = stream_revision(payload)
+                if rev == last_rev:
+                    # Worker has not published a new snapshot — keepalive only
+                    # so React does not re-render identical boards at 8 Hz.
+                    yield SSE_KEEPALIVE
+                else:
+                    last_rev = rev
+                    frame = json.dumps(payload, separators=(",", ":"))
+                    yield f"data: {frame}\n\n".encode()
                 await asyncio.sleep(STREAM_INTERVAL_MS / 1000)
         except asyncio.CancelledError:
             raise

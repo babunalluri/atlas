@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1150,3 +1151,64 @@ async def test_compute_state_payload_keeps_last_good_on_timeout(monkeypatch) -> 
     assert out["passed"] == 12
     assert out["engine_computing"] is True
     assert any("timed out under load" in str(w) for w in (out.get("live_warnings") or []))
+
+
+@pytest.mark.asyncio
+async def test_refresh_tier_b_fetches_run_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Crude / VIX / aux must not stack sandbox waits serially."""
+    import time
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineConfig, SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    in_flight = 0
+    max_in_flight = 0
+
+    async def fake_cache_get(_tenant: str, _metric: str):
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def fake_fetch(symbols, prefer="get_quote", timeout_s=None):  # noqa: ARG001
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.05)
+        in_flight -= 1
+        # Minimal rows so each branch caches something.
+        out = {}
+        for sym in symbols:
+            out[sym] = {"last_price": 100.0, "close": 99.0, "ohlc": {"open": 98.0}}
+        return out
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        auth_org_id="org",
+        user_id="u1",
+        role=Role.tenant_admin,
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = fake_fetch  # type: ignore[method-assign]
+
+    cfg = SignalEngineConfig(
+        mock=False,
+        crude_symbol="MCX:CRUDEOILM",
+        india_vix_symbol="NSE:INDIA VIX",
+    )
+    t0 = time.monotonic()
+    await service.refresh_tier_b_context(cfg)
+    elapsed = time.monotonic() - t0
+    assert max_in_flight >= 2
+    assert elapsed < 0.12
+

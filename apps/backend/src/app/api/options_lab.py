@@ -25,6 +25,7 @@ from app.domains.options_lab import (
     chain_state_for_stream,
 )
 from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
+from app.domains.sse_frames import SSE_KEEPALIVE, stream_revision
 from app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/admin/options-lab", tags=["admin-options-lab"])
@@ -165,6 +166,7 @@ async def stream_options_chain(
 
     async def event_stream() -> AsyncIterator[bytes]:
         tenant_key = str(context.tenant_id)
+        last_rev: tuple[Any, ...] | None = None
         try:
             while True:
                 if await request.is_disconnected():
@@ -185,8 +187,13 @@ async def stream_options_chain(
                         tenant_key,
                         wings=int(payload.get("wings", wings)),
                     )
-                frame = json.dumps(payload, separators=(",", ":"))
-                yield f"data: {frame}\n\n".encode()
+                rev = stream_revision(payload)
+                if rev == last_rev:
+                    yield SSE_KEEPALIVE
+                else:
+                    last_rev = rev
+                    frame = json.dumps(payload, separators=(",", ":"))
+                    yield f"data: {frame}\n\n".encode()
                 await asyncio.sleep(STREAM_INTERVAL_MS / 1000)
         except asyncio.CancelledError:
             raise
