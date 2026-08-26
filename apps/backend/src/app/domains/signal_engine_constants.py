@@ -51,3 +51,7 @@ STATE_COMPUTE_TIMEOUT_MS = 45_000
 SIGNAL_TICK_DEADLINE_SECONDS = (STATE_COMPUTE_TIMEOUT_MS / 1000.0) + 15.0
 # Provisional frame TTL while the first live tick is still warming.
 ENGINE_STARTING_SNAPSHOT_MS = 90_000
+# BUY must see at least this fraction of gates_entry rows with data (or fail-closed
+# votes). Prevents a budget-truncated tick from manufacturing entry_ready on a
+# tiny all-pass subset (e.g. 22/22 while 30 Yahoo/Tier-B gates abstained).
+ENTRY_GATE_COVERAGE_RATIO = 0.85

@@ -606,3 +606,75 @@ async def test_symbol_token_store_survives_for_expired_options(
     )
     monkeypatch.setattr(tstore, "_s3_client_and_bucket", lambda: None)
     assert await tstore.get_instrument_token(sym) == 12345678
+
+
+@pytest.mark.asyncio
+async def test_metrics_persist_due_is_peek_not_acquire(monkeypatch) -> None:
+    """Worker must peek before opening work; SET NX stays inside persist."""
+    calls: list[tuple] = []
+
+    class _Redis:
+        async def get(self, key):
+            calls.append(("get", key))
+            return b"1"  # gate already held
+
+        async def set(self, *args, **kwargs):
+            calls.append(("set", args, kwargs))
+            return True
+
+    async def fake_get_redis():
+        return _Redis()
+
+    monkeypatch.setattr(pc_cache, "get_redis", fake_get_redis)
+    assert await pc_cache.metrics_persist_due("t1", day="2026-08-26") is False
+    assert await pc_cache.eod_finalize_due("t1", day="2026-08-26") is False
+    assert all(c[0] == "get" for c in calls)
+    assert not any(c[0] == "set" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_param_chart_read_config_uses_setup_memo(monkeypatch) -> None:
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.db.models import Role
+    from app.domains import signal_engine_cache as signal_cache
+    from app.domains.param_chart import ParamChartService
+    from app.domains.param_chart_constants import PARAM_CHART_SETTINGS_KEY
+    from app.tenancy.context import TenantContext
+
+    signal_cache.reset_signal_cache_for_tests()
+    tenant = uuid.uuid4()
+    await signal_cache.set_metric(
+        str(tenant),
+        "setup",
+        "medium",
+        {
+            "settings": {
+                PARAM_CHART_SETTINGS_KEY: {
+                    "year": 2026,
+                    "month": 8,
+                    "interval": "1D",
+                    "underlying_symbol": "NSE:NIFTY 50",
+                }
+            },
+            "has_broker": True,
+            "team_ready": True,
+        },
+    )
+    session = MagicMock()
+    session.info = {"tenant_id": tenant}
+    ctx = TenantContext(
+        tenant_id=tenant,
+        user_id="u",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+    )
+    svc = ParamChartService(session, ctx)
+    svc.engine._signal_engine_tool = AsyncMock(side_effect=AssertionError("no DB"))
+    svc.engine._load_setup = AsyncMock(side_effect=AssertionError("setup warm"))
+    cfg = await svc._read_config()
+    assert cfg.year == 2026
+    assert cfg.month == 8
+    assert cfg.underlying_symbol == "NSE:NIFTY 50"
+    signal_cache.reset_signal_cache_for_tests()

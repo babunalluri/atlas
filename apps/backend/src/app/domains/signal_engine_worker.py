@@ -39,73 +39,97 @@ logger = get_logger(__name__)
 
 
 async def sync_kite_for_signal_tenant(
-    tenant_id: uuid.UUID, *, auth_org_id: str
+    tenant_id: uuid.UUID,
+    *,
+    auth_org_id: str,
+    session: Any | None = None,
+    context: TenantContext | None = None,
+    engine: SignalEngineService | None = None,
+    config: Any | None = None,
 ) -> bool:
-    """Subscribe the shared Kite hub to this tenant's Signal Engine symbols."""
+    """Subscribe the shared Kite hub to this tenant's Signal Engine symbols.
+
+    When ``session`` / ``engine`` / ``config`` are provided (shared tick path),
+    reuses that checkout instead of opening a second SessionFactory.
+    """
     if not get_settings().kite_ticker_enabled:
         return False
-    context = TenantContext(
-        tenant_id=tenant_id,
-        user_id="kite-ticker-sync",
-        role=Role.tenant_admin,
-        auth_org_id=auth_org_id,
-        principal_type="scheduler",
-    )
+
+    async def _run(
+        sess: Any,
+        ctx: TenantContext,
+        svc: SignalEngineService,
+        cfg: Any,
+    ) -> bool:
+        symbols = [
+            s
+            for s in [
+                cfg.underlying_symbol,
+                cfg.nifty_fut_symbol,
+                cfg.ce_symbol,
+                cfg.pe_symbol,
+                cfg.india_vix_symbol,
+            ]
+            if s
+        ]
+        if not symbols:
+            return False
+        creds = await resolve_kite_credentials(sess, ctx)
+        if creds is None:
+            return False
+        quotes = (
+            await assemble_quotes_from_book(
+                str(tenant_id),
+                symbols,
+                require_all=False,
+                require_alive=False,
+            )
+            or {}
+        )
+        token_map = token_map_from_quotes(quotes)
+        have_syms = set(token_map.values())
+        missing = [sym for sym in symbols if sym not in have_syms]
+        if missing:
+            quotes.update(
+                await svc._fetch_quote(missing, prefer="get_ltp", timeout_s=8.0)
+            )
+            token_map = token_map_from_quotes(quotes)
+        if not token_map:
+            return False
+        api_key, access_token = creds
+        await get_kite_ticker_hub().sync_tenant(
+            str(tenant_id),
+            api_key=api_key,
+            access_token=access_token,
+            token_to_symbol=token_map,
+            source=SOURCE_SIGNAL,
+        )
+        return True
+
     try:
-        async with SessionFactory() as session:
-            async with session.begin():
-                await apply_tenant_guc(session, tenant_id)
-                engine = SignalEngineService(session, context)
-                config = await engine._load_config()
-                symbols = [
-                    s
-                    for s in [
-                        config.underlying_symbol,
-                        config.nifty_fut_symbol,
-                        config.ce_symbol,
-                        config.pe_symbol,
-                        config.india_vix_symbol,
-                    ]
-                    if s
-                ]
-                if not symbols:
-                    return False
-                creds = await resolve_kite_credentials(session, context)
-                if creds is None:
-                    return False
-                # Prefer live/REST book for instrument tokens; sandbox only for gaps.
-                quotes = (
-                    await assemble_quotes_from_book(
-                        str(tenant_id),
-                        symbols,
-                        require_all=False,
-                        require_alive=False,
-                    )
-                    or {}
-                )
-                token_map = token_map_from_quotes(quotes)
-                have_syms = set(token_map.values())
-                missing = [sym for sym in symbols if sym not in have_syms]
-                if missing:
-                    # LTP is enough for instrument_token; get_quote storms the
-                    # sandbox before state() even starts on cold CE/PE.
-                    quotes.update(
-                        await engine._fetch_quote(
-                            missing, prefer="get_ltp", timeout_s=8.0
-                        )
-                    )
-                    token_map = token_map_from_quotes(quotes)
-                if not token_map:
-                    return False
-                api_key, access_token = creds
-                await get_kite_ticker_hub().sync_tenant(
-                    str(tenant_id),
-                    api_key=api_key,
-                    access_token=access_token,
-                    token_to_symbol=token_map,
-                    source=SOURCE_SIGNAL,
-                )
-                return True
+        if session is not None and engine is not None and config is not None:
+            ctx = context or TenantContext(
+                tenant_id=tenant_id,
+                user_id="kite-ticker-sync",
+                role=Role.tenant_admin,
+                auth_org_id=auth_org_id,
+                principal_type="scheduler",
+            )
+            return await _run(session, ctx, engine, config)
+
+        context = TenantContext(
+            tenant_id=tenant_id,
+            user_id="kite-ticker-sync",
+            role=Role.tenant_admin,
+            auth_org_id=auth_org_id,
+            principal_type="scheduler",
+        )
+        async with SessionFactory() as own_session:
+            async with own_session.begin():
+                await apply_tenant_guc(own_session, tenant_id)
+                own_engine = SignalEngineService(own_session, context)
+                own_config = await own_engine._load_config()
+                return await _run(own_session, context, own_engine, own_config)
     except Exception as exc:
         logger.warning(
             "kite_ticker_signal_sync_failed",
@@ -161,10 +185,23 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
 
     heartbeat = cache.start_compute_lock_heartbeat(tenant_key)
     try:
-        # Prefer live WS quotes before the expensive state() fan-out.
-        # Do NOT refresh Tier B concurrently — it races state() for the same
-        # sandbox slot pool and is the main cause of 45s tick timeouts on pilot.
-        await sync_kite_for_signal_tenant(tenant_id, auth_org_id=auth_org_id)
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app.domains import param_chart_cache as pc_cache
+        from app.domains.param_chart import ParamChartService
+
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        day_s = now_ist.date().isoformat()
+        after_close = (now_ist.hour, now_ist.minute) >= (15, 30)
+        # Peek only — SET NX stays inside persist so a double-acquire cannot
+        # skip the real write. Avoids opening Param Chart work on ~99.9% of ticks.
+        if after_close:
+            metrics_due = await pc_cache.eod_finalize_due(tenant_key, day=day_s)
+        else:
+            metrics_due = await pc_cache.metrics_persist_due(tenant_key, day=day_s)
+
         context = TenantContext(
             tenant_id=tenant_id,
             user_id="signal-ticker",
@@ -172,12 +209,22 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
             auth_org_id=auth_org_id,
             principal_type="scheduler",
         )
+        # One SessionFactory + one GUC for kite sync, state(), auto-ATM, and
+        # (rarely) Param Chart metrics persist.
         async with SessionFactory() as session:
             async with session.begin():
                 await apply_tenant_guc(session, tenant_id)
                 service = SignalEngineService(session, context)
-                prior = await cache.get_snapshot(tenant_key)
                 config = await service._load_config()
+                await sync_kite_for_signal_tenant(
+                    tenant_id,
+                    auth_org_id=auth_org_id,
+                    session=session,
+                    context=context,
+                    engine=service,
+                    config=config,
+                )
+                prior = await cache.get_snapshot(tenant_key)
                 last_good = (
                     prior
                     if isinstance(prior, dict)
@@ -185,49 +232,38 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
                     not in (None, "starting", "stopped")
                     else None
                 )
-                # Shared timeout + keep-last-good path (also used by SSE cold start).
                 payload = await _compute_state_payload(
                     service, config=config, last_good=last_good
                 )
-                # Persist auto-ATM CE/PE into tool settings when derived.
                 if payload.get("feed_source") == "live":
                     await service.maybe_persist_auto_atm_symbols(payload)
-        # Fresh successful ticks get a new computed_at_ms. Keep-last-good timeout
-        # frames must retain the original stamp so the desk shows Stale / age and
-        # SSE dedupe collapses identical frozen boards (no fake "0s Running").
+                if metrics_due:
+                    # SAVEPOINT so a Param Chart SQL abort cannot poison the
+                    # outer tick txn (Postgres 25P02 → commit fails → no snapshot).
+                    try:
+                        async with session.begin_nested():
+                            await ParamChartService(
+                                session, context
+                            ).persist_metrics_from_signal_snapshot(
+                                force=False, snapshot=payload
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "param_chart_metrics_from_signal_failed",
+                            tenant_id=tenant_key,
+                            error=str(exc)[:160],
+                        )
         keep_last_good = should_preserve_computed_at_ms(payload)
         if not keep_last_good:
             payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
-        # Timeout may return last_good with a warning — still publish so the desk
-        # shows "retrying" instead of a silently aging frame. Never force a
-        # ``starting`` frame over a live board (set_snapshot refuses that).
         await cache.set_snapshot(tenant_key, payload)
         await seed_engine_enabled_metric(
             tenant_key,
             bool(payload.get("engine_enabled", config.engine_enabled)),
         )
-        # Tier B after the live board publishes — reuses caches on next tick.
         asyncio.create_task(
             refresh_tier_b_for_tenant(tenant_id, auth_org_id=auth_org_id)
         )
-        # EOD / intraday shared-metric history for Param Chart overlays.
-        try:
-            from app.domains.param_chart import ParamChartService
-
-            async with SessionFactory() as session:
-                async with session.begin():
-                    await apply_tenant_guc(session, tenant_id)
-                    await ParamChartService(
-                        session, context
-                    ).persist_metrics_from_signal_snapshot(
-                        force=False, snapshot=payload
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "param_chart_metrics_from_signal_failed",
-                tenant_id=tenant_key,
-                error=str(exc)[:160],
-            )
         return True
     except Exception as exc:
         logger.warning("signal_ticker_refresh_failed", tenant_id=str(tenant_id), error=str(exc))

@@ -504,11 +504,28 @@ class ParamChartService:
         self.engine = SignalEngineService(session, context)
 
     async def _read_config(self) -> ParamChartConfig:
+        """Param Chart nested settings from the shared signal ``setup`` Redis memo.
+
+        Same blob ``SignalEngineService._load_setup`` uses — avoids a tool/
+        settings DB round-trip on every metrics persist tick.
+        """
+        tenant_id = _tenant_key(self.context)
+        hit = await signal_cache.get_metric(tenant_id, "setup")
+        if hit is None:
+            await self.engine._load_setup()
+            hit = await signal_cache.get_metric(tenant_id, "setup")
+        settings = hit.get("settings") if isinstance(hit, dict) else None
+        if isinstance(settings, dict):
+            nested = settings.get(PARAM_CHART_SETTINGS_KEY)
+            if isinstance(nested, dict):
+                return ParamChartConfig.from_dict(nested)
+            return ParamChartConfig()
+        # Setup miss / empty — fall back to a direct tool read.
         tool = await self.engine._signal_engine_tool()
         if tool is None:
             return ParamChartConfig()
-        settings = await self.engine._tool_settings(tool)
-        nested = settings.get(PARAM_CHART_SETTINGS_KEY)
+        raw = await self.engine._tool_settings(tool)
+        nested = raw.get(PARAM_CHART_SETTINGS_KEY)
         if isinstance(nested, dict):
             return ParamChartConfig.from_dict(nested)
         return ParamChartConfig()
@@ -632,6 +649,9 @@ class ParamChartService:
         await self.engine._patch_tool_settings(
             tool, {PARAM_CHART_SETTINGS_KEY: merged}
         )
+        # Nested param_chart lives inside the signal setup memo — drop it so the
+        # next _read_config / _load_setup sees the patch (Fix 4 / memo path).
+        await signal_cache.delete_metric(_tenant_key(self.context), "setup")
         # Only invalidate Redis month pack when candle-affecting fields change.
         # Candle OHLC itself stays on disk (OCI/S3 dump) and is reused — we do
         # NOT re-fetch Kite for past months, and current month at most hourly.

@@ -35,6 +35,7 @@ from app.domains import signal_engine_cache as cache
 from app.domains.signal_engine_constants import (
     BROKER_QUOTE_TTL_MS,
     ENGINE_STARTING_SNAPSHOT_MS,
+    ENTRY_GATE_COVERAGE_RATIO,
     SNAPSHOT_FRESH_MS,
     SNAPSHOT_TTL_MS,
     STATE_COMPUTE_TIMEOUT_MS,
@@ -2619,12 +2620,24 @@ class SignalEngineService:
         # Leave headroom under STATE_COMPUTE_TIMEOUT so we can still evaluate
         # and publish a live frame instead of wiping the desk with ``starting``.
         deadline = time.monotonic() + max(8.0, (STATE_COMPUTE_TIMEOUT_MS / 1000) * 0.65)
+        tiers_truncated = False
 
         def _budget(min_s: float = 3.0) -> bool:
+            # Time check only — do NOT stamp tiers_truncated here. Preferring
+            # cheaper LTP or a Redis cache peek must not fail-closed the tick.
             return (deadline - time.monotonic()) >= min_s
 
         def _remaining() -> float:
             return max(0.0, deadline - time.monotonic())
+
+        def _mark_truncated(*, reason: str) -> None:
+            nonlocal tiers_truncated
+            tiers_truncated = True
+            logger.info(
+                "signal_feed_tier_truncated",
+                tenant_id=tenant_id,
+                reason=reason,
+            )
 
         feed: dict[str, Any] = {"source": "live"}
 
@@ -2797,11 +2810,7 @@ class SignalEngineService:
         if _budget(10.0):
             await _merge_secondary_ce_pe_quotes(self, config, feed, fast_quotes)
         else:
-            logger.info(
-                "signal_feed_skip_secondary_ce_pe",
-                tenant_id=tenant_id,
-                reason="compute_budget",
-            )
+            _mark_truncated(reason="secondary_ce_pe")
 
         ce_vol = _pick_float(ce_row or {}, "volume") if ce_row else None
         pe_vol = _pick_float(pe_row or {}, "volume") if pe_row else None
@@ -2816,25 +2825,28 @@ class SignalEngineService:
             if iv_from_ce is not None:
                 feed["iv"] = iv_from_ce
         # Ticker packets usually lack IV — REST when needed, medium-cached.
-        if feed.get("iv") is None and (ce_symbol or pe_symbol) and _budget(8.0):
-            iv_cached = await _cache_get(tenant_id, "atm_iv")
-            if iv_cached is not None:
-                feed["iv"] = iv_cached
+        if feed.get("iv") is None and (ce_symbol or pe_symbol):
+            if _budget(8.0):
+                iv_cached = await _cache_get(tenant_id, "atm_iv")
+                if iv_cached is not None:
+                    feed["iv"] = iv_cached
+                else:
+                    iv_syms = [s for s in (ce_symbol, pe_symbol) if s]
+                    iv_quotes = await self._fetch_quote(
+                        iv_syms,
+                        prefer="get_quote",
+                        timeout_s=min(10.0, max(3.0, _remaining() - 2.0)),
+                    )
+                    if ce_symbol:
+                        ce_row = _find_quote_row(iv_quotes, ce_symbol) or ce_row
+                    if pe_symbol:
+                        pe_row = _find_quote_row(iv_quotes, pe_symbol) or pe_row
+                    iv_val = _merge_option_iv(ce_row, pe_row)
+                    if iv_val is not None:
+                        feed["iv"] = iv_val
+                        await _cache_set(tenant_id, "atm_iv", "medium", iv_val)
             else:
-                iv_syms = [s for s in (ce_symbol, pe_symbol) if s]
-                iv_quotes = await self._fetch_quote(
-                    iv_syms,
-                    prefer="get_quote",
-                    timeout_s=min(10.0, max(3.0, _remaining() - 2.0)),
-                )
-                if ce_symbol:
-                    ce_row = _find_quote_row(iv_quotes, ce_symbol) or ce_row
-                if pe_symbol:
-                    pe_row = _find_quote_row(iv_quotes, pe_symbol) or pe_row
-                iv_val = _merge_option_iv(ce_row, pe_row)
-                if iv_val is not None:
-                    feed["iv"] = iv_val
-                    await _cache_set(tenant_id, "atm_iv", "medium", iv_val)
+                _mark_truncated(reason="atm_iv_rest")
 
         # OI — nearest fut if configured (book first; REST only when OI missing)
         fut_row: dict[str, Any] | None = None
@@ -2850,11 +2862,7 @@ class SignalEngineService:
                 fut_row = _find_quote_row(fut_quotes, config.nifty_fut_symbol) or fut_row
                 oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
             elif oi_val is None:
-                logger.info(
-                    "signal_feed_skip_fut_oi",
-                    tenant_id=tenant_id,
-                    reason="compute_budget",
-                )
+                _mark_truncated(reason="fut_oi")
             if oi_val is not None:
                 feed["oi"] = oi_val
                 baseline_key = _oi_baseline_cache_key()
@@ -2896,11 +2904,7 @@ class SignalEngineService:
                 mock=False,
             )
         else:
-            logger.info(
-                "signal_feed_skip_option_chain",
-                tenant_id=tenant_id,
-                reason="compute_budget",
-            )
+            _mark_truncated(reason="option_chain")
             cached_chain = await _cache_get(tenant_id, "option_chain")
             if isinstance(cached_chain, dict):
                 _merge_chain_payload(feed, cached_chain, config)
@@ -2931,38 +2935,41 @@ class SignalEngineService:
                 feed["adx"] = trend_cached["adx"]
             if trend_cached.get("rsi") is not None:
                 feed["rsi"] = trend_cached["rsi"]
-        elif spot_row is not None and _budget(10.0):
-            token_raw = spot_row.get("instrument_token")
-            try:
-                token = int(token_raw) if token_raw is not None else 0
-            except (TypeError, ValueError):
-                token = 0
-            if token > 0:
-                # Kite toolkit takes from_date/to_date (not years/months/days).
-                now = _ist_now()
-                hist_from = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
-                hist_to = now.strftime("%Y-%m-%d %H:%M:%S")
-                hist = await self._invoke_broker_tool(
-                    "get_historical_candles",
-                    {
-                        "instrument_token": token,
-                        "interval": "minute",
-                        "from_date": hist_from,
-                        "to_date": hist_to,
-                    },
-                )
-                highs, lows, closes = _parse_historical_candles(hist)
-                trend_payload: dict[str, Any] = {}
-                adx_val = _compute_adx(highs, lows, closes)
-                if adx_val is not None:
-                    trend_payload["adx"] = adx_val
-                    feed["adx"] = adx_val
-                rsi_val = _compute_rsi(closes)
-                if rsi_val is not None:
-                    trend_payload["rsi"] = rsi_val
-                    feed["rsi"] = rsi_val
-                if trend_payload:
-                    await _cache_set(tenant_id, "trend", "medium", trend_payload)
+        elif spot_row is not None:
+            if _budget(10.0):
+                token_raw = spot_row.get("instrument_token")
+                try:
+                    token = int(token_raw) if token_raw is not None else 0
+                except (TypeError, ValueError):
+                    token = 0
+                if token > 0:
+                    # Kite toolkit takes from_date/to_date (not years/months/days).
+                    now = _ist_now()
+                    hist_from = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+                    hist_to = now.strftime("%Y-%m-%d %H:%M:%S")
+                    hist = await self._invoke_broker_tool(
+                        "get_historical_candles",
+                        {
+                            "instrument_token": token,
+                            "interval": "minute",
+                            "from_date": hist_from,
+                            "to_date": hist_to,
+                        },
+                    )
+                    highs, lows, closes = _parse_historical_candles(hist)
+                    trend_payload: dict[str, Any] = {}
+                    adx_val = _compute_adx(highs, lows, closes)
+                    if adx_val is not None:
+                        trend_payload["adx"] = adx_val
+                        feed["adx"] = adx_val
+                    rsi_val = _compute_rsi(closes)
+                    if rsi_val is not None:
+                        trend_payload["rsi"] = rsi_val
+                        feed["rsi"] = rsi_val
+                    if trend_payload:
+                        await _cache_set(tenant_id, "trend", "medium", trend_payload)
+            else:
+                _mark_truncated(reason="trend_hist")
 
         if _budget(12.0):
             await _merge_levels_tier(
@@ -2973,18 +2980,15 @@ class SignalEngineService:
                 mock=False,
             )
         else:
+            _mark_truncated(reason="levels_hist")
             levels_cached = await _cache_get(tenant_id, "levels")
             if isinstance(levels_cached, dict):
                 feed.update(levels_cached)
             _refresh_level_spot_fields(feed, spot_row)
-            logger.info(
-                "signal_feed_skip_levels_hist",
-                tenant_id=tenant_id,
-                reason="compute_budget",
-            )
 
         # India VIX / aux — already seeded from cache at top; refresh only if still missing
         # and budget remains (background Tier B usually fills these).
+        # Budget miss here must NOT stamp tiers_truncated — Redis peek is not a tier skip.
         if feed.get("india_vix") is None and config.india_vix_symbol and _budget(5.0):
             vix_cached = await _cache_get(tenant_id, "india_vix")
             if vix_cached is not None:
@@ -3008,10 +3012,15 @@ class SignalEngineService:
         if _budget(6.0):
             await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
             await _merge_yahoo_timing_tier(tenant_id, feed, mock=False)
+        else:
+            _mark_truncated(reason="yahoo_tiers")
         if feed.get("ce") is not None and feed.get("pe") is not None:
             feed["straddle"] = round(float(feed["ce"]) + float(feed["pe"]), 2)
         await _apply_straddle_decay(tenant_id, feed)
         _enrich_derived_feed_fields(feed)
+
+        if tiers_truncated:
+            feed["tiers_truncated"] = True
 
         return feed
 
@@ -3068,6 +3077,11 @@ class SignalEngineService:
             team_ready=team_ready,
             quote_error=self._last_quote_error,
         )
+        if feed.get("tiers_truncated"):
+            payload["live_warnings"] = [
+                "Tick truncated under load — missing entry gates fail closed.",
+                *[w for w in (payload.get("live_warnings") or []) if "truncated under load" not in str(w)],
+            ]
         # Explicit flag so the desk badge does not regex-match warning prose.
         payload["live_quote_missing"] = (not config.mock) and feed.get("nifty_ltp") is None
         payload["underlying"] = {
@@ -3113,7 +3127,11 @@ class SignalEngineService:
     ) -> dict[str, Any]:
         snapshot = await self.state()
         entry = snapshot.get("entry")
-        if not entry:
+        # entry is always a dict from _build_entry_preview — gate on readiness,
+        # not truthiness of the object.
+        if not snapshot.get("entry_ready"):
+            return {"ok": False, "error": "Entry conditions not met", "snapshot": snapshot}
+        if not isinstance(entry, dict) or entry.get("status") != "ready":
             return {"ok": False, "error": "Entry conditions not met", "snapshot": snapshot}
 
         label = str(entry.get("label") or "New signal")
@@ -3169,6 +3187,8 @@ def _build_entry_preview(
     entry_ready: bool,
     passed: int,
     evaluable: int,
+    gates_total: int = 0,
+    min_coverage: int = 0,
 ) -> dict[str, Any]:
     atm_raw = feed.get("atm")
     atm = int(atm_raw) if atm_raw is not None else None
@@ -3182,9 +3202,18 @@ def _build_entry_preview(
         if atm is not None
         else f"BUY= —, CE={ce_p:g}, PE={pe_p:g}, EXIT +{exit_p:g}%"
     )
+    truncated = bool(feed.get("tiers_truncated"))
     if entry_ready and atm is not None:
         status = "ready"
         status_note = "All entry rules pass — publish to notify the desk."
+    elif gates_total > 0 and evaluable < min_coverage:
+        status = "waiting"
+        status_note = (
+            f"Incomplete checklist — {evaluable}/{gates_total} gates have data "
+            f"(need ≥{min_coverage}"
+            + ("; tick truncated under load" if truncated else "")
+            + ")."
+        )
     elif evaluable == 0:
         status = "waiting"
         status_note = "Waiting for live broker data and evaluable rules."
@@ -3193,6 +3222,8 @@ def _build_entry_preview(
         failing = evaluable - passed
         noun = "rule" if failing == 1 else "rules"
         status_note = f"No buy — {failing} {noun} failing ({passed}/{evaluable} pass)."
+        if truncated:
+            status_note += " Tick truncated under load — missing gates fail closed."
     else:
         status = "waiting"
         status_note = f"No buy yet — {passed}/{evaluable} rules passing."
@@ -3206,6 +3237,9 @@ def _build_entry_preview(
         "status": status,
         "label": buy_line,
         "status_note": status_note,
+        "gates_total": gates_total,
+        "min_coverage": min_coverage,
+        "tiers_truncated": truncated,
     }
 
 
@@ -3213,6 +3247,10 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
     rows: list[dict[str, Any]] = []
     evaluable = 0
     passed = 0
+    gates_total = 0
+    # Budget-truncated ticks must not abstain missing gates out of the
+    # denominator — that manufactures BUY on a tiny all-pass subset.
+    fail_closed = bool(feed.get("tiers_truncated"))
     for spec in config.metrics:
         metric_id = str(spec["id"])
         rule = spec.get("rule", "info")
@@ -3240,7 +3278,15 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
             pe=float(metric_pe) if metric_pe is not None else None,
             spec=spec,
         )
-        display_passed = ok
+        coerced_fail_closed = False
+        if gates_entry:
+            gates_total += 1
+            if ok is None and fail_closed and rule != "info":
+                # Count against coverage / entry, but keep UI as "no data"
+                # (not a red X for a rule that never evaluated).
+                ok = False
+                coerced_fail_closed = True
+        display_passed = None if coerced_fail_closed else ok
         if ok is not None and gates_entry:
             evaluable += 1
             if ok:
@@ -3267,13 +3313,24 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
             }
         )
 
-    entry_ready = evaluable > 0 and passed == evaluable
+    min_coverage = (
+        max(1, math.ceil(gates_total * ENTRY_GATE_COVERAGE_RATIO)) if gates_total else 0
+    )
+    # Coverage floor: a truncated/sparse tick cannot claim ready on 22/22 while
+    # most gates never voted.
+    entry_ready = (
+        evaluable >= min_coverage
+        and evaluable > 0
+        and passed == evaluable
+    )
     entry = _build_entry_preview(
         config,
         feed,
         entry_ready=entry_ready,
         passed=passed,
         evaluable=evaluable,
+        gates_total=gates_total,
+        min_coverage=min_coverage,
     )
     return {
         "metrics": rows,
@@ -3281,6 +3338,9 @@ def evaluate_signal_state(config: SignalEngineConfig, feed: dict[str, Any]) -> d
         "entry": entry,
         "passed": passed,
         "evaluable": evaluable,
+        "gates_total": gates_total,
+        "min_coverage": min_coverage,
+        "tiers_truncated": bool(feed.get("tiers_truncated")),
         "feed_source": feed.get("source", "unknown"),
         "evaluated_at": time.time(),
         "poll_ms": STREAM_INTERVAL_MS,

@@ -521,7 +521,8 @@ function BuySignalBanner({
         ? `${state.passed}/${state.evaluable} rules passing`
         : "Loading buy signal…"));
   const statusLine = publishMsg ?? note;
-  const canNotify = engineEnabled && !publishing && Boolean(state?.entry);
+  const canNotify =
+    engineEnabled && !publishing && entryReady && entry?.status === "ready";
 
   return (
     <div

@@ -205,6 +205,31 @@ async def watcher_alive(tenant_id: str) -> bool:
     return True
 
 
+async def metrics_persist_due(tenant_id: str, *, day: str) -> bool:
+    """True when a metrics persist should run (gate key absent). Does not acquire."""
+    client = await get_redis()
+    key = _metrics_gate_key(tenant_id, day)
+    if client is not None:
+        try:
+            return await client.get(key) is None
+        except Exception:
+            await invalidate_redis()
+            logger.warning("param_chart_metrics_gate_peek_failed", tenant_id=tenant_id)
+    return True
+
+
+async def eod_finalize_due(tenant_id: str, *, day: str) -> bool:
+    """True when EOD finalize should run (gate key absent). Does not acquire."""
+    client = await get_redis()
+    key = f"atlas:param-chart:{tenant_id}:eod-final:{day}"
+    if client is not None:
+        try:
+            return await client.get(key) is None
+        except Exception:
+            await invalidate_redis()
+    return True
+
+
 async def try_metrics_persist_gate(
     tenant_id: str,
     *,

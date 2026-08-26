@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -108,6 +109,54 @@ def test_mock_feed_evaluate_not_ready() -> None:
     assert result["entry_ready"] is False
     assert result["entry"] is not None
     assert result["entry"]["status"] == "blocked"
+    assert result["gates_total"] == 52
+    assert result["min_coverage"] >= 44  # 85% of 52
+
+
+def test_entry_ready_requires_gate_coverage() -> None:
+    """Sparse all-pass subset must not manufacture BUY (P0 budget-truncation)."""
+    from app.domains.signal_engine_constants import ENTRY_GATE_COVERAGE_RATIO
+
+    # Only before_time has data and passes — old logic would be ready on 1/1.
+    feed = {"source": "live", "ist_hour": 9.0, "atm": 24200}
+    result = evaluate_signal_state(SignalEngineConfig(), feed)
+    assert result["passed"] >= 1
+    assert result["evaluable"] < result["min_coverage"]
+    assert result["entry_ready"] is False
+    assert result["entry"]["status"] == "waiting"
+    assert "Incomplete checklist" in result["entry"]["status_note"]
+    assert result["min_coverage"] == math.ceil(52 * ENTRY_GATE_COVERAGE_RATIO)
+
+
+def test_tiers_truncated_fail_closed_blocks_buy() -> None:
+    """Missing gate data on a truncated tick votes False, not abstain."""
+    feed = {
+        "source": "live",
+        "tiers_truncated": True,
+        "ist_hour": 9.0,
+        "atm": 24200,
+        "nifty_ltp": 24200,
+    }
+    result = evaluate_signal_state(SignalEngineConfig(), feed)
+    assert result["tiers_truncated"] is True
+    # Fail-closed pulls missing gates into the denominator as failures.
+    assert result["evaluable"] == result["gates_total"] == 52
+    assert result["passed"] < result["evaluable"]
+    assert result["entry_ready"] is False
+    assert result["entry"]["status"] == "blocked"
+    assert "fail closed" in result["entry"]["status_note"]
+    # Coerced "no data" rows stay blank in the UI (not a red X).
+    coerced_blank = [
+        r
+        for r in result["metrics"]
+        if r.get("gates_entry") and r["passed"] is None and r.get("rule") != "info"
+    ]
+    assert len(coerced_blank) >= 20
+    # Rules that actually had data still show a real bool.
+    evaluated = [
+        r for r in result["metrics"] if r.get("gates_entry") and isinstance(r["passed"], bool)
+    ]
+    assert evaluated
 
 
 def test_dow_jones_abs_lte_passes() -> None:
@@ -797,6 +846,135 @@ def test_publish_entry_dedup_signature_is_entry_only() -> None:
     )
     assert entry_sig != with_body_sig
     assert json.dumps({"entry": entry}, sort_keys=True) == entry_sig
+
+
+@pytest.mark.asyncio
+async def test_publish_entry_rejects_when_not_ready(monkeypatch) -> None:
+    """entry is always a dict — must gate on entry_ready / status, not truthiness."""
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    service = SignalEngineService(session, context)
+
+    async def fake_state():
+        return {
+            "entry_ready": False,
+            "entry": {
+                "side": "BUY",
+                "atm": 24200,
+                "status": "blocked",
+                "label": "BUY= 24200, CE=100, PE=100, EXIT +5%",
+                "status_note": "No buy — 2 rules failing (20/22 pass).",
+            },
+            "passed": 20,
+            "evaluable": 22,
+        }
+
+    monkeypatch.setattr(service, "state", fake_state)
+    out = await service.publish_entry()
+    assert out["ok"] is False
+    assert out["error"] == "Entry conditions not met"
+
+
+@pytest.mark.asyncio
+async def test_publish_entry_allows_ready(monkeypatch) -> None:
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    service = SignalEngineService(session, context)
+    entry = {
+        "side": "BUY",
+        "atm": 24200,
+        "status": "ready",
+        "label": "BUY= 24200, CE=100, PE=100, EXIT +5%",
+        "status_note": "All entry rules pass",
+    }
+
+    async def fake_state():
+        return {
+            "entry_ready": True,
+            "entry": entry,
+            "passed": 22,
+            "evaluable": 22,
+        }
+
+    monkeypatch.setattr(service, "state", fake_state)
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.get_session_value",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.set_session_value",
+        AsyncMock(),
+    )
+
+    class _Memberships:
+        async def list_users(self):
+            return []
+
+    class _Notifications:
+        async def create_batch(self, **_kwargs):
+            return uuid.uuid4(), []
+
+    monkeypatch.setattr(
+        "app.db.repositories.MembershipRepository",
+        lambda *_a, **_k: _Memberships(),
+    )
+    monkeypatch.setattr(
+        "app.db.repositories.UserNotificationRepository",
+        lambda *_a, **_k: _Notifications(),
+    )
+    # Service constructs these from self.session — bind on instance after init
+    service  # noqa: B018 — repositories are imported inside publish_entry
+
+    # Patch the imports used inside publish_entry
+    import app.domains.signal_engine as se_mod
+
+    monkeypatch.setattr(
+        se_mod,
+        "UserNotificationRepository",
+        lambda *_a, **_k: _Notifications(),
+        raising=False,
+    )
+
+    # publish_entry imports MembershipRepository and UserNotificationRepository
+    # from app.db.repositories inside the method.
+    monkeypatch.setattr(
+        "app.db.repositories.MembershipRepository",
+        lambda *a, **k: _Memberships(),
+    )
+    monkeypatch.setattr(
+        "app.db.repositories.UserNotificationRepository",
+        lambda *a, **k: _Notifications(),
+    )
+
+    out = await service.publish_entry()
+    assert out["ok"] is True
+    assert out["entry"]["status"] == "ready"
 
 
 @pytest.mark.asyncio
