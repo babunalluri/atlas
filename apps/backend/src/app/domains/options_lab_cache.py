@@ -30,6 +30,7 @@ _snapshots: dict[str, tuple[float, dict[str, Any]]] = {}
 _watchers: dict[str, tuple[float, dict[str, Any]]] = {}
 _local_compute_locks: dict[str, asyncio.Lock] = {}
 _redis_lock_tokens: dict[str, str] = {}
+_fingerprints: dict[str, tuple[float, str]] = {}
 
 
 def _now_ms() -> float:
@@ -52,12 +53,82 @@ def _snap_bucket_key(tenant_id: str, *, wings: int, fingerprint: str) -> str:
     return f"{tenant_id}|{wings}|{fingerprint}"
 
 
+def _fingerprint_key(tenant_id: str, *, wings: int) -> str:
+    return f"atlas:options-lab:{tenant_id}:fp:{wings}"
+
+
 def reset_options_lab_cache_for_tests() -> None:
     """Clear in-process fallback state between tests."""
     _snapshots.clear()
     _watchers.clear()
     _local_compute_locks.clear()
     _redis_lock_tokens.clear()
+    _fingerprints.clear()
+
+
+async def remember_fingerprint(
+    tenant_id: str, *, wings: int, fingerprint: str
+) -> None:
+    """Remember the last snapshot fingerprint so SSE can skip Postgres."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.set(
+                _fingerprint_key(tenant_id, wings=wings),
+                fingerprint,
+                px=SNAPSHOT_TTL_MS,
+            )
+            return
+        except Exception:
+            await invalidate_redis()
+            logger.warning("options_lab_cache_fp_set_failed", tenant_id=tenant_id)
+    _fingerprints[_fingerprint_key(tenant_id, wings=wings)] = (
+        _now_ms() + SNAPSHOT_TTL_MS,
+        fingerprint,
+    )
+
+
+async def get_fingerprint(tenant_id: str, *, wings: int) -> str | None:
+    client = await get_redis()
+    if client is not None:
+        try:
+            raw = await client.get(_fingerprint_key(tenant_id, wings=wings))
+            return str(raw) if raw else None
+        except Exception:
+            await invalidate_redis()
+            logger.warning("options_lab_cache_fp_get_failed", tenant_id=tenant_id)
+    row = _fingerprints.get(_fingerprint_key(tenant_id, wings=wings))
+    if row is None:
+        return None
+    expires_at, fingerprint = row
+    if _now_ms() >= expires_at:
+        _fingerprints.pop(_fingerprint_key(tenant_id, wings=wings), None)
+        return None
+    return fingerprint
+
+
+async def clear_fingerprints(tenant_id: str) -> None:
+    """Drop remembered fingerprints after Lab config changes."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            cursor = 0
+            pattern = f"atlas:options-lab:{tenant_id}:fp:*"
+            keys: list[str] = []
+            while True:
+                cursor, batch = await client.scan(cursor=cursor, match=pattern, count=64)
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+            if keys:
+                await client.delete(*keys)
+        except Exception:
+            await invalidate_redis()
+            logger.warning("options_lab_cache_fp_clear_failed", tenant_id=tenant_id)
+    prefix = f"atlas:options-lab:{tenant_id}:fp:"
+    for key in list(_fingerprints):
+        if key.startswith(prefix):
+            _fingerprints.pop(key, None)
 
 
 async def get_snapshot(
@@ -102,6 +173,9 @@ async def set_snapshot(
                 json.dumps(payload, separators=(",", ":")),
                 px=SNAPSHOT_TTL_MS,
             )
+            await remember_fingerprint(
+                tenant_id, wings=wings, fingerprint=fingerprint
+            )
             return
         except Exception:
             await invalidate_redis()
@@ -120,6 +194,7 @@ async def set_snapshot(
         ]
         for key, _row in oldest:
             _snapshots.pop(key, None)
+    await remember_fingerprint(tenant_id, wings=wings, fingerprint=fingerprint)
 
 
 async def touch_watcher(tenant_id: str, *, wings: int) -> None:

@@ -20,6 +20,7 @@ from app.domains.signal_engine import (
     STREAM_INTERVAL_MS,
     SignalEngineService,
     state_for_stream,
+    stream_frame_from_cache,
 )
 from app.domains.signal_engine_worker import refresh_tenant_snapshot
 from app.tenancy.context import TenantContext
@@ -129,16 +130,20 @@ async def stream_signal_state(
             while True:
                 if await request.is_disconnected():
                     break
-                async with SessionFactory() as session:
-                    async with session.begin():
-                        await apply_tenant_guc(session, context.tenant_id)
-                        service = SignalEngineService(session, context)
-                        # Heartbeat BEFORE state_for_stream — a slow sandbox tick
-                        # used to outlive WATCH_TTL and idle the worker mid-frame.
-                        config = await service._load_config()
-                        if config.engine_enabled:
-                            await cache.touch_watcher(tenant_key)
-                        payload = await state_for_stream(service, config=config)
+                # Steady state: Redis only (no Postgres). Cold path opens a
+                # short-lived session when engine_enabled or snapshot is missing.
+                payload = await stream_frame_from_cache(tenant_key)
+                if payload is None:
+                    async with SessionFactory() as session:
+                        async with session.begin():
+                            await apply_tenant_guc(session, context.tenant_id)
+                            service = SignalEngineService(session, context)
+                            # Heartbeat BEFORE state_for_stream — a slow sandbox
+                            # tick must not outlive WATCH_TTL mid-frame.
+                            config = await service._load_config()
+                            if config.engine_enabled:
+                                await cache.touch_watcher(tenant_key)
+                            payload = await state_for_stream(service, config=config)
                 if not payload.get("engine_enabled", False):
                     await cache.clear_watcher(tenant_key)
                 frame = json.dumps(payload, separators=(",", ":"))

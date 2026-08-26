@@ -297,6 +297,25 @@ async def touch_watcher(tenant_id: str) -> None:
     _watchers[tenant_id] = _now_ms() + (WATCH_TTL_SECONDS * 1000)
 
 
+async def watcher_alive(tenant_id: str) -> bool:
+    """O(1) check whether this tenant's Signal SSE desk is open."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            return bool(await client.exists(_watch_key(tenant_id)))
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_watch_exists_failed", tenant_id=tenant_id)
+
+    expires = _watchers.get(tenant_id)
+    if expires is None:
+        return False
+    if expires <= _now_ms():
+        _watchers.pop(tenant_id, None)
+        return False
+    return True
+
+
 async def list_watched_tenant_ids() -> list[str]:
     client = await get_redis()
     if client is not None:

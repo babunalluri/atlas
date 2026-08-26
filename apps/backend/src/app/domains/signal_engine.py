@@ -245,6 +245,11 @@ async def state_for_stream(
     tenant_id = _tenant_key(service.context)
     if config is None:
         config = await service._load_config()
+    # Boolean-only cache: Lab/Param Chart patches do not invalidate signal
+    # metrics, so we must not stash the full config blob here.
+    await cache.set_metric(
+        tenant_id, "engine_enabled", "medium", bool(config.engine_enabled)
+    )
     computing = await cache.compute_lock_held(tenant_id)
 
     snapshot = await cache.get_snapshot(tenant_id)
@@ -305,6 +310,23 @@ async def state_for_stream(
         payload = _engine_starting_payload(config)
     await cache.set_snapshot(tenant_id, payload, ttl_ms=ENGINE_STARTING_SNAPSHOT_MS, force=True)
     return _annotate_snapshot_freshness(payload, computing=True)
+
+
+async def stream_frame_from_cache(tenant_id: str) -> dict[str, Any] | None:
+    """Serve one SSE frame from Redis only.
+
+    Returns None when ``engine_enabled`` or the snapshot is missing so the
+    caller can open a DB session for the cold path.
+    """
+    enabled = await cache.get_metric(tenant_id, "engine_enabled")
+    snapshot = await cache.get_snapshot(tenant_id)
+    if not isinstance(enabled, bool) or snapshot is None:
+        return None
+    if enabled:
+        await cache.touch_watcher(tenant_id)
+        computing = await cache.compute_lock_held(tenant_id)
+        return _annotate_snapshot_freshness(snapshot, computing=computing)
+    return _apply_engine_stopped_overlay(snapshot)
 
 # Admin-selectable underlyings (not hard-coded to NIFTY).
 UNDERLYING_PRESETS: list[dict[str, Any]] = [
@@ -1881,6 +1903,14 @@ class SignalEngineService:
         if patch.get("engine_enabled") is False:
             await cache.clear_watcher(tenant_id)
         await _invalidate_tenant_signal_cache(tenant_id)
+        # Re-seed boolean after invalidate so SSE fast path does not cold-load
+        # for up to medium TTL after Start/Stop.
+        await cache.set_metric(
+            tenant_id,
+            "engine_enabled",
+            "medium",
+            bool(SignalEngineConfig.from_settings(merged).engine_enabled),
+        )
         if patch.get("engine_enabled") is False:
             stopped = _apply_engine_stopped_overlay(
                 await self.state()

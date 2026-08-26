@@ -20,7 +20,12 @@ from app.domains.kite_ticker_hub import (
     reset_kite_ticker_hub_for_tests,
     write_ticker_rows,
 )
-from app.domains.options_lab import OptionsLabConfig, chain_state_for_stream, mock_chain_snapshot
+from app.domains.options_lab import (
+    OptionsLabConfig,
+    chain_frame_from_cache,
+    chain_state_for_stream,
+    mock_chain_snapshot,
+)
 from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
 from app.main import app
 from app.tenancy.context import TenantContext
@@ -154,6 +159,77 @@ async def test_chain_state_for_stream_coalesce() -> None:
     assert out["poll_ms"] == STREAM_INTERVAL_MS
     assert out["quote_source"] in {"rest", "ticker"}
     assert quote_source_for_tenant(tenant) == "rest"
+
+
+@pytest.mark.asyncio
+async def test_chain_frame_from_cache_fast_path() -> None:
+    tenant = "tenant-ol-fast"
+    config = OptionsLabConfig(
+        underlying_symbol="NSE:NIFTY 50",
+        fut_symbol="NFO:NIFTY26SEPFUT",
+        strike_step=50,
+        mock=True,
+    )
+    wings = 5
+    payload = mock_chain_snapshot(config, wings=wings)
+    await ol_cache.set_snapshot(
+        tenant, payload, wings=wings, fingerprint=config.cache_fingerprint()
+    )
+    frame = await chain_frame_from_cache(tenant, wings=wings)
+    assert frame is not None
+    assert frame["ok"] is True
+    assert frame["stream"] is True
+    assert frame["poll_ms"] == STREAM_INTERVAL_MS
+    watched = await ol_cache.list_watched()
+    assert (tenant, wings) in watched
+
+
+@pytest.mark.asyncio
+async def test_chain_frame_from_cache_miss_without_fingerprint() -> None:
+    tenant = "tenant-ol-miss"
+    config = OptionsLabConfig(mock=True)
+    wings = 5
+    # Write snapshot without going through set_snapshot's remember path.
+    bucket_payload = mock_chain_snapshot(config, wings=wings)
+    # Direct in-process snapshot only (no fingerprint pointer).
+    from app.domains.options_lab_cache import _snap_bucket_key, _snapshots, _now_ms
+    from app.domains.signal_engine_constants import SNAPSHOT_TTL_MS
+
+    key = _snap_bucket_key(
+        tenant, wings=wings, fingerprint=config.cache_fingerprint()
+    )
+    _snapshots[key] = (_now_ms() + SNAPSHOT_TTL_MS, bucket_payload)
+    assert await ol_cache.get_fingerprint(tenant, wings=wings) is None
+    assert await chain_frame_from_cache(tenant, wings=wings) is None
+
+
+@pytest.mark.asyncio
+async def test_set_snapshot_remembers_fingerprint() -> None:
+    tenant = "tenant-ol-fp"
+    config = OptionsLabConfig(mock=True, fut_symbol="NFO:NIFTY26SEPFUT")
+    wings = 8
+    await ol_cache.set_snapshot(
+        tenant,
+        mock_chain_snapshot(config, wings=wings),
+        wings=wings,
+        fingerprint=config.cache_fingerprint(),
+    )
+    assert (
+        await ol_cache.get_fingerprint(tenant, wings=wings)
+        == config.cache_fingerprint()
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_fingerprints_on_config_change_pointer() -> None:
+    tenant = "tenant-ol-clear"
+    config = OptionsLabConfig(mock=True)
+    wings = 5
+    await ol_cache.remember_fingerprint(
+        tenant, wings=wings, fingerprint=config.cache_fingerprint()
+    )
+    await ol_cache.clear_fingerprints(tenant)
+    assert await ol_cache.get_fingerprint(tenant, wings=wings) is None
 
 
 @pytest.mark.asyncio

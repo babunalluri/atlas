@@ -139,6 +139,88 @@ async def test_stale_snapshot_overlaid_when_engine_stopped() -> None:
     assert payload["passed"] == 11
 
 
+@pytest.mark.asyncio
+async def test_stream_frame_from_cache_fast_path() -> None:
+    """Warm engine_enabled + snapshot must not need Postgres."""
+    from app.domains.signal_engine import stream_frame_from_cache
+
+    tenant = "tenant-fast"
+    await cache.set_metric(tenant, "engine_enabled", "medium", True)
+    await cache.set_snapshot(
+        tenant,
+        {
+            "engine_enabled": True,
+            "engine_active": True,
+            "passed": 4,
+            "computed_at_ms": 1_700_000_000_000,
+        },
+    )
+    frame = await stream_frame_from_cache(tenant)
+    assert frame is not None
+    assert frame["passed"] == 4
+    assert frame["engine_enabled"] is True
+    watched = await cache.list_watched_tenant_ids()
+    assert tenant in watched
+
+
+@pytest.mark.asyncio
+async def test_stream_frame_from_cache_misses_without_engine_flag() -> None:
+    from app.domains.signal_engine import stream_frame_from_cache
+
+    tenant = "tenant-miss"
+    await cache.set_snapshot(tenant, {"passed": 1})
+    assert await stream_frame_from_cache(tenant) is None
+
+
+@pytest.mark.asyncio
+async def test_stream_frame_from_cache_stopped_overlay() -> None:
+    from app.domains.signal_engine import stream_frame_from_cache
+
+    tenant = "tenant-stopped-fast"
+    await cache.set_metric(tenant, "engine_enabled", "medium", False)
+    await cache.set_snapshot(
+        tenant,
+        {
+            "engine_enabled": True,
+            "engine_active": True,
+            "feed_source": "live",
+            "passed": 9,
+        },
+    )
+    frame = await stream_frame_from_cache(tenant)
+    assert frame is not None
+    assert frame["engine_enabled"] is False
+    assert frame["feed_source"] == "stopped"
+    assert frame["passed"] == 9
+    watched = await cache.list_watched_tenant_ids()
+    assert tenant not in watched
+
+
+@pytest.mark.asyncio
+async def test_state_for_stream_seeds_engine_enabled_metric() -> None:
+    tenant = "tenant-seed"
+
+    class _StubService:
+        context = type("Ctx", (), {"tenant_id": tenant})()
+
+        async def _load_config(self):
+            from app.domains.signal_engine import SignalEngineConfig
+
+            return SignalEngineConfig(engine_enabled=True)
+
+        async def state(self, **_kwargs):
+            raise AssertionError("should use starting/cold path without state()")
+
+    from app.domains.signal_engine import state_for_stream
+
+    # No snapshot → compute lock path; stub has no full state — seed metric first
+    # via a warm snapshot so we only assert the metric write.
+    await cache.set_snapshot(tenant, {"passed": 2, "engine_enabled": True})
+    payload = await state_for_stream(_StubService())  # type: ignore[arg-type]
+    assert payload["passed"] == 2
+    assert await cache.get_metric(tenant, "engine_enabled") is True
+
+
 def test_apply_engine_stopped_overlay() -> None:
     out = _apply_engine_stopped_overlay(
         {"engine_enabled": True, "engine_active": True, "feed_source": "live"}

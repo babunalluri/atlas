@@ -915,6 +915,34 @@ def mock_chain_snapshot(config: OptionsLabConfig, *, wings: int) -> dict[str, An
     }
 
 
+async def chain_frame_from_cache(
+    tenant_id: str,
+    *,
+    wings: int = DEFAULT_WINGS,
+) -> dict[str, Any] | None:
+    """Serve one Options Lab SSE frame from Redis only (no Postgres).
+
+    Returns None when fingerprint or snapshot is missing so the caller can open
+    a short-lived DB session for the cold path.
+    """
+    wings = _clamp_wings(wings)
+    # Prefer Signal when both desks are open on a small VM.
+    from app.domains import signal_engine_cache as signal_cache
+
+    if await signal_cache.watcher_alive(tenant_id):
+        wings = min(wings, MIN_WINGS)
+    fingerprint = await ol_cache.get_fingerprint(tenant_id, wings=wings)
+    if not fingerprint:
+        return None
+    snapshot = await ol_cache.get_snapshot(
+        tenant_id, wings=wings, fingerprint=fingerprint
+    )
+    if snapshot is None:
+        return None
+    await ol_cache.touch_watcher(tenant_id, wings=wings)
+    return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
+
+
 async def chain_state_for_stream(
     service: "OptionsLabService",
     *,
@@ -926,7 +954,7 @@ async def chain_state_for_stream(
     # Prefer Signal when both desks are open on a small VM.
     from app.domains import signal_engine_cache as signal_cache
 
-    if tenant_id in set(await signal_cache.list_watched_tenant_ids()):
+    if await signal_cache.watcher_alive(tenant_id):
         wings = min(wings, MIN_WINGS)
     config = await service._read_config()
     fingerprint = config.cache_fingerprint()
@@ -935,6 +963,10 @@ async def chain_state_for_stream(
         tenant_id, wings=wings, fingerprint=fingerprint
     )
     if snapshot is not None:
+        # Re-seed fp pointer for SSE Redis fast path (e.g. after deploy).
+        await ol_cache.remember_fingerprint(
+            tenant_id, wings=wings, fingerprint=fingerprint
+        )
         return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
 
     if await ol_cache.try_compute_lock(tenant_id, wings=wings, fingerprint=fingerprint):
@@ -1126,6 +1158,9 @@ class OptionsLabService:
             tool,
             {OPTIONS_LAB_SETTINGS_KEY: next_config.to_admin_dict()},
         )
+        # Config fingerprint changed — drop SSE fast-path pointers so the next
+        # frame reloads Postgres rather than serving a stale chain key.
+        await ol_cache.clear_fingerprints(_tenant_key(self.context))
         return {"ok": True, **await self.get_admin_config()}
 
     async def reset_oi_baseline(self) -> dict[str, Any]:

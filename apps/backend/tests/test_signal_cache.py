@@ -37,6 +37,8 @@ async def test_watcher_tracking_in_memory() -> None:
     await cache.touch_watcher("tenant-a")
     tenants = await cache.list_watched_tenant_ids()
     assert "tenant-a" in tenants
+    assert await cache.watcher_alive("tenant-a") is True
+    assert await cache.watcher_alive("tenant-b") is False
 
 
 @pytest.mark.asyncio
@@ -44,6 +46,7 @@ async def test_clear_watcher() -> None:
     await cache.touch_watcher("tenant-a")
     await cache.clear_watcher("tenant-a")
     assert "tenant-a" not in await cache.list_watched_tenant_ids()
+    assert await cache.watcher_alive("tenant-a") is False
 
 
 @pytest.mark.asyncio

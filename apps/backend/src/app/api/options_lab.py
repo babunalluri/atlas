@@ -21,6 +21,7 @@ from app.domains.options_lab import (
     MAX_WINGS,
     MIN_WINGS,
     OptionsLabService,
+    chain_frame_from_cache,
     chain_state_for_stream,
 )
 from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
@@ -168,13 +169,22 @@ async def stream_options_chain(
             while True:
                 if await request.is_disconnected():
                     break
-                await ol_cache.touch_watcher(tenant_key, wings=wings)
-                async with SessionFactory() as session:
-                    async with session.begin():
-                        await apply_tenant_guc(session, context.tenant_id)
-                        service = OptionsLabService(session, context)
-                        payload = await chain_state_for_stream(service, wings=wings)
-                await ol_cache.touch_watcher(tenant_key, wings=wings)
+                # Steady state: Redis only (no Postgres). Cold path opens a
+                # short-lived session when fingerprint or snapshot is missing.
+                payload = await chain_frame_from_cache(tenant_key, wings=wings)
+                if payload is None:
+                    await ol_cache.touch_watcher(tenant_key, wings=wings)
+                    async with SessionFactory() as session:
+                        async with session.begin():
+                            await apply_tenant_guc(session, context.tenant_id)
+                            service = OptionsLabService(session, context)
+                            payload = await chain_state_for_stream(
+                                service, wings=wings
+                            )
+                    await ol_cache.touch_watcher(
+                        tenant_key,
+                        wings=int(payload.get("wings", wings)),
+                    )
                 frame = json.dumps(payload, separators=(",", ":"))
                 yield f"data: {frame}\n\n".encode()
                 await asyncio.sleep(STREAM_INTERVAL_MS / 1000)
