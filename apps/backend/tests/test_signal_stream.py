@@ -91,11 +91,28 @@ async def test_snapshot_survives_beyond_stream_interval() -> None:
 
 @pytest.mark.asyncio
 async def test_invalidate_tenant_signal_cache() -> None:
+    """Config-patch invalidate is scoped — slow tiers stay warm."""
     tenant = "tenant-test"
-    await cache.set_metric(tenant, "feed", "fast", {"source": "live"})
+    await cache.set_metric(tenant, "yahoo_global", "slow", {"ok": 1})
+    await cache.set_metric(tenant, "india_vix", "medium", 14.2)
+    await cache.set_metric(tenant, "levels", "medium", {"vwap": 1})
+    await cache.set_metric(tenant, "setup", "medium", {"cfg": True})
     await cache.set_snapshot(tenant, {"entry_ready": False, "metrics": []})
     await _invalidate_tenant_signal_cache(tenant)
-    assert await cache.get_metric(tenant, "feed") is None
+    assert await cache.get_metric(tenant, "yahoo_global") == {"ok": 1}
+    assert await cache.get_metric(tenant, "india_vix") == 14.2
+    assert await cache.get_metric(tenant, "levels") is None
+    assert await cache.get_metric(tenant, "setup") is None
+    assert await cache.get_snapshot(tenant) is None
+
+
+@pytest.mark.asyncio
+async def test_invalidate_tenant_full_wipes_slow_tiers() -> None:
+    tenant = "tenant-full"
+    await cache.set_metric(tenant, "yahoo_global", "slow", {"ok": 1})
+    await cache.set_snapshot(tenant, {"x": 1})
+    await _invalidate_tenant_signal_cache(tenant, full=True)
+    assert await cache.get_metric(tenant, "yahoo_global") is None
     assert await cache.get_snapshot(tenant) is None
 
 

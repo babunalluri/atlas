@@ -353,6 +353,25 @@ def test_derive_option_symbol_from_fut() -> None:
     assert _derive_option_symbol("NFO:NIFTY26AUG24500CE", 24500, "CE") is None
 
 
+def test_derive_option_symbol_rejects_cross_index_strike() -> None:
+    """Stale SENSEX ATM must not mint a NIFTY option that never quotes."""
+    assert _derive_option_symbol("NFO:NIFTY26AUGFUT", 77500, "CE") is None
+    assert _derive_option_symbol("BFO:SENSEX26AUGFUT", 24500, "CE") is None
+    assert (
+        _derive_option_symbol("BFO:SENSEX26AUGFUT", 77500, "CE")
+        == "BFO:SENSEX26AUG77500CE"
+    )
+
+
+def test_resolve_option_symbols_skips_implausible_atm() -> None:
+    config = SignalEngineConfig(
+        nifty_fut_symbol="NFO:NIFTY26AUGFUT",
+        auto_atm_symbols=True,
+    )
+    ce, pe = _resolve_option_symbols(config, 77500)
+    assert ce == "" and pe == ""
+
+
 def test_build_alt_fut_symbol() -> None:
     assert (
         _build_alt_fut_symbol("NFO:NIFTY26MAR26FUT", "BANKNIFTY", "NFO")

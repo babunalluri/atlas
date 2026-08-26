@@ -33,6 +33,62 @@ async def test_snapshot_and_invalidate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalidate_underlying_keeps_slow_tiers() -> None:
+    await cache.set_metric("tenant-a", "yahoo_global", "slow", {"a": 1})
+    await cache.set_metric("tenant-a", "dow_jones", "slow", -0.2)
+    await cache.set_metric("tenant-a", "levels", "medium", {"x": 1})
+    await cache.set_metric("tenant-a", "option_chain", "medium", {"pcr": 1.1})
+    await cache.set_snapshot("tenant-a", {"feed_source": "live"})
+    await cache.invalidate_underlying_dependent("tenant-a")
+    assert await cache.get_metric("tenant-a", "yahoo_global") == {"a": 1}
+    assert await cache.get_metric("tenant-a", "dow_jones") == -0.2
+    assert await cache.get_metric("tenant-a", "levels") is None
+    assert await cache.get_metric("tenant-a", "option_chain") is None
+    assert await cache.get_snapshot("tenant-a") is None
+
+
+@pytest.mark.asyncio
+async def test_invalidate_underlying_clears_session_opens() -> None:
+    await cache.set_session_value("tenant-a", "underlying_open:NSE:NIFTY_50:2026-08-26", 24500.0)
+    await cache.set_session_value("tenant-a", "straddle_session_open:NSE:NIFTY_50:2026-08-26", 200.0)
+    await cache.set_session_value("tenant-a", "options_lab_bots", {"keep": True})
+    await cache.invalidate_underlying_dependent("tenant-a")
+    assert await cache.get_session_value("tenant-a", "underlying_open:NSE:NIFTY_50:2026-08-26") is None
+    assert await cache.get_session_value("tenant-a", "straddle_session_open:NSE:NIFTY_50:2026-08-26") is None
+    assert await cache.get_session_value("tenant-a", "options_lab_bots") == {"keep": True}
+
+
+@pytest.mark.asyncio
+async def test_set_snapshot_refuses_stale_config_epoch() -> None:
+    await cache.bump_config_epoch("tenant-a")  # -> 1
+    await cache.bump_config_epoch("tenant-a")  # -> 2
+    wrote = await cache.set_snapshot(
+        "tenant-a",
+        {"feed_source": "live", "config_epoch": 1, "metrics": []},
+    )
+    assert wrote is False
+    assert await cache.get_snapshot("tenant-a") is None
+    wrote = await cache.set_snapshot(
+        "tenant-a",
+        {"feed_source": "live", "config_epoch": 2, "metrics": []},
+    )
+    assert wrote is True
+    assert (await cache.get_snapshot("tenant-a") or {}).get("config_epoch") == 2
+
+
+@pytest.mark.asyncio
+async def test_config_epoch_is_monotonic_without_ttl_reset() -> None:
+    """Epoch must not live under m:* with SNAPSHOT_TTL — expiry disarms the guard."""
+    a = await cache.bump_config_epoch("tenant-a")
+    b = await cache.bump_config_epoch("tenant-a")
+    assert b == a + 1
+    # Full metric wipe must not reset the generation counter.
+    await cache.invalidate_tenant("tenant-a")
+    c = await cache.bump_config_epoch("tenant-a")
+    assert c == b + 1
+
+
+@pytest.mark.asyncio
 async def test_watcher_tracking_in_memory() -> None:
     await cache.touch_watcher("tenant-a")
     tenants = await cache.list_watched_tenant_ids()

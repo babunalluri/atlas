@@ -94,12 +94,20 @@ def _session_key(tenant_id: str) -> str:
     return f"atlas:signals:{tenant_id}:sess"
 
 
+def _epoch_key(tenant_id: str) -> str:
+    # Outside m:* so scoped / Stop flushes never TTL-reset the generation.
+    return f"atlas:signals:{tenant_id}:config_epoch"
+
+
 def _watch_key(tenant_id: str) -> str:
     return f"atlas:signals:watch:{tenant_id}"
 
 
 def _lock_key(tenant_id: str) -> str:
     return f"atlas:signals:lock:{tenant_id}"
+
+
+_epoch_local: dict[str, int] = {}
 
 
 def reset_signal_cache_for_tests() -> None:
@@ -111,6 +119,7 @@ def reset_signal_cache_for_tests() -> None:
     _local_compute_locks.clear()
     _redis_lock_tokens.clear()
     _redis_session_prune_due_ms.clear()
+    _epoch_local.clear()
 
 
 async def get_metric(tenant_id: str, metric_id: str) -> Any | None:
@@ -252,11 +261,14 @@ async def set_snapshot(
     *,
     ttl_ms: int | None = None,
     force: bool = False,
-) -> None:
-    """Persist a tenant snapshot.
+) -> bool:
+    """Persist a tenant snapshot. Returns False when the write was refused.
 
     Provisional ``feed_source=starting`` frames must not clobber an existing live
     board (timeout / race). Pass ``force=True`` for Start/Stop and intentional resets.
+
+    When ``payload["config_epoch"]`` is older than the tenant's current epoch, the
+    write is refused so a pre-switch tick cannot resurrect the previous board.
     """
     if (
         not force
@@ -269,7 +281,22 @@ async def set_snapshot(
             and existing.get("feed_source") == "live"
             and (existing.get("metrics") or existing.get("evaluable"))
         ):
-            return
+            return False
+
+    if not force and isinstance(payload, dict) and payload.get("config_epoch") is not None:
+        try:
+            stamped = int(payload["config_epoch"])
+        except (TypeError, ValueError):
+            stamped = -1
+        current = await get_config_epoch(tenant_id)
+        if current > 0 and stamped >= 0 and stamped < current:
+            logger.info(
+                "signal_snapshot_stale_epoch_refused",
+                tenant_id=tenant_id,
+                stamped=stamped,
+                current=current,
+            )
+            return False
 
     ttl = int(ttl_ms) if ttl_ms is not None else SNAPSHOT_TTL_MS
     if ttl <= 0:
@@ -282,12 +309,13 @@ async def set_snapshot(
                 json.dumps(payload, separators=(",", ":")),
                 px=ttl,
             )
-            return
+            return True
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_snapshot_set_failed", tenant_id=tenant_id)
 
     _snapshots[tenant_id] = (_now_ms() + ttl, payload)
+    return True
 
 
 async def clear_watcher(tenant_id: str) -> None:
@@ -462,7 +490,118 @@ return 0
         lock.release()
 
 
+async def delete_session_fields(tenant_id: str, fields: Iterable[str]) -> None:
+    """Drop selected hash fields; leaves Options Lab / other session data intact."""
+    names = [f for f in fields if f]
+    if not names:
+        return
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.hdel(_session_key(tenant_id), *names)
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_session_hdel_failed", tenant_id=tenant_id)
+    bucket = _session_store.get(tenant_id)
+    if bucket is not None:
+        for field in names:
+            bucket.pop(field, None)
+
+
+async def list_session_fields(tenant_id: str) -> list[str]:
+    client = await get_redis()
+    if client is not None:
+        try:
+            raw = await client.hkeys(_session_key(tenant_id))
+            return [str(f) for f in raw]
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_session_hkeys_failed", tenant_id=tenant_id)
+    bucket = _session_store.get(tenant_id) or {}
+    return list(bucket.keys())
+
+
+# Flushed on underlying / FUT / ATM config changes. Global slow tiers
+# (yahoo_*, india_vix, crude_oil, aux_quotes, nse_slow, dow_jones) stay warm.
+UNDERLYING_DEPENDENT_METRICS: tuple[str, ...] = (
+    "levels",
+    "trend",
+    "atm_iv",
+    "option_chain",
+    "setup",
+)
+
+# Session fields keyed by date (legacy) or symbol+date — wipe on underlying switch
+# so NIFTY spot is not subtracted from a SENSEX session open.
+UNDERLYING_SESSION_FIELD_PREFIXES: tuple[str, ...] = (
+    "underlying_open:",
+    "straddle_session_open:",
+    "iv_day_high:",
+    "iv_session_open:",
+    "oi_baseline:",
+)
+
+
+def _is_underlying_session_field(field: str) -> bool:
+    return any(field.startswith(prefix) for prefix in UNDERLYING_SESSION_FIELD_PREFIXES)
+
+
+async def get_config_epoch(tenant_id: str) -> int:
+    client = await get_redis()
+    if client is not None:
+        try:
+            raw = await client.get(_epoch_key(tenant_id))
+            if raw is None:
+                return 0
+            return int(raw)
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_epoch_get_failed", tenant_id=tenant_id)
+    return int(_epoch_local.get(tenant_id, 0))
+
+
+async def bump_config_epoch(tenant_id: str) -> int:
+    """Atomic monotonic generation — Redis INCR, no TTL (must not reset)."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            # INCR creates the key at 1 with no expiry when missing.
+            return int(await client.incr(_epoch_key(tenant_id)))
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_epoch_incr_failed", tenant_id=tenant_id)
+    nxt = int(_epoch_local.get(tenant_id, 0)) + 1
+    _epoch_local[tenant_id] = nxt
+    return nxt
+
+
+async def invalidate_underlying_dependent(tenant_id: str) -> None:
+    """Config-patch / Stop flush: underlying metrics + snapshot + session opens.
+
+    Keeps yahoo / VIX / crude / aux / NSE / Dow warm so Stop→Start and preset
+    switches do not force a multi-minute slow-tier rebuild.
+    """
+    for metric_id in UNDERLYING_DEPENDENT_METRICS:
+        await delete_metric(tenant_id, metric_id)
+    session_fields = [
+        f for f in await list_session_fields(tenant_id) if _is_underlying_session_field(f)
+    ]
+    if session_fields:
+        await delete_session_fields(tenant_id, session_fields)
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.delete(_snapshot_key(tenant_id))
+        except Exception:
+            await invalidate_redis()
+            logger.warning(
+                "signal_cache_underlying_invalidate_failed", tenant_id=tenant_id
+            )
+    _snapshots.pop(tenant_id, None)
+
+
 async def invalidate_tenant(tenant_id: str) -> None:
+    """Full tenant wipe (tests / hard reset). Preserves config_epoch key."""
     client = await get_redis()
     if client is not None:
         try:

@@ -101,8 +101,14 @@ Rule = Literal[
 ]
 
 
-async def _invalidate_tenant_signal_cache(tenant_id: str) -> None:
-    await cache.invalidate_tenant(tenant_id)
+async def _invalidate_tenant_signal_cache(
+    tenant_id: str, *, full: bool = False
+) -> None:
+    """Flush underlying-dependent cache. ``full`` keeps hard-reset for tests."""
+    if full:
+        await cache.invalidate_tenant(tenant_id)
+    else:
+        await cache.invalidate_underlying_dependent(tenant_id)
 
 
 def _apply_engine_stopped_overlay(payload: dict[str, Any]) -> dict[str, Any]:
@@ -187,6 +193,10 @@ async def seed_stream_cold_frame(
         if existing is not None:
             return _apply_engine_stopped_overlay(existing), False
         stopped = _apply_engine_stopped_overlay(_engine_starting_payload(config))
+        stopped = {
+            **stopped,
+            "config_epoch": await cache.get_config_epoch(tenant_id),
+        }
         await cache.set_snapshot(tenant_id, stopped, force=True)
         return stopped, False
 
@@ -204,6 +214,10 @@ async def seed_stream_cold_frame(
         )
 
     starting = _engine_starting_payload(config)
+    starting = {
+        **starting,
+        "config_epoch": await cache.get_config_epoch(tenant_id),
+    }
     await cache.set_snapshot(
         tenant_id,
         starting,
@@ -340,16 +354,29 @@ async def state_for_stream(
             # calls ``_compute_state_payload`` with the prior live frame.
             if config.engine_enabled:
                 starting = _engine_starting_payload(config)
+                starting = {
+                    **starting,
+                    "config_epoch": await cache.get_config_epoch(tenant_id),
+                }
                 await cache.set_snapshot(
                     tenant_id,
                     starting,
                     ttl_ms=ENGINE_STARTING_SNAPSHOT_MS,
                     force=True,
                 )
+            epoch_at_start = await cache.get_config_epoch(tenant_id)
             payload = await _compute_state_payload(
                 service, config=config, last_good=None
             )
-            await cache.set_snapshot(tenant_id, payload)
+            payload = {**payload, "config_epoch": epoch_at_start}
+            wrote = await cache.set_snapshot(tenant_id, payload)
+            if not wrote:
+                # Stale epoch — serve whatever Redis holds (new starting/live).
+                current = await cache.get_snapshot(tenant_id)
+                if isinstance(current, dict):
+                    if not config.engine_enabled:
+                        return _apply_engine_stopped_overlay(current)
+                    return _annotate_snapshot_freshness(current, computing=False)
             return _annotate_snapshot_freshness(payload, computing=False)
         finally:
             heartbeat.cancel()
@@ -376,6 +403,10 @@ async def state_for_stream(
         payload = _apply_engine_stopped_overlay(_engine_starting_payload(config))
     else:
         payload = _engine_starting_payload(config)
+    payload = {
+        **payload,
+        "config_epoch": await cache.get_config_epoch(tenant_id),
+    }
     await cache.set_snapshot(tenant_id, payload, ttl_ms=ENGINE_STARTING_SNAPSHOT_MS, force=True)
     return _annotate_snapshot_freshness(payload, computing=True)
 
@@ -613,6 +644,13 @@ def _session_dated_key(name: str) -> str:
     return f"{name}:{_ist_session_date()}"
 
 
+def _session_symbol_key(prefix: str, symbol: str | None) -> str:
+    """Date+symbol session field so a SENSEX open cannot poison a NIFTY switch."""
+    raw = str(symbol or "").strip().upper() or "_"
+    safe = re.sub(r"[^A-Z0-9:_-]+", "_", raw)[:96]
+    return f"{prefix}:{safe}:{_ist_session_date()}"
+
+
 def _option_side_from_symbol(symbol: str) -> str | None:
     """Return CE/PE when ``symbol`` is an option contract (not a FUT/index name).
 
@@ -757,10 +795,37 @@ def _signal_settings_patch(
     return patch
 
 
+def _strike_plausible_for_fut(fut_symbol: str, strike: int) -> bool:
+    """Reject cross-index ATM (e.g. SENSEX ~77k on a NIFTY FUT).
+
+    Unknown roots fail open so hand-typed underlyings still auto-ATM.
+    """
+    if strike <= 0:
+        return False
+    root = _fut_root(fut_symbol)
+    if not root:
+        return True
+    # Wide bands — years of index moves — but no overlap between NIFTY and SENSEX.
+    bands: dict[str, tuple[int, int]] = {
+        "NIFTY": (15_000, 40_000),
+        "NIFTY50": (15_000, 40_000),
+        "BANKNIFTY": (25_000, 80_000),
+        "FINNIFTY": (15_000, 40_000),
+        "NIFTYNXT50": (25_000, 90_000),
+        "MIDCPNIFTY": (5_000, 30_000),
+        "SENSEX": (50_000, 120_000),
+        "BANKEX": (35_000, 100_000),
+    }
+    lo, hi = bands.get(root, (1, 10_000_000))
+    return lo <= int(strike) <= hi
+
+
 def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None:
     """Build `NFO:NIFTY26AUG24500CE` from `NFO:NIFTY26AUGFUT` + ATM strike."""
     side = side.upper()
     if side not in {"CE", "PE"} or strike <= 0:
+        return None
+    if not _strike_plausible_for_fut(fut_symbol, int(strike)):
         return None
     raw = fut_symbol.strip()
     if not raw:
@@ -1264,7 +1329,10 @@ async def _apply_straddle_decay(tenant_id: str, feed: dict[str, Any]) -> None:
     straddle = feed.get("straddle")
     if straddle is None:
         return
-    session_key = _session_dated_key("straddle_session_open")
+    session_key = _session_symbol_key(
+        "straddle_session_open",
+        str(feed.get("underlying_symbol") or ""),
+    )
     session_open = await cache.get_session_value(tenant_id, session_key)
     if session_open is None:
         await cache.set_session_value(tenant_id, session_key, float(straddle))
@@ -1340,8 +1408,8 @@ async def _merge_option_chain_tier(
     await _cache_set(tenant_id, "option_chain", "medium", payload)
 
 
-def _oi_baseline_cache_key() -> str:
-    return f"oi_baseline:{_ist_session_date()}"
+def _oi_baseline_cache_key(symbol: str | None = None) -> str:
+    return _session_symbol_key("oi_baseline", symbol)
 
 
 def _mock_feed(config: SignalEngineConfig) -> dict[str, Any]:
@@ -1593,8 +1661,17 @@ def _live_setup_warnings(
         warnings.append("Set nifty_fut_symbol for live OI (e.g. NFO:NIFTY26AUGFUT).")
     elif feed.get("oi") is None:
         warnings.append(
-            "OI not returned — set a valid FUT symbol (e.g. NFO:NIFTY26AUGFUT) "
-            "and ensure get_quote returns open_interest on the FNO segment."
+            f"OI not returned yet for {config.nifty_fut_symbol} — FUT is set; "
+            "waiting for open_interest on the quote (check market hours / token)."
+        )
+    if (
+        config.nifty_fut_symbol
+        and feed.get("atm") is not None
+        and not _strike_plausible_for_fut(config.nifty_fut_symbol, int(feed["atm"]))
+    ):
+        warnings.append(
+            f"ATM {int(feed['atm'])} is not plausible for {config.nifty_fut_symbol} — "
+            "waiting for a fresh underlying print after the switch."
         )
     if config.pcr is None and feed.get("pcr") is None:
         warnings.append(
@@ -1965,7 +2042,10 @@ class SignalEngineService:
         tenant_id = _tenant_key(self.context)
         if patch.get("engine_enabled") is False:
             await cache.clear_watcher(tenant_id)
+        # Always scoped — Yahoo/NSE/VIX are not tenant-config-dependent. A full
+        # wipe on Stop reopened the multi-minute slow-tier rebuild on Start.
         await _invalidate_tenant_signal_cache(tenant_id)
+        epoch = await cache.bump_config_epoch(tenant_id)
         # Re-seed boolean after invalidate so SSE fast path does not cold-load
         # after Start/Stop.
         enabled = bool(SignalEngineConfig.from_settings(merged).engine_enabled)
@@ -1974,6 +2054,7 @@ class SignalEngineService:
             stopped = _apply_engine_stopped_overlay(
                 await self.state()
             )
+            stopped = {**stopped, "config_epoch": epoch}
             await cache.set_snapshot(tenant_id, stopped, force=True)
         elif patch.get("engine_enabled") is True or under_changed:
             # Start desk watching immediately. Snapshot warm is scheduled from the
@@ -1983,6 +2064,7 @@ class SignalEngineService:
             # Paint immediately after Start or underlying/FUT change so SSE does
             # not sit on an empty Redis key while the cold tick runs.
             starting = _engine_starting_payload(SignalEngineConfig.from_settings(merged))
+            starting = {**starting, "config_epoch": epoch}
             await cache.set_snapshot(
                 tenant_id,
                 starting,
@@ -2727,7 +2809,9 @@ class SignalEngineService:
                 ohlc = spot_row.get("ohlc") if isinstance(spot_row.get("ohlc"), dict) else {}
                 open_ltp = _pick_float(ohlc, "open") if ohlc else None
                 if open_ltp is not None:
-                    session_key = f"underlying_open:{_ist_session_date()}"
+                    session_key = _session_symbol_key(
+                        "underlying_open", config.underlying_symbol
+                    )
                     cached_open = await cache.get_session_value(tenant_id, session_key)
                     if cached_open is None:
                         await cache.set_session_value(tenant_id, session_key, open_ltp)
@@ -2865,7 +2949,7 @@ class SignalEngineService:
                 _mark_truncated(reason="fut_oi")
             if oi_val is not None:
                 feed["oi"] = oi_val
-                baseline_key = _oi_baseline_cache_key()
+                baseline_key = _oi_baseline_cache_key(config.nifty_fut_symbol)
                 prev_oi = await cache.get_session_value(tenant_id, baseline_key)
                 if prev_oi is not None and prev_oi != 0 and config.oi_pct_chg is None:
                     feed["oi_pct_chg"] = ((oi_val - float(prev_oi)) / float(prev_oi)) * 100
@@ -2882,13 +2966,15 @@ class SignalEngineService:
         iv = feed.get("iv")
         if iv is not None:
             iv_f = float(iv)
-            stored_high = await cache.get_session_value(tenant_id, _session_dated_key("iv_day_high"))
+            iv_high_key = _session_symbol_key("iv_day_high", config.underlying_symbol)
+            iv_open_key = _session_symbol_key("iv_session_open", config.underlying_symbol)
+            stored_high = await cache.get_session_value(tenant_id, iv_high_key)
             current_high = max(float(stored_high), iv_f) if stored_high is not None else iv_f
-            await cache.set_session_value(tenant_id, _session_dated_key("iv_day_high"), current_high)
+            await cache.set_session_value(tenant_id, iv_high_key, current_high)
             feed["iv_day_high"] = current_high
-            session_open = await cache.get_session_value(tenant_id, _session_dated_key("iv_session_open"))
+            session_open = await cache.get_session_value(tenant_id, iv_open_key)
             if session_open is None:
-                await cache.set_session_value(tenant_id, _session_dated_key("iv_session_open"), iv_f)
+                await cache.set_session_value(tenant_id, iv_open_key, iv_f)
                 session_open = iv_f
             if config.iv_chg is None:
                 feed["iv_chg"] = iv_f - float(session_open)

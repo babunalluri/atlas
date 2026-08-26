@@ -211,6 +211,7 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
         )
         # One SessionFactory + one GUC for kite sync, state(), auto-ATM, and
         # (rarely) Param Chart metrics persist.
+        epoch_at_start = await cache.get_config_epoch(tenant_key)
         async with SessionFactory() as session:
             async with session.begin():
                 await apply_tenant_guc(session, tenant_id)
@@ -256,7 +257,15 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
         keep_last_good = should_preserve_computed_at_ms(payload)
         if not keep_last_good:
             payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
-        await cache.set_snapshot(tenant_key, payload)
+        payload = {**payload, "config_epoch": epoch_at_start}
+        wrote = await cache.set_snapshot(tenant_key, payload)
+        if not wrote:
+            logger.info(
+                "signal_ticker_stale_config_drop",
+                tenant_id=tenant_key,
+                config_epoch=epoch_at_start,
+            )
+            return False
         await seed_engine_enabled_metric(
             tenant_key,
             bool(payload.get("engine_enabled", config.engine_enabled)),
