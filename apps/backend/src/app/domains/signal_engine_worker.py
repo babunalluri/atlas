@@ -23,6 +23,7 @@ from app.domains.kite_ticker_hub import (
     token_map_from_quotes,
 )
 from app.domains.signal_engine import (
+    SignalEngineConfig,
     SignalEngineService,
     _compute_state_payload,
     seed_engine_enabled_metric,
@@ -212,48 +213,80 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
         # One SessionFactory + one GUC for kite sync, state(), auto-ATM, and
         # (rarely) Param Chart metrics persist.
         epoch_at_start = await cache.get_config_epoch(tenant_key)
-        async with SessionFactory() as session:
-            async with session.begin():
-                await apply_tenant_guc(session, tenant_id)
-                service = SignalEngineService(session, context)
-                config = await service._load_config()
-                await sync_kite_for_signal_tenant(
-                    tenant_id,
-                    auth_org_id=auth_org_id,
-                    session=session,
-                    context=context,
-                    engine=service,
-                    config=config,
-                )
-                prior = await cache.get_snapshot(tenant_key)
-                last_good = (
-                    prior
-                    if isinstance(prior, dict)
-                    and prior.get("feed_source")
-                    not in (None, "starting", "stopped")
-                    else None
-                )
-                payload = await _compute_state_payload(
-                    service, config=config, last_good=last_good
-                )
-                if payload.get("feed_source") == "live":
-                    await service.maybe_persist_auto_atm_symbols(payload)
-                if metrics_due:
-                    # SAVEPOINT so a Param Chart SQL abort cannot poison the
-                    # outer tick txn (Postgres 25P02 → commit fails → no snapshot).
-                    try:
-                        async with session.begin_nested():
-                            await ParamChartService(
-                                session, context
-                            ).persist_metrics_from_signal_snapshot(
-                                force=False, snapshot=payload
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "param_chart_metrics_from_signal_failed",
-                            tenant_id=tenant_key,
-                            error=str(exc)[:160],
+        payload: dict[str, Any] | None = None
+        config: SignalEngineConfig | None = None
+        try:
+            async with SessionFactory() as session:
+                async with session.begin():
+                    await apply_tenant_guc(session, tenant_id)
+                    service = SignalEngineService(session, context)
+                    config = await service._load_config()
+                    await sync_kite_for_signal_tenant(
+                        tenant_id,
+                        auth_org_id=auth_org_id,
+                        session=session,
+                        context=context,
+                        engine=service,
+                        config=config,
+                    )
+                    prior = await cache.get_snapshot(tenant_key)
+                    last_good = (
+                        prior
+                        if isinstance(prior, dict)
+                        and prior.get("feed_source")
+                        not in (None, "starting", "stopped")
+                        else None
+                    )
+                    # After a preset switch, never keep the previous index's board
+                    # as "last good" — that freezes STARTING / wrong CE/PE.
+                    if isinstance(last_good, dict) and config.underlying_symbol:
+                        prior_under = str(
+                            (last_good.get("underlying") or {}).get("symbol") or ""
                         )
+                        if prior_under and prior_under != config.underlying_symbol:
+                            last_good = None
+                    # SAVEPOINT around state(): wait_for cancel can abort PG mid-SQL;
+                    # without a nested txn the outer commit fails and set_snapshot
+                    # never runs → desk stuck on STARTING.
+                    async with session.begin_nested():
+                        payload = await _compute_state_payload(
+                            service, config=config, last_good=last_good
+                        )
+                    if payload.get("feed_source") == "live":
+                        try:
+                            await service.maybe_persist_auto_atm_symbols(payload)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "signal_auto_atm_persist_failed",
+                                tenant_id=tenant_key,
+                                error=str(exc)[:160],
+                            )
+                    if metrics_due:
+                        try:
+                            async with session.begin_nested():
+                                await ParamChartService(
+                                    session, context
+                                ).persist_metrics_from_signal_snapshot(
+                                    force=False, snapshot=payload
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "param_chart_metrics_from_signal_failed",
+                                tenant_id=tenant_key,
+                                error=str(exc)[:160],
+                            )
+        except Exception as exc:
+            logger.warning(
+                "signal_ticker_refresh_failed",
+                tenant_id=str(tenant_id),
+                error=str(exc),
+            )
+            # Still publish a computed timeout/starting frame if we have one —
+            # otherwise a poisoned commit leaves the desk on STARTING forever.
+            if payload is None or config is None:
+                return False
+        if payload is None or config is None:
+            return False
         keep_last_good = should_preserve_computed_at_ms(payload)
         if not keep_last_good:
             payload = {**payload, "computed_at_ms": int(time.time() * 1000)}

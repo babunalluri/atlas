@@ -1272,11 +1272,26 @@ async def _merge_levels_tier(
                 },
             )
 
-        # Warm tools under the memo lock before gather — invoke_tool is
+        # Warm tools under the memo lock before fan-out — invoke_tool is
         # session-free, so concurrent hist after one build is safe.
         await service._broker_tools()
-        # Concurrent hist: day + (5m + 1m when session open) + 60m.
-        coros: list[Any] = [_hist("day", daily_from, daily_to)]
+
+        # Persist day/CPR as soon as daily returns so a 45s state() cancel still
+        # leaves a warm levels cache for the next tick (no all-or-nothing loop).
+        daily_hist = await _hist("day", daily_from, daily_to)
+        daily_rows = _extract_candle_rows(daily_hist)
+        payload = levels_from_candles(
+            daily_candles=daily_rows,
+            intraday_5m=[],
+            spot=feed.get("nifty_ltp"),
+        )
+        payload.update(expiry_levels_from_daily(daily_rows, ref=now.date()))
+        if payload:
+            feed.update(payload)
+            await _cache_set(tenant_id, "levels", "medium", payload)
+            merged = True
+
+        coros: list[Any] = []
         if now > session_open:
             intra_from = session_open.strftime("%Y-%m-%d %H:%M:%S")
             intra_to = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -1284,26 +1299,29 @@ async def _merge_levels_tier(
             coros.append(_hist("minute", intra_from, intra_to))
         hour_from = (now - timedelta(days=5)).strftime("%Y-%m-%d")
         coros.append(_hist("60minute", hour_from, daily_to))
-        results = await asyncio.gather(*coros)
-        daily_hist = results[0]
+        if not coros:
+            return
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        intra_rows: list[Any] = []
+        minute_rows: list[Any] = []
+        hour_rows: list[Any] = []
+        idx = 0
         if now > session_open:
-            intra_hist = results[1]
-            minute_hist = results[2]
-            hour_hist = results[3]
-        else:
-            intra_hist = {}
-            minute_hist = {}
-            hour_hist = results[1]
-        daily_rows = _extract_candle_rows(daily_hist)
-        intra_rows = _extract_candle_rows(intra_hist)
-        minute_rows = _extract_candle_rows(minute_hist)
-        hour_rows = _extract_candle_rows(hour_hist)
-        payload = levels_from_candles(
-            daily_candles=daily_rows,
-            intraday_5m=intra_rows,
-            spot=feed.get("nifty_ltp"),
+            if not isinstance(results[idx], BaseException):
+                intra_rows = _extract_candle_rows(results[idx])
+            idx += 1
+            if not isinstance(results[idx], BaseException):
+                minute_rows = _extract_candle_rows(results[idx])
+            idx += 1
+        if idx < len(results) and not isinstance(results[idx], BaseException):
+            hour_rows = _extract_candle_rows(results[idx])
+        payload.update(
+            levels_from_candles(
+                daily_candles=daily_rows,
+                intraday_5m=intra_rows,
+                spot=feed.get("nifty_ltp"),
+            )
         )
-        payload.update(expiry_levels_from_daily(daily_rows, ref=now.date()))
         payload.update(
             intraday_indicators_from_candles(minute_rows, feed.get("nifty_ltp"))
         )
@@ -2073,9 +2091,9 @@ class SignalEngineService:
             await _invalidate_tenant_signal_cache(tenant_id)
             epoch = await cache.bump_config_epoch(tenant_id)
         else:
-            epoch = await cache.get_config_epoch(tenant_id)
             # Drop setup memo so the next tick loads the new overrides.
             await cache.delete_metric(tenant_id, "setup")
+            epoch = 0  # unused on this path (no starting/stopped stamp)
         # Re-seed boolean after invalidate so SSE fast path does not cold-load
         # after Start/Stop.
         await seed_engine_enabled_metric(tenant_id, enabled)
