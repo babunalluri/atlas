@@ -16,6 +16,7 @@ _RETRY_COOLDOWN_SECONDS = 5.0
 
 # Atomic INCR; always refresh TTL so sustained load cannot let the key expire
 # while slots are still held (which would reset the counter and over-admit).
+# Used by generic rate-limit concurrency — sandbox uses the ZSET form below.
 _ACQUIRE_SLOT_SCRIPT = """
 local count = redis.call('INCR', KEYS[1])
 if count > tonumber(ARGV[2]) then
@@ -24,6 +25,28 @@ if count > tonumber(ARGV[2]) then
 end
 redis.call('EXPIRE', KEYS[1], ARGV[1])
 return 1
+"""
+
+# Per-holder ZSET semaphore: score = acquire time (ms). Stale members are
+# reaped on every acquire so OOM / restart leaks cannot stick forever under load
+# (unlike INCR+EXPIRE refresh which keeps leaked counts alive indefinitely).
+_ACQUIRE_ZSET_SLOT_SCRIPT = """
+local now = tonumber(ARGV[1])
+local max_age = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl = tonumber(ARGV[5])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - max_age)
+if redis.call('ZCARD', KEYS[1]) >= limit then
+  return 0
+end
+redis.call('ZADD', KEYS[1], now, member)
+redis.call('EXPIRE', KEYS[1], ttl)
+return 1
+"""
+
+_RELEASE_ZSET_SLOT_SCRIPT = """
+return redis.call('ZREM', KEYS[1], ARGV[1])
 """
 
 _LEADER_RENEW_SCRIPT = """
@@ -134,6 +157,48 @@ async def release_counter_slot(key: str) -> None:
         val = await client.decr(key)
         if val < 0:
             await client.set(key, 0, ex=600)
+    except Exception:
+        await invalidate_redis()
+        raise
+
+
+async def acquire_zset_slot(
+    key: str,
+    *,
+    member: str,
+    limit: int,
+    max_age_seconds: int = 120,
+    ttl_seconds: int = 600,
+) -> bool:
+    """Acquire a named concurrency slot; reaps holders older than ``max_age_seconds``."""
+    client = await get_redis()
+    if client is None:
+        return False
+    now_ms = int(time.time() * 1000)
+    max_age_ms = max(1, int(max_age_seconds)) * 1000
+    try:
+        allowed = await client.eval(
+            _ACQUIRE_ZSET_SLOT_SCRIPT,
+            1,
+            key,
+            now_ms,
+            max_age_ms,
+            limit,
+            member,
+            ttl_seconds,
+        )
+        return int(allowed) == 1
+    except Exception:
+        await invalidate_redis()
+        raise
+
+
+async def release_zset_slot(key: str, member: str) -> None:
+    client = await get_redis()
+    if client is None:
+        return
+    try:
+        await client.eval(_RELEASE_ZSET_SLOT_SCRIPT, 1, key, member)
     except Exception:
         await invalidate_redis()
         raise

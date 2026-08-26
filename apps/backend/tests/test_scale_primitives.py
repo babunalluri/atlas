@@ -369,3 +369,56 @@ async def test_acquire_counter_slot_refreshes_ttl_every_time(monkeypatch):
     assert args[0] == "atlas:sandbox:conc:t"
     assert int(args[1]) == 600
     assert int(args[2]) == 4
+
+
+@pytest.mark.asyncio
+async def test_acquire_zset_slot_reaps_stale_and_releases(monkeypatch):
+    """Sandbox slots are named; stale holders are reaped so leaks cannot stick."""
+    store: dict[str, list[tuple[float, str]]] = {}
+    calls: list[str] = []
+
+    class FakeRedis:
+        async def eval(self, script, numkeys, *args):
+            key = args[0]
+            if "ZREMRANGEBYSCORE" in script:
+                calls.append("acquire")
+                now = float(args[1])
+                max_age = float(args[2])
+                limit = int(args[3])
+                member = str(args[4])
+                entries = [
+                    (score, mid)
+                    for score, mid in store.get(key, [])
+                    if score >= now - max_age
+                ]
+                if len(entries) >= limit:
+                    store[key] = entries
+                    return 0
+                entries.append((now, member))
+                store[key] = entries
+                return 1
+            calls.append("release")
+            member = str(args[1])
+            store[key] = [(s, m) for s, m in store.get(key, []) if m != member]
+            return 1
+
+    monkeypatch.setattr(
+        "app.core.redis_client.get_redis", AsyncMock(return_value=FakeRedis())
+    )
+    from app.core.redis_client import acquire_zset_slot, release_zset_slot
+
+    key = "atlas:sandbox:slots:t"
+    assert await acquire_zset_slot(
+        key, member="run-a", limit=1, max_age_seconds=120, ttl_seconds=600
+    )
+    assert (
+        await acquire_zset_slot(
+            key, member="run-b", limit=1, max_age_seconds=120, ttl_seconds=600
+        )
+        is False
+    )
+    await release_zset_slot(key, "run-a")
+    assert await acquire_zset_slot(
+        key, member="run-b", limit=1, max_age_seconds=120, ttl_seconds=600
+    )
+    assert "acquire" in calls and "release" in calls

@@ -7,6 +7,8 @@ import base64
 import hashlib
 import json
 import logging
+import random
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 MAX_RESULT_CHARS = 200_000
 DEFAULT_WALL_SECONDS = 30
+# How long a holder may keep a Redis slot before the next acquire reaps it.
+# Derived at runtime from settings.sandbox_wall_seconds (+ headroom) so the
+# reap age cannot drift below max wall time if the env ceiling changes.
+SLOT_MAX_AGE_HEADROOM_SECONDS = 60
+# Bounded wait when the pool is full (backpressure instead of instant fail storm).
+SLOT_WAIT_SECONDS = 8.0
+SLOT_RETRY_BASE_SECONDS = 0.05
+SLOT_RETRY_CAP_SECONDS = 0.4
 
 # Secrets (Authorization headers) stay process-local when possible. Redis may hold
 # a short-lived Fernet seal (keyed by SANDBOX_INTERNAL_TOKEN) so another worker /
@@ -116,7 +126,8 @@ def _run_redis_key(run_id: str) -> str:
 
 
 def _conc_redis_key(tenant_key: str) -> str:
-    return f"atlas:sandbox:conc:{tenant_key}"
+    # Distinct from the legacy INCR counter key ``atlas:sandbox:conc:…``.
+    return f"atlas:sandbox:slots:{tenant_key}"
 
 
 def _instance_url() -> str:
@@ -174,7 +185,7 @@ class SandboxOrchestrator:
         try:
             await self._register_run(run_id, request)
             try:
-                acquired = await self._acquire_slot()
+                acquired = await self._acquire_slot(run_id)
             except RuntimeError as exc:
                 return SandboxRunResult(ok=False, error=str(exc), run_id=run_id)
             if not acquired:
@@ -184,7 +195,7 @@ class SandboxOrchestrator:
             return await self._invoke_manager(run_id, request)
         finally:
             if acquired:
-                await self._release_slot()
+                await self._release_slot(run_id)
             if local_held and local_sem is not None:
                 local_sem.release()
             await self._unregister_run(run_id)
@@ -221,23 +232,47 @@ class SandboxOrchestrator:
             return
         await client.delete(_run_redis_key(run_id))
 
-    async def _acquire_slot(self) -> bool:
-        """Return True when a Redis slot was acquired (caller must release)."""
-        from app.core.redis_client import acquire_counter_slot
+    async def _acquire_slot(self, run_id: str) -> bool:
+        """Return True when a Redis slot was acquired (caller must release).
+
+        Waits with bounded backoff when the pool is full so callers apply
+        backpressure instead of instantly failing and retry-storming.
+        """
+        from app.core.redis_client import acquire_zset_slot
 
         client = await get_redis()
         if client is None:
             return False
         key = _conc_redis_key(self.tenant_key)
-        ok = await acquire_counter_slot(key, limit=self.concurrency_limit, ttl_seconds=600)
-        if not ok:
-            raise RuntimeError("Sandbox tenant concurrency limit exceeded")
-        return True
+        wall = int(get_settings().sandbox_wall_seconds)
+        max_age = max(wall + SLOT_MAX_AGE_HEADROOM_SECONDS, wall + 1)
+        deadline = time.monotonic() + SLOT_WAIT_SECONDS
+        attempt = 0
+        while True:
+            ok = await acquire_zset_slot(
+                key,
+                member=run_id,
+                limit=self.concurrency_limit,
+                max_age_seconds=max_age,
+                ttl_seconds=600,
+            )
+            if ok:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Sandbox tenant concurrency limit exceeded")
+            delay = min(
+                SLOT_RETRY_CAP_SECONDS,
+                SLOT_RETRY_BASE_SECONDS * (2**attempt),
+                remaining,
+            )
+            await asyncio.sleep(delay * (0.5 + random.random() * 0.5))  # noqa: S311
+            attempt += 1
 
-    async def _release_slot(self) -> None:
-        from app.core.redis_client import release_counter_slot
+    async def _release_slot(self, run_id: str) -> None:
+        from app.core.redis_client import release_zset_slot
 
-        await release_counter_slot(_conc_redis_key(self.tenant_key))
+        await release_zset_slot(_conc_redis_key(self.tenant_key), run_id)
 
     async def handle_http_proxy(
         self,
@@ -416,7 +451,9 @@ async def _forward_proxy_to_owner(
                     "status_code": response.status_code,
                 }
             body = response.json()
-            return body if isinstance(body, dict) else {"ok": False, "error": "Invalid owner response"}
+            if isinstance(body, dict):
+                return body
+            return {"ok": False, "error": "Invalid owner response"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("forward sandbox proxy failed run_id=%s err=%s", run_id, exc)
         return {"ok": False, "error": "Failed to reach owning replica", "status_code": 502}
