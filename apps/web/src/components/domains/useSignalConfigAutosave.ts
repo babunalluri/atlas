@@ -235,26 +235,6 @@ export function useSignalConfigAutosave(
     [saveStatus],
   );
 
-  const onPresetChange = useCallback(
-    (value: string) => {
-      setPresetKey(value);
-      if (value === CUSTOM_PRESET) return;
-      const preset = presets.find((p) => p.symbol === value);
-      if (!preset) return;
-      const fut =
-        preset.fut_symbol?.trim() || suggestFutSymbol(preset.symbol) || "";
-      // Backend mirrors fut→nifty_fut and clears CE/PE when underlying/FUT changes.
-      // Do not send nifty_fut_symbol / empty ce_symbol (breaks tsc + clearing guard).
-      patchConfig({
-        underlying_symbol: preset.symbol,
-        underlying_label: preset.label,
-        strike_step: preset.strike_step,
-        fut_symbol: fut,
-      });
-    },
-    [patchConfig, presets],
-  );
-
   /** Options Lab–style: apply screener (or chain) pick into Signal setup fields. */
   const applyInstrumentSelection = useCallback(
     (selection: {
@@ -267,8 +247,10 @@ export function useSignalConfigAutosave(
       clearOptions?: boolean;
     }) => {
       const match = presets.find((p) => p.symbol === selection.underlying_symbol);
+      // Known preset strike wins over screener row / caller so dropdown and
+      // screener share one precedence (indices keep curated steps).
       const strike =
-        selection.strike_step ?? match?.strike_step ?? 50;
+        match?.strike_step ?? selection.strike_step ?? 50;
       // Equity screener picks are often absent from the initial index-only list —
       // upsert so PRESET shows "ASIANPAINT" instead of "Custom…".
       setPresets((prev) => {
@@ -312,6 +294,27 @@ export function useSignalConfigAutosave(
       });
     },
     [patchConfig, presets],
+  );
+
+  /** Dropdown PRESET — same entry point as screener / desk handoff. */
+  const onPresetChange = useCallback(
+    (value: string) => {
+      if (value === CUSTOM_PRESET) {
+        setPresetKey(CUSTOM_PRESET);
+        return;
+      }
+      const preset = presets.find((p) => p.symbol === value);
+      if (!preset) return;
+      applyInstrumentSelection({
+        underlying_symbol: preset.symbol,
+        underlying_label: preset.label,
+        fut_symbol:
+          preset.fut_symbol?.trim() || suggestFutSymbol(preset.symbol) || "",
+        strike_step: preset.strike_step,
+        clearOptions: true,
+      });
+    },
+    [applyInstrumentSelection, presets],
   );
 
   return {

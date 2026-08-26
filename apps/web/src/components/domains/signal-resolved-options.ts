@@ -35,6 +35,19 @@ export function mergeResolvedOptionSymbols(
     next.pe_symbol = pe;
     changed = true;
   }
+  // Partial setup (stale CE + empty PE, or the reverse): when clean and live
+  // has both sides, adopt the full ATM pair so the bar matches the board.
+  if (
+    !dirty &&
+    ce &&
+    pe &&
+    ((localCe && !localPe) || (!localCe && localPe)) &&
+    (ce !== localCe || pe !== localPe)
+  ) {
+    next.ce_symbol = ce;
+    next.pe_symbol = pe;
+    changed = true;
+  }
   // ATM roll: both sides already set, server moved, and local is clean.
   if (
     !dirty &&

@@ -1036,22 +1036,27 @@ export function SignalMetricsPanel({
 
   const onSelectScreenerUnderlying = useCallback(
     (row: OptionsScreenerRow) => {
-      const preset = presets.find((item) => item.symbol === row.underlying_symbol);
-      const strike =
-        row.strike_step ??
-        preset?.strike_step ??
-        config?.strike_step ??
-        50;
+      // strike_step precedence lives in applyInstrumentSelection (preset wins).
       applyInstrumentSelection({
         underlying_symbol: row.underlying_symbol,
         underlying_label: row.underlying_label,
         fut_symbol: row.fut_symbol,
-        strike_step: strike > 0 ? strike : 50,
+        strike_step: row.strike_step && row.strike_step > 0 ? row.strike_step : undefined,
       });
       if (row.atm != null) setScreenerAtmHint(Math.round(row.atm));
+      else setScreenerAtmHint(null);
       setScreenerOpen(false);
     },
-    [applyInstrumentSelection, config?.strike_step, presets],
+    [applyInstrumentSelection],
+  );
+
+  const onPresetChangeFromBar = useCallback(
+    (value: string) => {
+      // Dropdown path has no screener ATM — drop a stale hint from a prior pick.
+      setScreenerAtmHint(null);
+      onPresetChange(value);
+    },
+    [onPresetChange],
   );
 
   // Mirror Options Lab stream / setup into Signal Engine when this tab mounts
@@ -1472,7 +1477,7 @@ export function SignalMetricsPanel({
           presets={presets}
           presetKey={presetKey}
           presetLocked={presetLocked}
-          onPresetChange={onPresetChange}
+          onPresetChange={onPresetChangeFromBar}
           patchConfig={patchConfig}
           loading={configLoading}
           atmHint={atmHint}

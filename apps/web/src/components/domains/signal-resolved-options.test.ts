@@ -82,6 +82,23 @@ describe("mergeResolvedOptionSymbols", () => {
     expect(next).toBeNull();
   });
 
+  it("replaces a partial pair (stale CE + empty PE) when clean", () => {
+    const prev = baseConfig({
+      ce_symbol: "NFO:NIFTY26SEP24000CE",
+      pe_symbol: "",
+    });
+    const next = mergeResolvedOptionSymbols(
+      prev,
+      {
+        ce_symbol: "NFO:NIFTY26SEP24200CE",
+        pe_symbol: "NFO:NIFTY26SEP24200PE",
+      },
+      signalConfigSnapshot(prev),
+    );
+    expect(next?.ce_symbol).toBe("NFO:NIFTY26SEP24200CE");
+    expect(next?.pe_symbol).toBe("NFO:NIFTY26SEP24200PE");
+  });
+
   it("returns null when nothing to apply", () => {
     const prev = baseConfig({
       ce_symbol: "NFO:NIFTY26SEP24200CE",
