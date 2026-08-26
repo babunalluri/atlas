@@ -3662,6 +3662,8 @@ export interface SignalEngineState {
   has_broker: boolean;
   engine_enabled?: boolean;
   engine_active?: boolean;
+  /** True while a provisional Start snapshot is warming (SSE paint). */
+  engine_computing?: boolean;
   /** Wall-clock ms when the snapshot was computed (worker / stream). */
   computed_at_ms?: number;
   /** Age of the snapshot in ms; null when computed_at_ms is unknown. */
@@ -3679,6 +3681,14 @@ export interface SignalEngineState {
   live_quote_missing?: boolean;
   team_slug: string;
   underlying?: { symbol: string; label: string };
+  /** Live ticker health from the shared Kite hub (ws | rest). */
+  ticker?: {
+    connected?: boolean;
+    subscribed?: number;
+    last_tick_age_s?: number | null;
+    book_alive?: boolean;
+    path?: "ws" | "rest" | string;
+  };
 }
 
 export interface SignalPublishResult {

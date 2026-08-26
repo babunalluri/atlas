@@ -77,13 +77,24 @@ function activeFutMonth(when: Date): { year: number; month: number } {
   return { year, month };
 }
 
-/** Monthly FUT symbol for NSE/BFO index or equity underlyings (e.g. NFO:RELIANCE26AUGFUT). */
-export function suggestFutSymbol(
+function shiftCalendarMonth(
+  year: number,
+  month: number,
+  delta: number,
+): { year: number; month: number } {
+  const zeroBased = year * 12 + (month - 1) + delta;
+  return {
+    year: Math.floor(zeroBased / 12),
+    month: (zeroBased % 12) + 1,
+  };
+}
+
+function futSymbolForMonth(
   underlyingSymbol: string,
-  when: Date = new Date(),
+  year: number,
+  month: number,
 ): string {
   const meta = FUT_ROOT_BY_UNDERLYING[underlyingSymbol.trim()];
-  const { year, month } = activeFutMonth(when);
   const yy = String(year).slice(-2);
   const mon = MONTH_CODES[month - 1];
   if (meta) {
@@ -103,6 +114,15 @@ export function suggestFutSymbol(
   ]);
   if (!root || indexRoots.has(root)) return "";
   return `NFO:${root}${yy}${mon}FUT`;
+}
+
+/** Monthly FUT symbol for NSE/BFO index or equity underlyings (e.g. NFO:RELIANCE26AUGFUT). */
+export function suggestFutSymbol(
+  underlyingSymbol: string,
+  when: Date = new Date(),
+): string {
+  const { year, month } = activeFutMonth(when);
+  return futSymbolForMonth(underlyingSymbol, year, month);
 }
 
 export function isOptionSymbol(symbol: string | null | undefined): boolean {
@@ -204,13 +224,21 @@ export function buildStrikeStepOptions(
 export function buildFutOptions(
   futSymbol: string | null | undefined,
   underlyingSymbol?: string | null,
+  when: Date = new Date(),
 ) {
   const values: string[] = [];
   const current = futSymbol?.trim();
   if (current) values.push(current);
-  if (underlyingSymbol?.trim()) {
-    const suggested = suggestFutSymbol(underlyingSymbol);
-    if (suggested && suggested !== current) values.push(suggested);
+  const underlying = underlyingSymbol?.trim();
+  if (underlying) {
+    const front = suggestFutSymbol(underlying, when);
+    if (front) values.push(front);
+    // Always offer the next monthly too — near expiry the saved/front month can
+    // already be empty on Kite while calendar still says "this month".
+    const { year, month } = activeFutMonth(when);
+    const next = shiftCalendarMonth(year, month, 1);
+    const nextSym = futSymbolForMonth(underlying, next.year, next.month);
+    if (nextSym) values.push(nextSym);
   }
   return uniqueOptions(values);
 }

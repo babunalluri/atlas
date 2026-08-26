@@ -19,6 +19,31 @@ function configSnapshot(config: SignalEngineAdminConfig): string {
   return JSON.stringify(config);
 }
 
+/** Fields autosave may PATCH. Never include engine_enabled — Start/Stop only. */
+function diffConfigPatch(
+  previousJson: string,
+  next: SignalEngineAdminConfig,
+): Partial<SignalEngineAdminConfig> {
+  let previous: Partial<SignalEngineAdminConfig> = {};
+  try {
+    previous = JSON.parse(previousJson || "{}") as Partial<SignalEngineAdminConfig>;
+  } catch {
+    previous = {};
+  }
+  const patch: Partial<SignalEngineAdminConfig> = {};
+  const keys = Object.keys(next) as (keyof SignalEngineAdminConfig)[];
+  for (const key of keys) {
+    if (key === "engine_enabled") continue;
+    const a = JSON.stringify(previous[key] ?? null);
+    const b = JSON.stringify(next[key] ?? null);
+    if (a !== b) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (patch as any)[key] = next[key];
+    }
+  }
+  return patch;
+}
+
 export function useSignalConfigAutosave(
   getAccessToken: () => Promise<string | null>,
   enabled: boolean,
@@ -33,11 +58,19 @@ export function useSignalConfigAutosave(
   const lastSavedRef = useRef("");
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeqRef = useRef(0);
+  /** Bumps when an immediate Start/Stop fires so in-flight autosaves abort. */
+  const immediateEpochRef = useRef(0);
 
   const persist = useCallback(
-    async (next: SignalEngineAdminConfig) => {
+    async (next: SignalEngineAdminConfig, epoch: number) => {
       const snapshot = configSnapshot(next);
       if (snapshot === lastSavedRef.current) return;
+
+      const patch = diffConfigPatch(lastSavedRef.current, next);
+      if (Object.keys(patch).length === 0) {
+        lastSavedRef.current = snapshot;
+        return;
+      }
 
       const seq = ++saveSeqRef.current;
       setSaveStatus("saving");
@@ -45,8 +78,10 @@ export function useSignalConfigAutosave(
       try {
         const token = await getAccessToken();
         if (!token) return;
-        await patchSignalConfig(token, next);
+        if (epoch !== immediateEpochRef.current) return;
+        await patchSignalConfig(token, patch);
         if (seq !== saveSeqRef.current) return;
+        if (epoch !== immediateEpochRef.current) return;
         lastSavedRef.current = snapshot;
         setSaveStatus("saved");
       } catch (err) {
@@ -66,9 +101,10 @@ export function useSignalConfigAutosave(
         setSaveStatus("idle");
         return;
       }
+      const epoch = immediateEpochRef.current;
       setSaveStatus("pending");
       saveTimerRef.current = setTimeout(() => {
-        void persist(next);
+        void persist(next, epoch);
       }, SAVE_DEBOUNCE_MS);
     },
     [persist],
@@ -125,6 +161,8 @@ export function useSignalConfigAutosave(
   const patchConfigImmediate = useCallback(
     async (patch: Partial<SignalEngineAdminConfig>) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      immediateEpochRef.current += 1;
+      const epoch = immediateEpochRef.current;
       let next: SignalEngineAdminConfig | null = null;
       setConfig((prev) => {
         if (!prev) return prev;
@@ -139,6 +177,7 @@ export function useSignalConfigAutosave(
         const token = await getAccessToken();
         if (!token) return;
         await patchSignalConfig(token, patch);
+        if (epoch !== immediateEpochRef.current) return;
         lastSavedRef.current = snapshot;
         setSaveStatus("saved");
       } catch (err) {

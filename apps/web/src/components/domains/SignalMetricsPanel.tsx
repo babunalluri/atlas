@@ -1192,15 +1192,27 @@ export function SignalMetricsPanel({
   const warnings = state?.live_warnings ?? [];
   const mockMode = Boolean(config?.mock ?? state?.mock);
   const fetchedLabel = formatEvaluatedAt(state?.evaluated_at);
+  const feedSource = state?.feed_source ?? null;
+  // Only the provisional Start frame is "Starting". A live snapshot with
+  // engine_computing=true just means a refresh is in flight under load —
+  // do not flip Running → Starting on every lock heartbeat.
+  const engineStarting = feedSource === "starting";
+  // Prefer server stopped frame over local Start optimism when SSE still says stopped.
+  const serverStopped =
+    feedSource === "stopped" || state?.engine_enabled === false;
+  const showStopped =
+    !engineEnabled || (serverStopped && !engineStarting);
   const noLivePrint =
-    Boolean(state?.live_quote_missing) ||
-    warnings.some((w) =>
-      /no live print|no live quote|credentials missing|access_token rejected|api_key is required|select an underlying/i.test(
-        w,
-      ),
-    );
+    !engineStarting &&
+    (Boolean(state?.live_quote_missing) ||
+      warnings.some((w) =>
+        /no live print|no live quote|credentials missing|access_token rejected|api_key is required|select an underlying/i.test(
+          w,
+        ),
+      ));
   // Engine/stream can be up while broker LTP is missing — don't call that Running.
-  const engineHealthy = engineRunning && !noLivePrint;
+  const engineHealthy =
+    !showStopped && !engineStarting && engineRunning && !noLivePrint;
 
   return (
     <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-raised/20 p-2">
@@ -1209,32 +1221,58 @@ export function SignalMetricsPanel({
           <div className="flex min-w-0 flex-wrap items-center gap-2">
               <Badge
                 tone={
-                  !engineEnabled
+                  showStopped
                     ? "neutral"
-                    : noLivePrint
-                      ? "warning"
-                      : engineStale
+                    : engineStarting
+                      ? "info"
+                      : noLivePrint
                         ? "warning"
-                        : engineHealthy
-                          ? "success"
-                          : "warning"
+                        : engineStale
+                          ? "warning"
+                          : engineHealthy
+                            ? "success"
+                            : "warning"
                 }
                 live={engineHealthy}
               >
-                {!engineEnabled
+                {showStopped
                   ? "Stopped"
-                  : noLivePrint
-                    ? "No quote"
-                    : engineStale
-                      ? "Stale"
-                      : engineHealthy
-                        ? "Running"
-                        : "Reconnecting"}
+                  : engineStarting
+                    ? "Starting"
+                    : noLivePrint
+                      ? "No quote"
+                      : engineStale
+                        ? "Stale"
+                        : engineHealthy
+                          ? "Running"
+                          : "Reconnecting"}
               </Badge>
-              {engineEnabled ? (
+              {!showStopped ? (
                 <Badge tone={streaming ? "success" : "warning"} dot={false}>
                   Stream {streaming ? "connected" : "…"}
                 </Badge>
+              ) : null}
+              {!showStopped && state?.ticker?.path ? (
+                <span
+                  title={
+                    state.ticker.path === "ws"
+                      ? "Quotes from Kite WebSocket book"
+                      : "Quotes via REST/sandbox — may lag under load"
+                  }
+                >
+                  <Badge
+                    tone={
+                      state.ticker.path === "ws"
+                        ? "success"
+                        : state.ticker.path === "rest"
+                          ? "warning"
+                          : "neutral"
+                    }
+                    dot={false}
+                  >
+                    Quotes {state.ticker.path.toUpperCase()}
+                  </Badge>
+                </span>
               ) : null}
               {mockMode ? (
                 <Badge tone="info">Mock</Badge>
@@ -1247,12 +1285,14 @@ export function SignalMetricsPanel({
             <span className="text-xs text-slate-muted">
               {state?.underlying?.label ?? "No underlying"} ·{" "}
               {state ? `${state.passed}/${state.evaluable} passing` : "—"} ·{" "}
-              {engineEnabled
-                ? mockMode
-                  ? "mock feed"
-                  : (state?.feed_source ?? "…")
-                : "engine stopped"}
-              {state && state.has_broker === false && !mockMode
+              {showStopped
+                ? "engine stopped"
+                : engineStarting
+                  ? "starting…"
+                  : mockMode
+                    ? "mock feed"
+                    : (feedSource ?? "…")}
+              {state && state.has_broker === false && !mockMode && !showStopped
                 ? " · broker not bound"
                 : ""}
             </span>

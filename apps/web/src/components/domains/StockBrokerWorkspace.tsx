@@ -230,26 +230,35 @@ export function StockBrokerWorkspace({
                 );
               })}
             </div>
-            {deskTab === "signals" ? (
-              <div className="mt-3 min-h-0 flex-1">
-                <SignalMetricsPanel
-                  deskSnapshot={data.desk_snapshot}
-                  brokerTools={data.broker_tools ?? []}
-                  refreshing={refreshing}
-                  onRefreshBooks={onRefresh}
-                  fetchedAt={data.fetched_at}
-                  rangeDays={data.range_days}
-                />
-              </div>
-            ) : deskTab === "param-chart" ? (
+            {/* Keep Signal mounted (hidden) so /admin/signals/stream + Redis
+                watch stay alive when the user flips to Param Chart / Options Lab.
+                Unmounting aborted SSE and left the board on dashes / stale. */}
+            <div
+              className={cn(
+                "mt-3 min-h-0 flex-1",
+                deskTab !== "signals" && "hidden",
+              )}
+              aria-hidden={deskTab !== "signals"}
+            >
+              <SignalMetricsPanel
+                deskSnapshot={data.desk_snapshot}
+                brokerTools={data.broker_tools ?? []}
+                refreshing={refreshing}
+                onRefreshBooks={onRefresh}
+                fetchedAt={data.fetched_at}
+                rangeDays={data.range_days}
+              />
+            </div>
+            {deskTab === "param-chart" ? (
               <div className="mt-3 min-h-0 flex-1">
                 <ParamChartPanel active />
               </div>
-            ) : (
+            ) : null}
+            {deskTab === "options-lab" ? (
               <div className="mt-3 min-h-0 flex-1">
                 <OptionsLabPanel active />
               </div>
-            )}
+            ) : null}
           </div>
         ) : null}
 

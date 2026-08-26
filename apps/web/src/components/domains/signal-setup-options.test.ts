@@ -42,10 +42,13 @@ describe("signal setup options", () => {
     );
   });
 
-  it("buildFutOptions dedupes current and suggested symbols", () => {
+  it("buildFutOptions includes current, front month, and next month", () => {
+    const midAugust = new Date("2026-08-20T06:00:00+05:30");
     expect(
-      buildFutOptions("NFO:NIFTY26AUGFUT", "NSE:NIFTY 50").map((o) => o.value),
-    ).toEqual(["NFO:NIFTY26AUGFUT"]);
+      buildFutOptions("NFO:NIFTY26AUGFUT", "NSE:NIFTY 50", midAugust).map(
+        (o) => o.value,
+      ),
+    ).toEqual(["NFO:NIFTY26AUGFUT", "NFO:NIFTY26SEPFUT"]);
     expect(buildFutOptions("", "")).toEqual([]);
   });
 
