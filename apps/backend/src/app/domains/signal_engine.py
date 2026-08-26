@@ -121,10 +121,16 @@ def _engine_starting_payload(config: "SignalEngineConfig") -> dict[str, Any]:
     """Provisional SSE frame so Start never leaves the desk on a stale stopped snapshot.
 
     Includes a full metric skeleton (null values) so the UI paints the board
-    immediately instead of ``Waiting for signal stream…``.
+    immediately instead of ``Waiting for signal stream…``. Rows must not assert
+    entry readiness — wall-clock rules (e.g. before_time) must not light the
+    notify path during warm-up.
     """
     now_ms = int(time.time() * 1000)
     evaluated = evaluate_signal_state(config, {"source": "starting"})
+    rows = [
+        {**row, "value": None, "passed": None}
+        for row in (evaluated.get("metrics") or [])
+    ]
     return {
         "engine_enabled": True,
         "engine_active": True,
@@ -134,11 +140,10 @@ def _engine_starting_payload(config: "SignalEngineConfig") -> dict[str, Any]:
         "feed_source": "starting",
         "live_quote_missing": False,
         "live_warnings": ["Starting engine — warming live quotes…"],
-        "metrics": evaluated["metrics"],
-        "passed": evaluated["passed"],
-        "evaluable": evaluated["evaluable"],
-        "entry_ready": evaluated.get("entry_ready", False),
-        "entry": evaluated.get("entry"),
+        "metrics": rows,
+        "passed": 0,
+        "evaluable": 0,
+        "entry_ready": False,
         "has_broker": True,
         "team_slug": SIGNAL_TEAM_SLUG,
         "underlying": {
@@ -188,7 +193,10 @@ async def seed_stream_cold_frame(
     existing = await cache.get_snapshot(tenant_id)
     if existing is not None:
         computing = await cache.compute_lock_held(tenant_id)
-        need_refresh = existing.get("feed_source") in (None, "starting") and not computing
+        need_refresh = (
+            existing.get("feed_source") in (None, "starting", "stopped")
+            and not computing
+        )
         return (
             _annotate_snapshot_freshness(existing, computing=computing),
             need_refresh,
@@ -383,8 +391,6 @@ async def stream_frame_from_cache(tenant_id: str) -> dict[str, Any] | None:
         return None
     if enabled:
         await cache.touch_watcher(tenant_id)
-        # Re-stamp so open desks do not fall back to Postgres every medium TTL.
-        await seed_engine_enabled_metric(tenant_id, True)
         computing = await cache.compute_lock_held(tenant_id)
         return _annotate_snapshot_freshness(snapshot, computing=computing)
     return _apply_engine_stopped_overlay(snapshot)
@@ -547,6 +553,10 @@ async def _cache_get(tenant_id: str, metric_id: str) -> Any | None:
 
 async def _cache_set(tenant_id: str, metric_id: str, tier: Tier, value: Any) -> None:
     await cache.set_metric(tenant_id, metric_id, tier, value)
+
+
+async def _cache_delete(tenant_id: str, metric_id: str) -> None:
+    await cache.delete_metric(tenant_id, metric_id)
 
 
 def _round_strike(ltp: float, step: int) -> int:
@@ -1169,50 +1179,40 @@ async def _merge_levels_tier(
         daily_from = (now - timedelta(days=LEVELS_DAILY_HISTORY_DAYS)).strftime("%Y-%m-%d")
         daily_to = now.strftime("%Y-%m-%d")
         session_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        daily_hist = await service._invoke_broker_tool(
-            "get_historical_candles",
-            {
-                "instrument_token": token,
-                "interval": "day",
-                "from_date": daily_from,
-                "to_date": daily_to,
-            },
-        )
-        # Pre-open (before 09:15 IST): skip same-day intraday — Kite 400s when from>to.
+
+        async def _hist(interval: str, from_date: str, to_date: str) -> Any:
+            return await service._invoke_broker_tool(
+                "get_historical_candles",
+                {
+                    "instrument_token": token,
+                    "interval": interval,
+                    "from_date": from_date,
+                    "to_date": to_date,
+                },
+            )
+
+        # Warm tools under the memo lock before gather — invoke_tool is
+        # session-free, so concurrent hist after one build is safe.
+        await service._broker_tools()
+        # Concurrent hist: day + (5m + 1m when session open) + 60m.
+        coros: list[Any] = [_hist("day", daily_from, daily_to)]
         if now > session_open:
             intra_from = session_open.strftime("%Y-%m-%d %H:%M:%S")
             intra_to = now.strftime("%Y-%m-%d %H:%M:%S")
-            intra_hist = await service._invoke_broker_tool(
-                "get_historical_candles",
-                {
-                    "instrument_token": token,
-                    "interval": "5minute",
-                    "from_date": intra_from,
-                    "to_date": intra_to,
-                },
-            )
-            minute_hist = await service._invoke_broker_tool(
-                "get_historical_candles",
-                {
-                    "instrument_token": token,
-                    "interval": "minute",
-                    "from_date": intra_from,
-                    "to_date": intra_to,
-                },
-            )
+            coros.append(_hist("5minute", intra_from, intra_to))
+            coros.append(_hist("minute", intra_from, intra_to))
+        hour_from = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+        coros.append(_hist("60minute", hour_from, daily_to))
+        results = await asyncio.gather(*coros)
+        daily_hist = results[0]
+        if now > session_open:
+            intra_hist = results[1]
+            minute_hist = results[2]
+            hour_hist = results[3]
         else:
             intra_hist = {}
             minute_hist = {}
-        hour_from = (now - timedelta(days=5)).strftime("%Y-%m-%d")
-        hour_hist = await service._invoke_broker_tool(
-            "get_historical_candles",
-            {
-                "instrument_token": token,
-                "interval": "60minute",
-                "from_date": hour_from,
-                "to_date": daily_to,
-            },
-        )
+            hour_hist = results[1]
         daily_rows = _extract_candle_rows(daily_hist)
         intra_rows = _extract_candle_rows(intra_hist)
         minute_rows = _extract_candle_rows(minute_hist)
@@ -1798,6 +1798,8 @@ class SignalEngineService:
         self.tools = ToolDefinitionRepository(session, context)
         self.tool_versions = ToolDefinitionVersionRepository(session, context)
         self._last_quote_error: str | None = None
+        self._broker_tools_memo: list[Any] | None = None
+        self._broker_tools_lock = asyncio.Lock()
 
     @staticmethod
     def _config_blob_settings(definition: Any) -> dict[str, Any]:
@@ -1845,7 +1847,9 @@ class SignalEngineService:
         return None
 
     async def _load_config(self) -> SignalEngineConfig:
-        return SignalEngineConfig.from_settings(await self._collect_settings())
+        # Reuse the Redis-memoized setup blob (Start/Stop already invalidates).
+        config, _has_broker, _team_ready = await self._load_setup()
+        return config
 
     async def _has_quote_binding(self) -> bool:
         """True when a non-signal tenant_python toolkit is bound (likely broker quotes)."""
@@ -2046,6 +2050,9 @@ class SignalEngineService:
             "nifty_fut_symbol": atm_patch.get("nifty_fut_symbol") or fut,
         }
         await self._patch_tool_settings(tool, write_patch)
+        # Fix 4 made _load_config read the setup memo — drop it so the next
+        # tick sees persisted CE/PE and the auto-ATM gate can stick.
+        await _cache_delete(tenant_id, "setup")
         if not filling_empty:
             await cache.set_metric(tenant_id, "auto_atm_persist_gate", "medium", True)
         logger.info(
@@ -2116,28 +2123,34 @@ class SignalEngineService:
             yield config, version, binding, None
 
     async def _broker_tools(self) -> list[Any]:
-        factory = AgentFactoryService(self.session, self.context)
-        fns: list[Any] = []
-        async for _team, _version, binding, _source in self._iter_signal_bindings():
-            if binding.tool_definition_id is None:
-                continue
-            try:
-                built = await factory._build_tool(binding)
-            except McpToolSkipped:
-                continue
-            except Exception as exc:
-                logger.warning(
-                    "signal_broker_tool_build_failed",
-                    error=str(exc)[:240],
-                    tool_id=str(binding.tool_definition_id),
-                )
-                continue
-            callables = built if isinstance(built, list) else [built]
-            for fn in callables:
-                name = getattr(fn, "__name__", "")
-                if name in SIGNAL_BROKER_CAPABILITIES:
-                    fns.append(fn)
-        return fns
+        if self._broker_tools_memo is not None:
+            return self._broker_tools_memo
+        async with self._broker_tools_lock:
+            if self._broker_tools_memo is not None:
+                return self._broker_tools_memo
+            factory = AgentFactoryService(self.session, self.context)
+            fns: list[Any] = []
+            async for _team, _version, binding, _source in self._iter_signal_bindings():
+                if binding.tool_definition_id is None:
+                    continue
+                try:
+                    built = await factory._build_tool(binding)
+                except McpToolSkipped:
+                    continue
+                except Exception as exc:
+                    logger.warning(
+                        "signal_broker_tool_build_failed",
+                        error=str(exc)[:240],
+                        tool_id=str(binding.tool_definition_id),
+                    )
+                    continue
+                callables = built if isinstance(built, list) else [built]
+                for fn in callables:
+                    name = getattr(fn, "__name__", "")
+                    if name in SIGNAL_BROKER_CAPABILITIES:
+                        fns.append(fn)
+            self._broker_tools_memo = fns
+            return fns
 
     async def _invoke_broker_tool(
         self,

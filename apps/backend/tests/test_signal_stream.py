@@ -239,8 +239,13 @@ async def test_engine_starting_payload_has_metric_skeleton() -> None:
     assert payload["engine_computing"] is True
     assert len(payload["metrics"]) > 0
     assert all("id" in row and "label" in row for row in payload["metrics"])
-    # Values stay empty until the live tick lands.
-    assert all(row.get("value") is None or row.get("rule") == "before_time" for row in payload["metrics"])
+    # No wall-clock / entry leak during warm-up.
+    assert all(row.get("value") is None for row in payload["metrics"])
+    assert all(row.get("passed") is None for row in payload["metrics"])
+    assert payload["passed"] == 0
+    assert payload["evaluable"] == 0
+    assert payload["entry_ready"] is False
+    assert "entry" not in payload
 
 
 @pytest.mark.asyncio
@@ -266,6 +271,8 @@ async def test_seed_stream_cold_frame_does_not_compute_state() -> None:
     assert should_refresh is True
     assert payload["feed_source"] == "starting"
     assert len(payload["metrics"]) > 0
+    assert payload["entry_ready"] is False
+    assert "entry" not in payload
     assert await cache.get_metric(tenant, "engine_enabled") is True
     snap = await cache.get_snapshot(tenant)
     assert snap is not None
@@ -301,6 +308,173 @@ async def test_seed_stream_cold_frame_reuses_existing_snapshot() -> None:
     assert should_refresh is False
     assert payload["passed"] == 7
     assert payload["feed_source"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_seed_stream_cold_frame_refreshes_stopped_while_enabled() -> None:
+    from app.domains.signal_engine import SignalEngineConfig, seed_stream_cold_frame
+
+    tenant = "tenant-stopped-enabled"
+    await cache.set_snapshot(
+        tenant,
+        {
+            "engine_enabled": False,
+            "feed_source": "stopped",
+            "passed": 0,
+            "metrics": [],
+            "computed_at_ms": 1_700_000_000_000,
+        },
+    )
+
+    class _StubService:
+        context = type("Ctx", (), {"tenant_id": tenant, "auth_org_id": "org"})()
+
+        async def _load_config(self):
+            return SignalEngineConfig(engine_enabled=True)
+
+    _payload, should_refresh = await seed_stream_cold_frame(_StubService())  # type: ignore[arg-type]
+    assert should_refresh is True
+
+
+@pytest.mark.asyncio
+async def test_broker_tools_memoized_on_service() -> None:
+    from unittest.mock import MagicMock
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    session = MagicMock()
+    session.info = {"tenant_id": uuid.uuid4()}
+    ctx = TenantContext(
+        tenant_id=session.info["tenant_id"],
+        user_id="u",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+    )
+    service = SignalEngineService(session, ctx)
+
+    async def fake_iter():
+        if False:  # pragma: no cover
+            yield None
+        return
+
+    service._iter_signal_bindings = fake_iter  # type: ignore[method-assign]
+    first = await service._broker_tools()
+    second = await service._broker_tools()
+    assert first is second
+    assert first == []
+
+
+@pytest.mark.asyncio
+async def test_broker_tools_memo_dedupes_concurrent_builders() -> None:
+    import asyncio
+    from unittest.mock import MagicMock
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    session = MagicMock()
+    session.info = {"tenant_id": uuid.uuid4()}
+    ctx = TenantContext(
+        tenant_id=session.info["tenant_id"],
+        user_id="u",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+    )
+    service = SignalEngineService(session, ctx)
+    builds = 0
+    peak = 0
+    in_flight = 0
+
+    async def slow_iter():
+        nonlocal builds, peak, in_flight
+        builds += 1
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.05)
+        in_flight -= 1
+        if False:  # pragma: no cover
+            yield None
+        return
+
+    service._iter_signal_bindings = slow_iter  # type: ignore[method-assign]
+    results = await asyncio.gather(
+        service._broker_tools(),
+        service._broker_tools(),
+        service._broker_tools(),
+    )
+    assert builds == 1
+    assert peak == 1
+    assert results[0] is results[1] is results[2]
+
+
+@pytest.mark.asyncio
+async def test_auto_atm_persist_clears_setup_memo() -> None:
+    """Persisting CE/PE must drop the setup cache or Fix 4 re-reads empties."""
+    from unittest.mock import AsyncMock, MagicMock
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineConfig, SignalEngineService, _cache_set
+    from app.tenancy.context import TenantContext
+
+    tenant = str(uuid.uuid4())
+    await _cache_set(
+        tenant,
+        "setup",
+        "medium",
+        {
+            "settings": {
+                "engine_enabled": True,
+                "auto_atm_symbols": True,
+                "underlying_symbol": "NSE:NIFTY 50",
+                "nifty_fut_symbol": "NFO:NIFTY26SEPFUT",
+                "ce_symbol": "",
+                "pe_symbol": "",
+            },
+            "has_broker": True,
+            "team_ready": True,
+        },
+    )
+    assert await cache.get_metric(tenant, "setup") is not None
+
+    session = MagicMock()
+    session.info = {"tenant_id": uuid.UUID(tenant)}
+    ctx = TenantContext(
+        tenant_id=uuid.UUID(tenant),
+        user_id="u",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+    )
+    service = SignalEngineService(session, ctx)
+
+    async def fake_load():
+        return SignalEngineConfig(
+            engine_enabled=True,
+            auto_atm_symbols=True,
+            underlying_symbol="NSE:NIFTY 50",
+            nifty_fut_symbol="NFO:NIFTY26SEPFUT",
+            ce_symbol="",
+            pe_symbol="",
+        )
+
+    service._load_config = fake_load  # type: ignore[method-assign]
+    service._signal_engine_tool = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))  # type: ignore[method-assign]
+    service._patch_tool_settings = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+    ok = await service.maybe_persist_auto_atm_symbols(
+        {
+            "ce_symbol": "NFO:NIFTY26SEP24500CE",
+            "pe_symbol": "NFO:NIFTY26SEP24500PE",
+        }
+    )
+    assert ok is True
+    assert await cache.get_metric(tenant, "setup") is None
+    service._patch_tool_settings.assert_awaited_once()
 
 
 def test_annotate_snapshot_freshness_marks_stale_before_ttl() -> None:

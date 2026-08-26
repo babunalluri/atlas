@@ -138,6 +138,7 @@ async def stream_signal_state(
     async def event_stream() -> AsyncIterator[bytes]:
         tenant_key = str(context.tenant_id)
         last_rev: tuple[Any, ...] | None = None
+        cleared_stopped_watcher = False
         try:
             while True:
                 if await request.is_disconnected():
@@ -163,7 +164,11 @@ async def stream_signal_state(
                         )
                         _track_bg_snapshot(task)
                 if not payload.get("engine_enabled", False):
-                    await cache.clear_watcher(tenant_key)
+                    if not cleared_stopped_watcher:
+                        await cache.clear_watcher(tenant_key)
+                        cleared_stopped_watcher = True
+                else:
+                    cleared_stopped_watcher = False
                 rev = stream_revision(payload)
                 if rev == last_rev:
                     # Worker has not published a new snapshot — keepalive only

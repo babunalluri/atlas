@@ -162,6 +162,24 @@ async def set_metric(
     bucket[metric_id] = (_now_ms() + ttl, value)
 
 
+async def delete_metric(tenant_id: str, metric_id: str) -> None:
+    """Drop one metric key (e.g. setup memo after auto-ATM persist)."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.delete(_metric_key(tenant_id, metric_id))
+        except Exception:
+            await invalidate_redis()
+            logger.warning(
+                "signal_cache_metric_delete_failed",
+                tenant_id=tenant_id,
+                metric_id=metric_id,
+            )
+    bucket = _metric_cache.get(tenant_id)
+    if bucket is not None:
+        bucket.pop(metric_id, None)
+
+
 async def get_session_value(tenant_id: str, field: str) -> Any | None:
     client = await get_redis()
     if client is not None:
