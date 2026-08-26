@@ -53,8 +53,10 @@ def test_stream_and_broker_intervals() -> None:
     from app.domains.signal_engine_constants import (
         LOCK_HEARTBEAT_SECONDS,
         LOCK_TTL_MS,
+        SIGNAL_TICK_DEADLINE_SECONDS,
         SNAPSHOT_FRESH_MS,
         SNAPSHOT_TTL_MS,
+        STATE_COMPUTE_TIMEOUT_MS,
     )
 
     assert STREAM_INTERVAL_MS == 125
@@ -68,6 +70,8 @@ def test_stream_and_broker_intervals() -> None:
     # Short lock + heartbeat: dead workers self-heal quickly.
     assert LOCK_TTL_MS == 10_000
     assert LOCK_HEARTBEAT_SECONDS * 1000 < LOCK_TTL_MS
+    # Loop deadline must exceed a single state() timeout.
+    assert SIGNAL_TICK_DEADLINE_SECONDS * 1000 > STATE_COMPUTE_TIMEOUT_MS
 
 
 @pytest.mark.asyncio

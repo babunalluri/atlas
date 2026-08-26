@@ -34,7 +34,9 @@ from app.domains.desk_snapshot import (
 from app.domains import signal_engine_cache as cache
 from app.domains.signal_engine_constants import (
     BROKER_QUOTE_TTL_MS,
+    ENGINE_STARTING_SNAPSHOT_MS,
     SNAPSHOT_FRESH_MS,
+    STATE_COMPUTE_TIMEOUT_MS,
     STREAM_COMPUTE_WAIT_MS,
     STREAM_INTERVAL_MS,
     TIER_A_REST_GAP_FILL_MS,
@@ -109,6 +111,35 @@ def _apply_engine_stopped_overlay(payload: dict[str, Any]) -> dict[str, Any]:
         "engine_active": False,
         "live": False,
         "feed_source": "stopped",
+        "live_quote_missing": False,
+        "live_warnings": [],
+    }
+
+
+def _engine_starting_payload(config: "SignalEngineConfig") -> dict[str, Any]:
+    """Provisional SSE frame so Start never leaves the desk on a stale stopped snapshot."""
+    now_ms = int(time.time() * 1000)
+    return {
+        "engine_enabled": True,
+        "engine_active": True,
+        "engine_computing": True,
+        "live": False,
+        "mock": bool(config.mock),
+        "feed_source": "starting",
+        "live_quote_missing": False,
+        "live_warnings": ["Starting engine — warming live quotes…"],
+        "metrics": [],
+        "passed": 0,
+        "evaluable": 0,
+        "has_broker": True,
+        "team_slug": SIGNAL_TEAM_SLUG,
+        "underlying": {
+            "symbol": config.underlying_symbol,
+            "label": config.underlying_label or config.underlying_symbol or "—",
+        },
+        "stream": True,
+        "computed_at_ms": now_ms,
+        "broker_poll_ms": BROKER_QUOTE_TTL_MS,
     }
 
 
@@ -146,10 +177,74 @@ def _annotate_snapshot_freshness(
     return out
 
 
-async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
-    """Coalesce concurrent stream/poll readers to one engine tick per tenant."""
+async def _compute_state_payload(
+    service: "SignalEngineService",
+    *,
+    config: "SignalEngineConfig",
+    last_good: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run state() with a hard timeout so sandbox storms cannot hold the lock forever.
+
+    On timeout, prefer the last live snapshot over an empty ``starting`` frame so
+    a slow tick cannot wipe CE/PE / VIX / stock rows the desk already had.
+    """
+    try:
+        payload = await asyncio.wait_for(
+            service.state(),
+            timeout=STATE_COMPUTE_TIMEOUT_MS / 1000,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "signal_state_compute_timeout",
+            tenant_id=_tenant_key(service.context),
+            timeout_ms=STATE_COMPUTE_TIMEOUT_MS,
+        )
+        if (
+            isinstance(last_good, dict)
+            and last_good.get("feed_source") not in (None, "starting", "stopped")
+            and (last_good.get("metrics") or last_good.get("passed") is not None)
+        ):
+            kept = dict(last_good)
+            msg = (
+                "Engine tick timed out under load — showing last good frame while retrying."
+            )
+            warnings = [
+                msg,
+                *[
+                    w
+                    for w in (kept.get("live_warnings") or [])
+                    if "timed out under load" not in str(w)
+                ],
+            ]
+            kept["live_warnings"] = warnings
+            kept["engine_computing"] = True
+            kept["engine_enabled"] = True
+            kept["engine_active"] = True
+            return kept
+        payload = _engine_starting_payload(config)
+        payload["live_warnings"] = [
+            "Engine tick timed out under load — retrying. "
+            "Close Param Chart / Options Lab or enable Mock if this persists."
+        ]
+        return payload
+    if not config.engine_enabled:
+        return _apply_engine_stopped_overlay(payload)
+    return {**payload, "computed_at_ms": int(time.time() * 1000)}
+
+
+async def state_for_stream(
+    service: "SignalEngineService",
+    *,
+    config: SignalEngineConfig | None = None,
+) -> dict[str, Any]:
+    """Coalesce concurrent stream/poll readers to one engine tick per tenant.
+
+    Pass ``config`` when the caller already loaded it (SSE heartbeat path) so we
+    do not walk tool bindings twice per 125ms frame.
+    """
     tenant_id = _tenant_key(service.context)
-    config = await service._load_config()
+    if config is None:
+        config = await service._load_config()
     computing = await cache.compute_lock_held(tenant_id)
 
     snapshot = await cache.get_snapshot(tenant_id)
@@ -161,19 +256,26 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
     if await cache.try_compute_lock(tenant_id):
         heartbeat = cache.start_compute_lock_heartbeat(tenant_id)
         try:
+            # Re-check under the lock — another writer may have published.
             snapshot = await cache.get_snapshot(tenant_id)
             if snapshot is not None:
                 if not config.engine_enabled:
                     return _apply_engine_stopped_overlay(snapshot)
                 return _annotate_snapshot_freshness(snapshot, computing=True)
-            payload = await service.state()
-            if not config.engine_enabled:
-                payload = _apply_engine_stopped_overlay(payload)
-            else:
-                payload = {
-                    **payload,
-                    "computed_at_ms": int(time.time() * 1000),
-                }
+            # True cold start only (no snapshot when the lock was taken). Keep-
+            # last-good for refresh timeouts lives in the ticker worker, which
+            # calls ``_compute_state_payload`` with the prior live frame.
+            if config.engine_enabled:
+                starting = _engine_starting_payload(config)
+                await cache.set_snapshot(
+                    tenant_id,
+                    starting,
+                    ttl_ms=ENGINE_STARTING_SNAPSHOT_MS,
+                    force=True,
+                )
+            payload = await _compute_state_payload(
+                service, config=config, last_good=None
+            )
             await cache.set_snapshot(tenant_id, payload)
             return _annotate_snapshot_freshness(payload, computing=False)
         finally:
@@ -195,13 +297,14 @@ async def state_for_stream(service: "SignalEngineService") -> dict[str, Any]:
             still = await cache.compute_lock_held(tenant_id)
             return _annotate_snapshot_freshness(snapshot, computing=still)
 
-    payload = await service.state()
+    # Still no snapshot — emit starting (or stopped) rather than stacking another
+    # unbounded cold compute behind a contended sandbox pool.
     if not config.engine_enabled:
-        payload = _apply_engine_stopped_overlay(payload)
+        payload = _apply_engine_stopped_overlay(_engine_starting_payload(config))
     else:
-        payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
-    await cache.set_snapshot(tenant_id, payload)
-    return _annotate_snapshot_freshness(payload, computing=False)
+        payload = _engine_starting_payload(config)
+    await cache.set_snapshot(tenant_id, payload, ttl_ms=ENGINE_STARTING_SNAPSHOT_MS, force=True)
+    return _annotate_snapshot_freshness(payload, computing=True)
 
 # Admin-selectable underlyings (not hard-coded to NIFTY).
 UNDERLYING_PRESETS: list[dict[str, Any]] = [
@@ -484,6 +587,44 @@ def _option_matches_fut(option_symbol: str, fut_symbol: str) -> bool:
     return fut_root == opt_root
 
 
+def _option_strike(symbol: str) -> int | None:
+    """Extract strike digits before a trailing CE/PE suffix."""
+    raw = symbol.strip().upper().replace(" ", "")
+    if ":" in raw:
+        raw = raw.split(":", 1)[1]
+    if raw.endswith("CE") or raw.endswith("PE"):
+        raw = raw[:-2]
+    digits = ""
+    for ch in reversed(raw):
+        if ch.isdigit():
+            digits = ch + digits
+        else:
+            break
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _align_ce_pe_strikes(settings: dict[str, Any]) -> dict[str, Any]:
+    """Drop CE/PE when their strikes differ so auto-ATM can refill a matched pair."""
+    out = dict(settings)
+    ce = str(out.get("ce_symbol") or "").strip()
+    pe = str(out.get("pe_symbol") or "").strip()
+    if not ce or not pe:
+        return out
+    ce_strike = _option_strike(ce)
+    pe_strike = _option_strike(pe)
+    if ce_strike is None or pe_strike is None:
+        return out
+    if ce_strike != pe_strike:
+        out.pop("ce_symbol", None)
+        out.pop("pe_symbol", None)
+    return out
+
+
 def _drop_mismatched_option_symbols(settings: dict[str, Any]) -> dict[str, Any]:
     """Clear CE/PE that belong to a different underlying than the configured FUT.
 
@@ -493,14 +634,33 @@ def _drop_mismatched_option_symbols(settings: dict[str, Any]) -> dict[str, Any]:
     out = dict(settings)
     fut = str(out.get("nifty_fut_symbol") or out.get("fut_symbol") or "").strip()
     if not fut:
-        return out
+        return _align_ce_pe_strikes(out)
     if not _fut_root(fut):
-        return out
+        return _align_ce_pe_strikes(out)
     for key in ("ce_symbol", "pe_symbol"):
         raw = str(out.get(key) or "").strip()
         if raw and not _option_matches_fut(raw, fut):
             out.pop(key, None)
-    return out
+    return _align_ce_pe_strikes(out)
+
+
+def _signal_settings_patch(
+    previous: dict[str, Any], next_settings: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a Signal-owned settings patch (``None`` = delete).
+
+    Nested desk keys (``options_lab``, ``param_chart``, …) are never included so
+    a Signal write cannot wipe or rewrite another desk's subtree.
+    """
+    owned = set(ADMIN_CONFIG_KEYS) | {"nifty_symbol", "nifty_fut_symbol", "fut_symbol"}
+    patch: dict[str, Any] = {}
+    for key in owned:
+        if key in next_settings:
+            if previous.get(key) != next_settings[key]:
+                patch[key] = next_settings[key]
+        elif key in previous:
+            patch[key] = None
+    return patch
 
 
 def _derive_option_symbol(fut_symbol: str, strike: int, side: str) -> str | None:
@@ -726,9 +886,24 @@ def _quote_change_pcts(row: dict[str, Any] | None) -> tuple[float | None, float 
     ohlc = row.get("ohlc") if isinstance(row.get("ohlc"), dict) else {}
     prev = _pick_float(ohlc, "close")
     open_ = _pick_float(ohlc, "open")
+    # Kite / LTP-shaped rows often expose net_change without a nested ohlc block.
+    if prev is None and ltp is not None:
+        net = _pick_float(row, "net_change", "change", "change_value")
+        if net is not None:
+            prev = ltp - net
+    # Some brokers return day change already as a percent.
+    direct_pct = _pick_float(
+        row,
+        "change_percent",
+        "change_pct",
+        "percentage_change",
+        "pChange",
+    )
     vs_prev: float | None = None
     vs_open: float | None = None
-    if ltp is not None and prev not in (None, 0):
+    if direct_pct is not None and prev is None:
+        vs_prev = round(float(direct_pct), 3)
+    elif ltp is not None and prev not in (None, 0):
         vs_prev = round((ltp - prev) / prev * 100, 3)
     if ltp is not None and open_ not in (None, 0):
         vs_open = round((ltp - open_) / open_ * 100, 3)
@@ -1542,8 +1717,20 @@ class SignalEngineService:
         self._last_quote_error: str | None = None
 
     @staticmethod
-    def _tool_settings(definition: Any) -> dict[str, Any]:
+    def _config_blob_settings(definition: Any) -> dict[str, Any]:
         return dict((getattr(definition, "config", None) or {}).get("settings") or {})
+
+    async def _tool_settings(self, definition: Any) -> dict[str, Any]:
+        """Prefer published version settings; fall back to definition.config.
+
+        Start/Stop must not silently diverge when only one store was updated.
+        """
+        published_id = getattr(definition, "published_version_id", None)
+        if published_id is not None:
+            row = await self.tool_versions.get(published_id)
+            if row is not None and isinstance(row.settings, dict) and row.settings:
+                return dict(row.settings)
+        return self._config_blob_settings(definition)
 
     async def _collect_settings(self) -> dict[str, Any]:
         settings: dict[str, Any] = {}
@@ -1555,12 +1742,12 @@ class SignalEngineService:
                 continue
             slug = (definition.slug or "").lower()
             if definition.kind == "tenant_python" and "signal" in slug:
-                settings.update(self._tool_settings(definition))
+                settings.update(await self._tool_settings(definition))
             elif definition.kind == "tenant_python" and "signal" not in slug:
                 # Broker toolkit — skip merging quote tool settings into signal config.
                 continue
             else:
-                settings.update(self._tool_settings(definition))
+                settings.update(await self._tool_settings(definition))
         return settings
 
     async def _signal_engine_tool(self) -> Any | None:
@@ -1647,7 +1834,7 @@ class SignalEngineService:
         tool = await self._signal_engine_tool()
         if tool is None:
             return {"ok": False, "error": "Signal engine tool not bound on Signals ops team."}
-        current = self._tool_settings(tool)
+        current = await self._tool_settings(tool)
         merged = {**current}
         for key in ADMIN_CONFIG_KEYS:
             if key not in patch:
@@ -1683,21 +1870,36 @@ class SignalEngineService:
         elif merged.get("nifty_fut_symbol") and not merged.get("fut_symbol"):
             merged["fut_symbol"] = merged["nifty_fut_symbol"]
         merged = _drop_mismatched_option_symbols(merged)
-        await self._write_tool_settings(tool, merged)
+        # Patch only Signal-owned keys so Options Lab / Param Chart nested
+        # subtrees (and concurrent Start/Stop) are not clobbered by a stale blob.
+        signal_patch = _signal_settings_patch(current, merged)
+        await self._patch_tool_settings(tool, signal_patch)
+        # Expire identity so subsequent reads in this request see the write.
+        await self.session.flush()
+        await self.session.refresh(tool)
         tenant_id = _tenant_key(self.context)
         if patch.get("engine_enabled") is False:
             await cache.clear_watcher(tenant_id)
         await _invalidate_tenant_signal_cache(tenant_id)
         if patch.get("engine_enabled") is False:
-            stopped = _apply_engine_stopped_overlay(await self.state())
-            await cache.set_snapshot(tenant_id, stopped)
-        elif patch.get("engine_enabled") is True:
+            stopped = _apply_engine_stopped_overlay(
+                await self.state()
+            )
+            await cache.set_snapshot(tenant_id, stopped, force=True)
+        elif patch.get("engine_enabled") is True or under_changed:
             # Start desk watching immediately. Snapshot warm is scheduled from the
             # API via BackgroundTasks after the request transaction commits — a
             # create_task here can race and cache a stopped snapshot.
-            # Cache was already invalidated above so a prior stopped overlay cannot
-            # linger for SNAPSHOT_TTL_MS.
             await cache.touch_watcher(tenant_id)
+            # Paint immediately after Start or underlying/FUT change so SSE does
+            # not sit on an empty Redis key while the cold tick runs.
+            starting = _engine_starting_payload(SignalEngineConfig.from_settings(merged))
+            await cache.set_snapshot(
+                tenant_id,
+                starting,
+                ttl_ms=ENGINE_STARTING_SNAPSHOT_MS,
+                force=True,
+            )
         return {"ok": True, **await self.get_admin_config()}
 
     async def maybe_persist_auto_atm_symbols(self, payload: dict[str, Any]) -> bool:
@@ -1734,21 +1936,27 @@ class SignalEngineService:
         tool = await self._signal_engine_tool()
         if tool is None:
             return False
-        current = self._tool_settings(tool)
-        merged = {
-            **current,
+        fut = config.nifty_fut_symbol
+        atm_patch = {
             "ce_symbol": ce,
             "pe_symbol": pe,
-            "fut_symbol": current.get("fut_symbol") or config.nifty_fut_symbol,
-            "nifty_fut_symbol": config.nifty_fut_symbol,
+            "fut_symbol": fut,
+            "nifty_fut_symbol": fut,
         }
-        merged = _drop_mismatched_option_symbols(merged)
+        atm_patch = _drop_mismatched_option_symbols(atm_patch)
         if (
-            str(merged.get("ce_symbol") or "") == config.ce_symbol
-            and str(merged.get("pe_symbol") or "") == config.pe_symbol
+            str(atm_patch.get("ce_symbol") or "") == config.ce_symbol
+            and str(atm_patch.get("pe_symbol") or "") == config.pe_symbol
         ):
             return False
-        await self._write_tool_settings(tool, merged)
+        # Only CE/PE (+ FUT aliases) — leave nested desk settings alone.
+        write_patch: dict[str, Any] = {
+            "ce_symbol": atm_patch.get("ce_symbol") or None,
+            "pe_symbol": atm_patch.get("pe_symbol") or None,
+            "fut_symbol": atm_patch.get("fut_symbol") or fut,
+            "nifty_fut_symbol": atm_patch.get("nifty_fut_symbol") or fut,
+        }
+        await self._patch_tool_settings(tool, write_patch)
         if not filling_empty:
             await cache.set_metric(tenant_id, "auto_atm_persist_gate", "medium", True)
         logger.info(
@@ -1758,6 +1966,37 @@ class SignalEngineService:
             pe=pe,
         )
         return True
+
+    async def _patch_tool_settings(
+        self, definition: Any, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Shallow-merge ``patch`` into the latest tool settings and persist.
+
+        ``None`` values delete keys. Nested dicts replace that key wholesale
+        (Options Lab / Param Chart own their subtrees). Unmentioned top-level
+        keys are preserved so concurrent desk writers cannot clobber each other
+        with a stale whole-blob read-modify-write.
+
+        Locks the tool definition + published/draft version rows for the
+        read-merge-write so overlapping Signal / Options Lab / Param Chart
+        patches on different keys cannot lose each other's updates.
+        """
+        locked = await self.tools.get(definition.id, lock=True)
+        if locked is None:
+            raise LookupError("signal engine tool definition not found")
+        published_id = getattr(locked, "published_version_id", None)
+        if published_id is not None:
+            await self.tool_versions.get(published_id, lock=True)
+        await self.tool_versions.latest_draft(locked.id, lock=True)
+        current = await self._tool_settings(locked)
+        merged = dict(current)
+        for key, val in patch.items():
+            if val is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = val
+        await self._write_tool_settings(locked, merged)
+        return merged
 
     async def _write_tool_settings(self, definition: Any, settings: dict[str, Any]) -> None:
         config = dict(definition.config or {})
@@ -1811,12 +2050,30 @@ class SignalEngineService:
                     fns.append(fn)
         return fns
 
-    async def _invoke_broker_tool(self, name: str, kwargs: dict[str, Any]) -> Any | None:
+    async def _invoke_broker_tool(
+        self,
+        name: str,
+        kwargs: dict[str, Any],
+        *,
+        timeout_s: float = 15.0,
+    ) -> Any | None:
         for fn in await self._broker_tools():
             if getattr(fn, "__name__", "") != name:
                 continue
             try:
-                return await invoke_tool(fn, kwargs)
+                return await asyncio.wait_for(
+                    asyncio.shield(invoke_tool(fn, kwargs)),
+                    timeout=timeout_s,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "signal_broker_tool_invoke_timeout",
+                    tool=name,
+                    timeout_s=timeout_s,
+                )
+                return None
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "signal_broker_tool_invoke_failed",
@@ -1838,6 +2095,7 @@ class SignalEngineService:
         symbols: list[str],
         *,
         prefer: str | None = None,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         symbols = [s for s in symbols if s]
         if not symbols:
@@ -1923,10 +2181,13 @@ class SignalEngineService:
 
         fetch_symbols = missing or symbols
         merged: dict[str, Any] = {}
-        # One retry: signal + Options Lab share the sandbox slot pool; brief
-        # concurrency spikes should not leave the chain offline.
-        quote_timeout_s = 25.0
-        for _attempt in range(2):
+        # Bound wait tightly on pilot — long quote waits + Tier B races were
+        # wiping the board with empty ``starting`` frames.
+        quote_timeout_s = float(timeout_s) if timeout_s is not None else 12.0
+        quote_timeout_s = max(3.0, min(quote_timeout_s, 20.0))
+        # Prefer a single attempt when the caller already shortened the budget.
+        max_attempts = 1 if quote_timeout_s <= 10.0 else 2
+        for _attempt in range(max_attempts):
             for fn in fns:
                 for kwargs in quote_call_attempts(fn, fetch_symbols):
                     try:
@@ -2126,7 +2387,9 @@ class SignalEngineService:
                 ttl_ms=TIER_A_REST_GAP_FILL_MS,
             )
 
-        out.update(await self._fetch_quote(missing))
+        out.update(
+            await self._fetch_quote(missing, prefer="get_ltp", timeout_s=10.0)
+        )
         return out
 
     async def refresh_tier_b_context(self, config: SignalEngineConfig) -> None:
@@ -2167,8 +2430,22 @@ class SignalEngineService:
         if config.india_vix is None and config.india_vix_symbol:
             vix_cached = await _cache_get(tenant_id, "india_vix")
             if vix_cached is None:
-                vix_q = await self._fetch_quote([config.india_vix_symbol])
-                vix_row = _find_quote_row(vix_q, config.india_vix_symbol)
+                vix_symbols = list(
+                    dict.fromkeys(
+                        [
+                            config.india_vix_symbol,
+                            resolve_kite_instrument(config.india_vix_symbol),
+                            "NSE:INDIA VIX",
+                            "NSE:INDIAVIX",
+                        ]
+                    )
+                )
+                vix_q = await self._fetch_quote(vix_symbols, prefer="get_ltp")
+                vix_row = None
+                for sym in vix_symbols:
+                    vix_row = _find_quote_row(vix_q, sym)
+                    if vix_row:
+                        break
                 if vix_row:
                     vix_ltp = _pick_float(vix_row, "last_price", "ltp", "last")
                     if vix_ltp is not None:
@@ -2185,7 +2462,12 @@ class SignalEngineService:
                     ]
                 )
             )
-            aux_quotes = await self._fetch_quote(aux_symbols) if aux_symbols else {}
+            # get_quote carries ohlc / net_change so stock big-move % can populate.
+            aux_quotes = (
+                await self._fetch_quote(aux_symbols, prefer="get_quote")
+                if aux_symbols
+                else {}
+            )
             aux_payload: dict[str, Any] = {}
             scratch: dict[str, Any] = {}
             _apply_quote_pct_map(scratch, aux_quotes, INDEX_KITE_SYMBOLS)
@@ -2221,7 +2503,32 @@ class SignalEngineService:
         if config.mock:
             return _mock_feed_live(config)
 
+        # Leave headroom under STATE_COMPUTE_TIMEOUT so we can still evaluate
+        # and publish a live frame instead of wiping the desk with ``starting``.
+        deadline = time.monotonic() + max(8.0, (STATE_COMPUTE_TIMEOUT_MS / 1000) * 0.65)
+
+        def _budget(min_s: float = 3.0) -> bool:
+            return (deadline - time.monotonic()) >= min_s
+
+        def _remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
         feed: dict[str, Any] = {"source": "live"}
+
+        # Apply Tier B caches first so VIX / stock big-move survive even when
+        # later REST fan-out is truncated by the budget.
+        vix_cached = await _cache_get(tenant_id, "india_vix")
+        if vix_cached is not None and config.india_vix is None:
+            try:
+                feed["india_vix"] = float(vix_cached)
+            except (TypeError, ValueError):
+                pass
+        aux_cached = await _cache_get(tenant_id, "aux_quotes")
+        if isinstance(aux_cached, dict):
+            feed.update(aux_cached)
+        crude_cached = await _cache_get(tenant_id, "crude_oil")
+        if isinstance(crude_cached, dict):
+            feed.update(crude_cached)
 
         # Slow — Dow Jones (manual override or cached once per hour); never REST here.
         dow_cached = await _cache_get(tenant_id, "dow_jones")
@@ -2243,6 +2550,11 @@ class SignalEngineService:
             fast_symbols.append(config.underlying_symbol)
         if config.nifty_fut_symbol:
             fast_symbols.append(config.nifty_fut_symbol)
+        if config.india_vix_symbol:
+            fast_symbols.append(config.india_vix_symbol)
+            # Alias often present on the ticker book / REST.
+            fast_symbols.append("NSE:INDIA VIX")
+            fast_symbols.append("NSE:INDIAVIX")
         # CE/PE resolved after ATM; seed only real option contracts (never FUT).
         ce_seed = _sanitize_option_symbol(config.ce_symbol)
         pe_seed = _sanitize_option_symbol(config.pe_symbol)
@@ -2252,6 +2564,22 @@ class SignalEngineService:
             fast_symbols.append(pe_seed)
         fast_symbols = list(dict.fromkeys(fast_symbols))
         fast_quotes: dict[str, Any] = await self._tier_a_quotes(fast_symbols)
+
+        # India VIX — prefer ticker book (REST often empty / Tier B may lag).
+        if feed.get("india_vix") is None and config.india_vix is None:
+            for vix_sym in (
+                config.india_vix_symbol,
+                "NSE:INDIA VIX",
+                "NSE:INDIAVIX",
+            ):
+                if not vix_sym:
+                    continue
+                vix_row = _find_quote_row(fast_quotes, vix_sym)
+                vix_ltp = _pick_float(vix_row or {}, "last_price", "ltp", "last")
+                if vix_ltp is not None:
+                    feed["india_vix"] = vix_ltp
+                    await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
+                    break
 
         # Underlying LTP → ATM
         if not config.underlying_symbol:
@@ -2296,8 +2624,14 @@ class SignalEngineService:
             if sym and _find_quote_row(fast_quotes, sym) is None
         ]
         if extra_symbols:
+            # LTP first (cheap); full quote only if budget remains.
+            prefer = "get_ltp" if not _budget(12.0) else "get_quote"
             fast_quotes.update(
-                await self._fetch_quote(extra_symbols, prefer="get_quote")
+                await self._fetch_quote(
+                    extra_symbols,
+                    prefer=prefer,
+                    timeout_s=min(10.0, max(3.0, _remaining() - 2.0)),
+                )
             )
 
         ce_row: dict[str, Any] | None = None
@@ -2317,7 +2651,44 @@ class SignalEngineService:
                 if pe_oi is not None:
                     feed["pe_oi"] = pe_oi
 
-        await _merge_secondary_ce_pe_quotes(self, config, feed, fast_quotes)
+        # After preset switch, get_quote can miss while get_ltp still prints.
+        if (ce_symbol or pe_symbol) and (
+            feed.get("ce") is None or feed.get("pe") is None
+        ):
+            retry_syms = [
+                s
+                for s in (ce_symbol, pe_symbol)
+                if s
+                and (
+                    (s == ce_symbol and feed.get("ce") is None)
+                    or (s == pe_symbol and feed.get("pe") is None)
+                )
+            ]
+            if retry_syms:
+                fast_quotes.update(
+                    await self._fetch_quote(
+                        retry_syms,
+                        prefer="get_ltp",
+                        timeout_s=min(8.0, max(3.0, _remaining() - 2.0)),
+                    )
+                )
+                if ce_symbol and feed.get("ce") is None:
+                    ce_row = _find_quote_row(fast_quotes, ce_symbol) or ce_row
+                    if ce_row:
+                        feed["ce"] = _pick_float(ce_row, "last_price", "ltp", "last")
+                if pe_symbol and feed.get("pe") is None:
+                    pe_row = _find_quote_row(fast_quotes, pe_symbol) or pe_row
+                    if pe_row:
+                        feed["pe"] = _pick_float(pe_row, "last_price", "ltp", "last")
+
+        if _budget(10.0):
+            await _merge_secondary_ce_pe_quotes(self, config, feed, fast_quotes)
+        else:
+            logger.info(
+                "signal_feed_skip_secondary_ce_pe",
+                tenant_id=tenant_id,
+                reason="compute_budget",
+            )
 
         ce_vol = _pick_float(ce_row or {}, "volume") if ce_row else None
         pe_vol = _pick_float(pe_row or {}, "volume") if pe_row else None
@@ -2332,13 +2703,17 @@ class SignalEngineService:
             if iv_from_ce is not None:
                 feed["iv"] = iv_from_ce
         # Ticker packets usually lack IV — REST when needed, medium-cached.
-        if feed.get("iv") is None and (ce_symbol or pe_symbol):
+        if feed.get("iv") is None and (ce_symbol or pe_symbol) and _budget(8.0):
             iv_cached = await _cache_get(tenant_id, "atm_iv")
             if iv_cached is not None:
                 feed["iv"] = iv_cached
             else:
                 iv_syms = [s for s in (ce_symbol, pe_symbol) if s]
-                iv_quotes = await self._fetch_quote(iv_syms, prefer="get_quote")
+                iv_quotes = await self._fetch_quote(
+                    iv_syms,
+                    prefer="get_quote",
+                    timeout_s=min(10.0, max(3.0, _remaining() - 2.0)),
+                )
                 if ce_symbol:
                     ce_row = _find_quote_row(iv_quotes, ce_symbol) or ce_row
                 if pe_symbol:
@@ -2353,13 +2728,20 @@ class SignalEngineService:
         if config.nifty_fut_symbol:
             fut_row = _find_quote_row(fast_quotes, config.nifty_fut_symbol)
             oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
-            if oi_val is None:
+            if oi_val is None and _budget(8.0):
                 fut_quotes = await self._fetch_quote(
                     [config.nifty_fut_symbol],
                     prefer="get_quote",
+                    timeout_s=min(8.0, max(3.0, _remaining() - 2.0)),
                 )
                 fut_row = _find_quote_row(fut_quotes, config.nifty_fut_symbol) or fut_row
                 oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
+            elif oi_val is None:
+                logger.info(
+                    "signal_feed_skip_fut_oi",
+                    tenant_id=tenant_id,
+                    reason="compute_budget",
+                )
             if oi_val is not None:
                 feed["oi"] = oi_val
                 baseline_key = _oi_baseline_cache_key()
@@ -2373,10 +2755,7 @@ class SignalEngineService:
             if basis is not None:
                 feed["fut_basis"] = basis
 
-        # Tier B — read-only from caches (background worker refreshes).
-        crude_cached = await _cache_get(tenant_id, "crude_oil")
-        if isinstance(crude_cached, dict):
-            feed.update(crude_cached)
+        # Tier B crude already applied from cache at the top of _build_feed.
 
         # IV day-high + session open for iv_chg
         iv = feed.get("iv")
@@ -2393,15 +2772,25 @@ class SignalEngineService:
             if config.iv_chg is None:
                 feed["iv_chg"] = iv_f - float(session_open)
 
-        # Sensibull-aligned fields — chain OI first, then ATM estimate, manual override last
-        await _merge_option_chain_tier(
-            self,
-            tenant_id,
-            feed,
-            config,
-            atm_strike=atm_strike,
-            mock=False,
-        )
+        # Sensibull-aligned fields — chain OI is expensive; skip when budget is tight.
+        if _budget(12.0):
+            await _merge_option_chain_tier(
+                self,
+                tenant_id,
+                feed,
+                config,
+                atm_strike=atm_strike,
+                mock=False,
+            )
+        else:
+            logger.info(
+                "signal_feed_skip_option_chain",
+                tenant_id=tenant_id,
+                reason="compute_budget",
+            )
+            cached_chain = await _cache_get(tenant_id, "option_chain")
+            if isinstance(cached_chain, dict):
+                _merge_chain_payload(feed, cached_chain, config)
         if config.pcr is None and feed.get("pcr") is None:
             estimated_pcr = _estimate_pcr(ce_row, pe_row)
             if estimated_pcr is not None:
@@ -2429,24 +2818,24 @@ class SignalEngineService:
                 feed["adx"] = trend_cached["adx"]
             if trend_cached.get("rsi") is not None:
                 feed["rsi"] = trend_cached["rsi"]
-        elif spot_row is not None:
+        elif spot_row is not None and _budget(10.0):
             token_raw = spot_row.get("instrument_token")
             try:
                 token = int(token_raw) if token_raw is not None else 0
             except (TypeError, ValueError):
                 token = 0
             if token > 0:
+                # Kite toolkit takes from_date/to_date (not years/months/days).
                 now = _ist_now()
-                from_dt = (now - timedelta(days=ADX_LOOKBACK_DAYS)).replace(
-                    hour=9, minute=15, second=0, microsecond=0
-                )
+                hist_from = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+                hist_to = now.strftime("%Y-%m-%d %H:%M:%S")
                 hist = await self._invoke_broker_tool(
                     "get_historical_candles",
                     {
                         "instrument_token": token,
-                        "interval": ADX_CANDLE_INTERVAL,
-                        "from_date": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        "to_date": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "interval": "minute",
+                        "from_date": hist_from,
+                        "to_date": hist_to,
                     },
                 )
                 highs, lows, closes = _parse_historical_candles(hist)
@@ -2462,19 +2851,34 @@ class SignalEngineService:
                 if trend_payload:
                     await _cache_set(tenant_id, "trend", "medium", trend_payload)
 
-        await _merge_levels_tier(
-            self,
-            tenant_id,
-            feed,
-            spot_row=spot_row,
-            mock=False,
-        )
+        if _budget(12.0):
+            await _merge_levels_tier(
+                self,
+                tenant_id,
+                feed,
+                spot_row=spot_row,
+                mock=False,
+            )
+        else:
+            levels_cached = await _cache_get(tenant_id, "levels")
+            if isinstance(levels_cached, dict):
+                feed.update(levels_cached)
+            _refresh_level_spot_fields(feed, spot_row)
+            logger.info(
+                "signal_feed_skip_levels_hist",
+                tenant_id=tenant_id,
+                reason="compute_budget",
+            )
 
-        # India VIX — cached Tier B only (background refresh).
-        if feed.get("india_vix") is None and config.india_vix_symbol:
+        # India VIX / aux — already seeded from cache at top; refresh only if still missing
+        # and budget remains (background Tier B usually fills these).
+        if feed.get("india_vix") is None and config.india_vix_symbol and _budget(5.0):
             vix_cached = await _cache_get(tenant_id, "india_vix")
             if vix_cached is not None:
-                feed["india_vix"] = vix_cached
+                try:
+                    feed["india_vix"] = float(vix_cached)
+                except (TypeError, ValueError):
+                    pass
         if feed.get("india_vix") is not None and feed.get("vix_chg") is None:
             vix_ltp = float(feed["india_vix"])
             session_vix = await cache.get_session_value(tenant_id, _session_dated_key("vix_session_open"))
@@ -2483,13 +2887,14 @@ class SignalEngineService:
                 session_vix = vix_ltp
             feed["vix_chg"] = round(vix_ltp - float(session_vix), 3)
 
-        # Index / stock / USD-INR — cached Tier B only.
-        aux_cached = await _cache_get(tenant_id, "aux_quotes")
-        if isinstance(aux_cached, dict):
-            feed.update(aux_cached)
+        if not any(k.startswith("stock_") for k in feed):
+            aux_cached = await _cache_get(tenant_id, "aux_quotes")
+            if isinstance(aux_cached, dict):
+                feed.update(aux_cached)
 
-        await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
-        await _merge_yahoo_timing_tier(tenant_id, feed, mock=False)
+        if _budget(6.0):
+            await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
+            await _merge_yahoo_timing_tier(tenant_id, feed, mock=False)
         if feed.get("ce") is not None and feed.get("pe") is not None:
             feed["straddle"] = round(float(feed["ce"]) + float(feed["pe"]), 2)
         await _apply_straddle_decay(tenant_id, feed)
@@ -2558,6 +2963,17 @@ class SignalEngineService:
         }
         payload["broker_poll_ms"] = BROKER_QUOTE_TTL_MS
         payload["stream"] = True
+        try:
+            from app.domains.kite_ticker_hub import read_ticker_health
+
+            payload["ticker"] = await read_ticker_health(tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signal_ticker_health_failed",
+                tenant_id=tenant_id,
+                error=str(exc)[:160],
+            )
+            payload["ticker"] = {"path": "unknown", "connected": False}
         # Surface resolved ATM options for UI + auto-persist.
         if feed.get("ce_symbol"):
             payload["ce_symbol"] = feed.get("ce_symbol")

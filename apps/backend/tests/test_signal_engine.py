@@ -10,11 +10,13 @@ import pytest
 from app.domains.signal_engine import (
     DEFAULT_METRICS,
     SignalEngineConfig,
+    _align_ce_pe_strikes,
     _build_alt_fut_symbol,
     _build_entry_preview,
     _compute_adx,
     _compute_rsi,
     _derive_option_symbol,
+    _drop_mismatched_option_symbols,
     _estimate_pcr,
     _evaluate_rule,
     _find_keyed_quote_row,
@@ -25,6 +27,7 @@ from app.domains.signal_engine import (
     _merge_yahoo_slow_tier,
     _mock_feed,
     _normalize_quote_payload,
+    _option_strike,
     _parse_historical_candles,
     _quote_change_pcts,
     _resolve_option_symbols,
@@ -37,6 +40,63 @@ from app.domains.trade_desk_checklist import CHECKLIST_CATEGORIES, CHECKLIST_ITE
 def test_round_strike_nifty() -> None:
     assert _round_strike(24312.5, 50) == 24300
     assert _round_strike(24326.0, 50) == 24350
+
+
+def test_align_ce_pe_strikes_clears_mismatch() -> None:
+    assert _option_strike("NFO:NIFTY26AUG24150CE") == 24150
+    assert _option_strike("NFO:NIFTY26AUG24350PE") == 24350
+    out = _align_ce_pe_strikes(
+        {
+            "ce_symbol": "NFO:NIFTY26AUG24150CE",
+            "pe_symbol": "NFO:NIFTY26AUG24350PE",
+        }
+    )
+    assert "ce_symbol" not in out
+    assert "pe_symbol" not in out
+    matched = _align_ce_pe_strikes(
+        {
+            "ce_symbol": "NFO:NIFTY26AUG24350CE",
+            "pe_symbol": "NFO:NIFTY26AUG24350PE",
+        }
+    )
+    assert matched["ce_symbol"].endswith("24350CE")
+    assert matched["pe_symbol"].endswith("24350PE")
+
+
+def test_drop_mismatched_also_aligns_strikes() -> None:
+    out = _drop_mismatched_option_symbols(
+        {
+            "nifty_fut_symbol": "NFO:NIFTY26AUGFUT",
+            "ce_symbol": "NFO:NIFTY26AUG24150CE",
+            "pe_symbol": "NFO:NIFTY26AUG24350PE",
+        }
+    )
+    assert "ce_symbol" not in out
+    assert "pe_symbol" not in out
+
+
+def test_signal_settings_patch_skips_nested_desk_keys() -> None:
+    from app.domains.signal_engine import _signal_settings_patch
+
+    previous = {
+        "engine_enabled": False,
+        "underlying_symbol": "NSE:NIFTY BANK",
+        "options_lab": {"mock": True},
+        "param_chart": {"strike": 57000},
+    }
+    next_settings = {
+        "engine_enabled": True,
+        "underlying_symbol": "NSE:NIFTY 50",
+        "options_lab": {"mock": False},  # must not appear in patch
+        "param_chart": {"strike": 24000},
+        "ce_symbol": "NFO:NIFTY26AUG24000CE",
+    }
+    patch = _signal_settings_patch(previous, next_settings)
+    assert patch["engine_enabled"] is True
+    assert patch["underlying_symbol"] == "NSE:NIFTY 50"
+    assert patch["ce_symbol"] == "NFO:NIFTY26AUG24000CE"
+    assert "options_lab" not in patch
+    assert "param_chart" not in patch
 
 
 def test_mock_feed_evaluate_not_ready() -> None:
@@ -379,14 +439,17 @@ async def test_maybe_persist_auto_atm_fills_empty_ce_pe(monkeypatch) -> None:
         strike_step=100,
     )
     written: dict = {}
+    tool = MagicMock()
+    tool.id = uuid.uuid4()
+    tool.published_version_id = None
 
     async def _load_config():
         return cfg
 
     async def _signal_tool():
-        return MagicMock()
+        return tool
 
-    def _settings(_tool):
+    async def _settings(_tool):
         return {
             "underlying_symbol": "BSE:SENSEX",
             "nifty_fut_symbol": "BFO:SENSEX26AUGFUT",
@@ -400,6 +463,9 @@ async def test_maybe_persist_auto_atm_fills_empty_ce_pe(monkeypatch) -> None:
     monkeypatch.setattr(service, "_signal_engine_tool", _signal_tool)
     monkeypatch.setattr(service, "_tool_settings", _settings)
     monkeypatch.setattr(service, "_write_tool_settings", _write)
+    service.tools.get = AsyncMock(return_value=tool)
+    service.tool_versions.get = AsyncMock(return_value=None)
+    service.tool_versions.latest_draft = AsyncMock(return_value=None)
     monkeypatch.setattr(
         "app.domains.signal_engine_cache.get_metric",
         AsyncMock(return_value=None),
@@ -552,6 +618,13 @@ def test_quote_change_pcts() -> None:
     )
     assert vs_prev is not None and round(vs_prev, 2) == 0.26
     assert vs_open is not None and vs_open > 0
+
+
+def test_quote_change_pcts_from_net_change() -> None:
+    vs_prev, _ = _quote_change_pcts({"last_price": 100.0, "net_change": -2.0})
+    assert vs_prev == round((-2.0) / 102.0 * 100, 3)
+    vs_direct, _ = _quote_change_pcts({"change_percent": 1.25})
+    assert vs_direct == 1.25
 
 
 def test_compute_rsi_mid_band() -> None:
@@ -1030,3 +1103,50 @@ async def test_build_feed_reads_tier_b_cache_without_fetch(
     assert feed["dow_change_pct"] == -0.4
     # No REST for Tier B on the critical path.
     fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compute_state_payload_keeps_last_good_on_timeout(monkeypatch) -> None:
+    """Timeout recovery must return the prior live board, not an empty starting frame."""
+    import asyncio
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService, _compute_state_payload
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    service = SignalEngineService(session, context)
+
+    async def _hang() -> dict:
+        await asyncio.sleep(3600)
+        return {}
+
+    monkeypatch.setattr(service, "state", _hang)
+    # Force a tiny timeout so the test stays fast.
+    monkeypatch.setattr(
+        "app.domains.signal_engine.STATE_COMPUTE_TIMEOUT_MS",
+        50,
+    )
+
+    last_good = {
+        "feed_source": "live",
+        "passed": 12,
+        "evaluable": 20,
+        "metrics": [{"id": "atm", "value": 24300}],
+        "live_warnings": [],
+    }
+    cfg = SignalEngineConfig(engine_enabled=True, underlying_symbol="NSE:NIFTY 50")
+    out = await _compute_state_payload(service, config=cfg, last_good=last_good)
+    assert out["feed_source"] == "live"
+    assert out["passed"] == 12
+    assert out["engine_computing"] is True
+    assert any("timed out under load" in str(w) for w in (out.get("live_warnings") or []))

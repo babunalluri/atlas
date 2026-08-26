@@ -21,12 +21,13 @@ from app.domains.kite_ticker_hub import (
     resolve_kite_credentials,
     token_map_from_quotes,
 )
+from app.domains.signal_engine import SignalEngineService, _compute_state_payload
 from app.domains.signal_engine_constants import (
     SIGNAL_ACTIVE_TICK_MS,
+    SIGNAL_TICK_DEADLINE_SECONDS,
     STREAM_INTERVAL_MS,
     TICKER_IDLE_POLL_SECONDS,
 )
-from app.domains.signal_engine import SignalEngineService
 from app.tenancy.context import TenantContext
 
 logger = get_logger(__name__)
@@ -81,8 +82,12 @@ async def sync_kite_for_signal_tenant(
                 have_syms = set(token_map.values())
                 missing = [sym for sym in symbols if sym not in have_syms]
                 if missing:
+                    # LTP is enough for instrument_token; get_quote storms the
+                    # sandbox before state() even starts on cold CE/PE.
                     quotes.update(
-                        await engine._fetch_quote(missing, prefer="get_quote")
+                        await engine._fetch_quote(
+                            missing, prefer="get_ltp", timeout_s=8.0
+                        )
                     )
                     token_map = token_map_from_quotes(quotes)
                 if not token_map:
@@ -143,11 +148,9 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
     heartbeat = cache.start_compute_lock_heartbeat(tenant_key)
     try:
         # Prefer live WS quotes before the expensive state() fan-out.
+        # Do NOT refresh Tier B concurrently — it races state() for the same
+        # sandbox slot pool and is the main cause of 45s tick timeouts on pilot.
         await sync_kite_for_signal_tenant(tenant_id, auth_org_id=auth_org_id)
-        # Tier B (crude/VIX/aux) refreshes off the critical path.
-        asyncio.create_task(
-            refresh_tier_b_for_tenant(tenant_id, auth_org_id=auth_org_id)
-        )
         context = TenantContext(
             tenant_id=tenant_id,
             user_id="signal-ticker",
@@ -159,11 +162,31 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
             async with session.begin():
                 await apply_tenant_guc(session, tenant_id)
                 service = SignalEngineService(session, context)
-                payload = await service.state()
+                prior = await cache.get_snapshot(tenant_key)
+                config = await service._load_config()
+                last_good = (
+                    prior
+                    if isinstance(prior, dict)
+                    and prior.get("feed_source")
+                    not in (None, "starting", "stopped")
+                    else None
+                )
+                # Shared timeout + keep-last-good path (also used by SSE cold start).
+                payload = await _compute_state_payload(
+                    service, config=config, last_good=last_good
+                )
                 # Persist auto-ATM CE/PE into tool settings when derived.
-                await service.maybe_persist_auto_atm_symbols(payload)
+                if payload.get("feed_source") == "live":
+                    await service.maybe_persist_auto_atm_symbols(payload)
         payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
+        # Timeout may return last_good with a warning — still publish so the desk
+        # shows "retrying" instead of a silently aging frame. Never force a
+        # ``starting`` frame over a live board (set_snapshot refuses that).
         await cache.set_snapshot(tenant_key, payload)
+        # Tier B after the live board publishes — reuses caches on next tick.
+        asyncio.create_task(
+            refresh_tier_b_for_tenant(tenant_id, auth_org_id=auth_org_id)
+        )
         # EOD / intraday shared-metric history for Param Chart overlays.
         try:
             from app.domains.param_chart import ParamChartService
@@ -219,7 +242,16 @@ class SignalEngineWorker:
         active_interval = max(STREAM_INTERVAL_MS, SIGNAL_ACTIVE_TICK_MS) / 1000
         while not self._stop.is_set():
             try:
-                has_watchers = await self.tick()
+                has_watchers = await asyncio.wait_for(
+                    self.tick(),
+                    timeout=SIGNAL_TICK_DEADLINE_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "signal_ticker_tick_deadline",
+                    deadline_s=SIGNAL_TICK_DEADLINE_SECONDS,
+                )
+                has_watchers = True
             except Exception as exc:
                 logger.exception("signal_ticker_tick_failed", error=str(exc))
                 has_watchers = False

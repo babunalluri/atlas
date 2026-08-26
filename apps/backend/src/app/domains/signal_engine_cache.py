@@ -228,21 +228,48 @@ async def get_snapshot(tenant_id: str) -> dict[str, Any] | None:
     return payload
 
 
-async def set_snapshot(tenant_id: str, payload: dict[str, Any]) -> None:
+async def set_snapshot(
+    tenant_id: str,
+    payload: dict[str, Any],
+    *,
+    ttl_ms: int | None = None,
+    force: bool = False,
+) -> None:
+    """Persist a tenant snapshot.
+
+    Provisional ``feed_source=starting`` frames must not clobber an existing live
+    board (timeout / race). Pass ``force=True`` for Start/Stop and intentional resets.
+    """
+    if (
+        not force
+        and isinstance(payload, dict)
+        and payload.get("feed_source") == "starting"
+    ):
+        existing = await get_snapshot(tenant_id)
+        if (
+            isinstance(existing, dict)
+            and existing.get("feed_source") == "live"
+            and (existing.get("metrics") or existing.get("evaluable"))
+        ):
+            return
+
+    ttl = int(ttl_ms) if ttl_ms is not None else SNAPSHOT_TTL_MS
+    if ttl <= 0:
+        ttl = SNAPSHOT_TTL_MS
     client = await get_redis()
     if client is not None:
         try:
             await client.set(
                 _snapshot_key(tenant_id),
                 json.dumps(payload, separators=(",", ":")),
-                px=SNAPSHOT_TTL_MS,
+                px=ttl,
             )
             return
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_snapshot_set_failed", tenant_id=tenant_id)
 
-    _snapshots[tenant_id] = (_now_ms() + SNAPSHOT_TTL_MS, payload)
+    _snapshots[tenant_id] = (_now_ms() + ttl, payload)
 
 
 async def clear_watcher(tenant_id: str) -> None:

@@ -133,9 +133,14 @@ async def stream_signal_state(
                     async with session.begin():
                         await apply_tenant_guc(session, context.tenant_id)
                         service = SignalEngineService(session, context)
-                        payload = await state_for_stream(service)
-                if payload.get("engine_enabled", False):
-                    await cache.touch_watcher(tenant_key)
+                        # Heartbeat BEFORE state_for_stream — a slow sandbox tick
+                        # used to outlive WATCH_TTL and idle the worker mid-frame.
+                        config = await service._load_config()
+                        if config.engine_enabled:
+                            await cache.touch_watcher(tenant_key)
+                        payload = await state_for_stream(service, config=config)
+                if not payload.get("engine_enabled", False):
+                    await cache.clear_watcher(tenant_key)
                 frame = json.dumps(payload, separators=(",", ":"))
                 yield f"data: {frame}\n\n".encode()
                 await asyncio.sleep(STREAM_INTERVAL_MS / 1000)

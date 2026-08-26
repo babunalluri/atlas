@@ -26,16 +26,26 @@ TIER_TTL_MS: dict[Tier, int] = {
 # Ticker sleeps longer when no admin desk has an open SSE connection.
 TICKER_IDLE_POLL_SECONDS = 2.0
 
-WATCH_TTL_SECONDS = 2
+# Must exceed a slow state_for_stream / sandbox tick so the watch key cannot
+# expire mid-compute (touch used to run only AFTER the frame was built).
+WATCH_TTL_SECONDS = 45
 # Redis keeps last-good longer than the badge "fresh" window so SSE can serve
 # stale frames (snapshot_stale=true) instead of missing and cold-recomputing.
 # 45s: sandbox-backed ticks on small VMs often take 15–40s; while a refresh is
 # in flight we also force fresh (see compute_lock_held).
 SNAPSHOT_FRESH_MS = 45_000
-SNAPSHOT_TTL_MS = 120_000
+# 10 min last-good: brief SSE gaps / tab blips must not wipe the board.
+SNAPSHOT_TTL_MS = 600_000
 # Short lock TTL so a killed worker self-heals quickly; holders must heartbeat.
 LOCK_TTL_MS = 10_000
 LOCK_HEARTBEAT_SECONDS = 3.0
 
 # How long SSE waits for an in-flight compute before starting its own.
 STREAM_COMPUTE_WAIT_MS = 3_000
+# Hard cap for a single state() under sandbox pressure (small VMs).
+STATE_COMPUTE_TIMEOUT_MS = 45_000
+# Loop-level guard: one slow tick() must not block the worker forever.
+# Slightly above STATE_COMPUTE_TIMEOUT so a single-tenant refresh can finish.
+SIGNAL_TICK_DEADLINE_SECONDS = (STATE_COMPUTE_TIMEOUT_MS / 1000.0) + 15.0
+# Provisional frame TTL while the first live tick is still warming.
+ENGINE_STARTING_SNAPSHOT_MS = 90_000

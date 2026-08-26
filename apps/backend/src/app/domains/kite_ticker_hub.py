@@ -33,14 +33,67 @@ TICKER_ALIVE_TTL_MS = int(TICKER_STALE_SECONDS * 1000) * 2  # 10s
 SOURCE_SIGNAL = "signal"
 SOURCE_OPTIONS_LAB = "options_lab"
 
-_hub: "KiteTickerHub | None" = None
+_hub: KiteTickerHub | None = None
 
 
-def get_kite_ticker_hub() -> "KiteTickerHub":
+def get_kite_ticker_hub() -> KiteTickerHub:
     global _hub
     if _hub is None:
         _hub = KiteTickerHub()
     return _hub
+
+
+async def read_ticker_health(tenant_id: str) -> dict[str, Any]:
+    """Desk-facing ticker status: WS vs REST path + last-tick age.
+
+    Combines the Redis alive heartbeat with in-process hub feed state so
+    operators can tell storm-path (REST/sandbox) from book-first (WS).
+    """
+    alive = await cache.get_metric(tenant_id, TICKER_ALIVE_KEY)
+    book_alive = isinstance(alive, dict)
+    book_age_s: float | None = None
+    book_count = 0
+    if book_alive:
+        try:
+            book_count = int(alive.get("count") or 0)
+        except (TypeError, ValueError):
+            book_count = 0
+        try:
+            ts = float(alive.get("ts") or 0)
+            if ts > 0:
+                book_age_s = max(0.0, time.time() - ts)
+        except (TypeError, ValueError):
+            book_age_s = None
+
+    hub = get_kite_ticker_hub()
+    feed_info = hub.tenant_feed_health(tenant_id)
+    connected = bool(feed_info.get("connected"))
+    last_tick_age_s = feed_info.get("last_tick_age_s")
+    subscribed = int(feed_info.get("subscribed") or 0)
+    ws_fresh = (
+        connected
+        and isinstance(last_tick_age_s, (int, float))
+        and float(last_tick_age_s) <= TICKER_STALE_SECONDS
+    )
+    path = (
+        "ws"
+        if ws_fresh
+        or (
+            book_alive
+            and book_age_s is not None
+            and book_age_s <= TICKER_STALE_SECONDS
+        )
+        else "rest"
+    )
+    return {
+        "connected": connected,
+        "subscribed": subscribed,
+        "last_tick_age_s": last_tick_age_s,
+        "book_alive": book_alive,
+        "book_age_s": round(book_age_s, 3) if book_age_s is not None else None,
+        "book_symbols": book_count,
+        "path": path,
+    }
 
 
 def quote_source_for_tenant(tenant_id: str) -> str:
@@ -324,6 +377,24 @@ class KiteTickerHub:
                 "kite_ticker_hub_started",
                 note="one_hub_per_process_respect_kite_ws_connection_cap",
             )
+
+    def tenant_feed_health(self, tenant_id: str) -> dict[str, Any]:
+        """In-process hub view for one tenant (no Redis)."""
+        feed = self._tenants.get(tenant_id)
+        if feed is None:
+            return {
+                "connected": False,
+                "subscribed": 0,
+                "last_tick_age_s": None,
+            }
+        age: float | None = None
+        if feed.last_tick_at > 0:
+            age = round(time.monotonic() - feed.last_tick_at, 3)
+        return {
+            "connected": bool(feed.connected),
+            "subscribed": len(feed.token_to_symbol),
+            "last_tick_age_s": age,
+        }
 
     async def stop(self) -> None:
         self._enabled = False
