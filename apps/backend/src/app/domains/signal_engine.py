@@ -2448,6 +2448,7 @@ class SignalEngineService:
         *,
         prefer: str | None = None,
         timeout_s: float | None = None,
+        allow_sandbox: bool = True,
     ) -> dict[str, Any]:
         symbols = [s for s in symbols if s]
         if not symbols:
@@ -2505,6 +2506,21 @@ class SignalEngineService:
                 return True
             return isinstance(row.get("ohlc"), dict) or "depth" in row
 
+        def _merge_book_and_first_party(
+            first: dict[str, Any],
+            book: dict[str, Any],
+        ) -> dict[str, Any]:
+            merged = dict(first) if first else {}
+            if ticker_live and overlay_ticker_rows is not None:
+                merged = overlay_ticker_rows(merged or book, ticker_live)
+            elif not merged and book:
+                merged = dict(book)
+            if book:
+                for key, row in book.items():
+                    if key not in merged and isinstance(row, dict):
+                        merged[key] = row
+            return merged
+
         missing = [sym for sym in symbols if not _row_reusable(sym)]
         # Full book hit: reuse without another sandbox round-trip.
         if book_partial and not missing:
@@ -2542,20 +2558,14 @@ class SignalEngineService:
 
         if first_party:
             # Only short-circuit when every requested symbol is present; otherwise
-            # fall through so sandbox / book can fill gaps.
+            # fall through so sandbox / book can fill gaps (when allowed).
             covered = True
             for sym in fetch_symbols:
                 if _find_quote_row(first_party, sym) is None:
                     covered = False
                     break
             if covered:
-                merged = dict(first_party)
-                if ticker_live and overlay_ticker_rows is not None:
-                    merged = overlay_ticker_rows(merged, ticker_live)
-                if book_partial:
-                    for key, row in book_partial.items():
-                        if key not in merged and isinstance(row, dict):
-                            merged[key] = row
+                merged = _merge_book_and_first_party(first_party, book_partial)
                 self._last_quote_error = None
                 await _cache_set(tenant_id, cached_key, "broker", merged)
                 if write_rest_quote_book is not None:
@@ -2580,6 +2590,30 @@ class SignalEngineService:
                     book_partial[key] = row
             missing = [sym for sym in symbols if not _row_reusable(sym)]
             fetch_symbols = missing or symbols
+
+        # Hot-path / tight budget: never wait on sandbox /v1/runs — return
+        # kite_rest + book best-effort so the tick can still paint FUT OI.
+        if not allow_sandbox:
+            merged = _merge_book_and_first_party(first_party, book_partial)
+            if merged:
+                self._last_quote_error = None
+                await _cache_set(tenant_id, cached_key, "broker", merged)
+                if write_rest_quote_book is not None:
+                    try:
+                        await write_rest_quote_book(
+                            tenant_id,
+                            {
+                                key: row
+                                for key, row in merged.items()
+                                if key != "_flat" and isinstance(row, dict)
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "rest_quote_book_write_failed",
+                            error=str(exc)[:200],
+                        )
+            return merged
 
         fns = await self._quote_tools()
         if not fns:
@@ -2805,7 +2839,12 @@ class SignalEngineService:
             )
 
         out.update(
-            await self._fetch_quote(missing, prefer="get_ltp", timeout_s=10.0)
+            await self._fetch_quote(
+                missing,
+                prefer="get_ltp",
+                timeout_s=10.0,
+                allow_sandbox=False,
+            )
         )
         return out
 
@@ -2932,6 +2971,22 @@ class SignalEngineService:
             if aux_payload:
                 await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
 
+        async def _refresh_secondary_ce_pe() -> None:
+            """ATM CE/PE for alternate underlyings — off the Tier-A tick path."""
+            cached = await _cache_get(tenant_id, "secondary_ce_pe")
+            if isinstance(cached, dict):
+                return
+            scratch: dict[str, Any] = {}
+            await _merge_secondary_ce_pe_quotes(self, config, scratch, {})
+            if scratch:
+                await _cache_set(
+                    tenant_id,
+                    "secondary_ce_pe",
+                    "medium",
+                    scratch,
+                    ttl_ms=OPTION_CHAIN_TTL_MS,
+                )
+
         async def _refresh_chain_levels_trend(cfg: SignalEngineConfig) -> None:
             """PCR / levels / ADX·RSI / ATM IV — off the Tier-A paint path."""
             scratch: dict[str, Any] = {}
@@ -3038,6 +3093,7 @@ class SignalEngineService:
             _refresh_crude(),
             _refresh_vix(),
             _refresh_aux(),
+            _refresh_secondary_ce_pe(),
             _refresh_yahoo(),
             *row_jobs,
         )
@@ -3086,6 +3142,10 @@ class SignalEngineService:
         crude_cached = await _cache_get(tenant_id, "crude_oil")
         if isinstance(crude_cached, dict):
             feed.update(crude_cached)
+        # Secondary CE/PE (SENSEX/BANKNIFTY checklist rows) — Tier B only.
+        secondary_cached = await _cache_get(tenant_id, "secondary_ce_pe")
+        if isinstance(secondary_cached, dict):
+            feed.update(secondary_cached)
 
         # Slow — Dow Jones (manual override or cached once per hour); never REST here.
         dow_cached = await _cache_get(tenant_id, "dow_jones")
@@ -3190,6 +3250,7 @@ class SignalEngineService:
                     extra_symbols,
                     prefer=prefer,
                     timeout_s=min(10.0, max(3.0, _remaining() - 2.0)),
+                    allow_sandbox=False,
                 )
             )
 
@@ -3229,6 +3290,7 @@ class SignalEngineService:
                         retry_syms,
                         prefer="get_ltp",
                         timeout_s=min(8.0, max(3.0, _remaining() - 2.0)),
+                        allow_sandbox=False,
                     )
                 )
                 if ce_symbol and feed.get("ce") is None:
@@ -3240,10 +3302,36 @@ class SignalEngineService:
                     if pe_row:
                         feed["pe"] = _pick_float(pe_row, "last_price", "ltp", "last")
 
-        if _budget(10.0):
-            await _merge_secondary_ce_pe_quotes(self, config, feed, fast_quotes)
-        else:
-            _mark_truncated(reason="secondary_ce_pe")
+        # FUT OI early — WS/LTP often lacks OI; do not wait behind secondary CE/PE.
+        fut_row: dict[str, Any] | None = None
+        oi_val: float | None = None
+        if config.nifty_fut_symbol:
+            fut_row = _find_quote_row(fast_quotes, config.nifty_fut_symbol)
+            oi_val = (
+                _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
+            )
+            if oi_val is None and _budget(3.0):
+                fut_quotes = await self._fetch_quote(
+                    [config.nifty_fut_symbol],
+                    prefer="get_quote",
+                    timeout_s=min(6.0, max(2.0, _remaining() - 1.0)),
+                    allow_sandbox=False,
+                )
+                fut_row = (
+                    _find_quote_row(fut_quotes, config.nifty_fut_symbol) or fut_row
+                )
+                if fut_row and isinstance(fut_row, dict):
+                    fast_quotes[config.nifty_fut_symbol] = fut_row
+                oi_val = (
+                    _pick_float(fut_row or {}, "oi", "open_interest")
+                    if fut_row
+                    else None
+                )
+            elif oi_val is None:
+                _mark_truncated(reason="fut_oi")
+
+        # Secondary CE/PE already applied from Tier-B cache at top of _build_feed.
+        # Never REST-fan-out here (was the main secondary_ce_pe truncation source).
 
         ce_vol = _pick_float(ce_row or {}, "volume") if ce_row else None
         pe_vol = _pick_float(pe_row or {}, "volume") if pe_row else None
@@ -3265,27 +3353,16 @@ class SignalEngineService:
             if iv_cached is not None:
                 feed["iv"] = iv_cached
 
-        # OI — nearest fut if configured (book first; REST only when OI missing)
-        fut_row: dict[str, Any] | None = None
+        # OI — apply early-fetched FUT quote (book / kite_rest get_quote).
         if config.nifty_fut_symbol:
-            fut_row = _find_quote_row(fast_quotes, config.nifty_fut_symbol)
-            oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
-            if oi_val is None and _budget(8.0):
-                fut_quotes = await self._fetch_quote(
-                    [config.nifty_fut_symbol],
-                    prefer="get_quote",
-                    timeout_s=min(8.0, max(3.0, _remaining() - 2.0)),
-                )
-                fut_row = _find_quote_row(fut_quotes, config.nifty_fut_symbol) or fut_row
-                oi_val = _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
-            elif oi_val is None:
-                _mark_truncated(reason="fut_oi")
             if oi_val is not None:
                 feed["oi"] = oi_val
                 baseline_key = _oi_baseline_cache_key(config.nifty_fut_symbol)
                 prev_oi = await cache.get_session_value(tenant_id, baseline_key)
                 if prev_oi is not None and prev_oi != 0 and config.oi_pct_chg is None:
-                    feed["oi_pct_chg"] = ((oi_val - float(prev_oi)) / float(prev_oi)) * 100
+                    feed["oi_pct_chg"] = (
+                        (oi_val - float(prev_oi)) / float(prev_oi)
+                    ) * 100
                 if prev_oi is None:
                     await cache.set_session_value(tenant_id, baseline_key, oi_val)
             fut_ltp = _pick_float(fut_row or {}, "last_price", "ltp", "last")
