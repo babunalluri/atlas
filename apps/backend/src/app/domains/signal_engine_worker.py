@@ -399,6 +399,35 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
                                 tenant_id=tenant_key,
                                 error=str(exc)[:160],
                             )
+                    # Mid-tick Start / preset PATCHes bump config_epoch (and can
+                    # leave the desk on STARTING forever if we keep stamping the
+                    # pre-tick epoch). Re-base when the underlying still matches;
+                    # drop only when the desk has moved to a different index.
+                    from app.domains.signal_matrix import instrument_key
+
+                    fresh_cfg = await service._load_config()
+                    under = (
+                        payload.get("underlying")
+                        if isinstance(payload.get("underlying"), dict)
+                        else {}
+                    )
+                    payload_under = str(
+                        under.get("symbol")
+                        or payload.get("instrument")
+                        or config.underlying_symbol
+                        or ""
+                    ).strip()
+                    current_under = str(fresh_cfg.underlying_symbol or "").strip()
+                    if instrument_key(payload_under) != instrument_key(current_under):
+                        logger.info(
+                            "signal_ticker_underlying_changed_drop",
+                            tenant_id=tenant_key,
+                            computed=payload_under,
+                            current=current_under,
+                            config_epoch=epoch_at_start,
+                        )
+                        return False
+                    epoch_at_start = await cache.get_config_epoch(tenant_key)
                     if metrics_due:
                         try:
                             async with session.begin_nested():
@@ -435,6 +464,20 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
             payload = {**payload, "computed_at_ms": int(time.time() * 1000)}
         payload = {**payload, "config_epoch": epoch_at_start}
         wrote = await cache.set_snapshot(tenant_key, payload)
+        if not wrote:
+            # Last-chance unstick: a live frame for the current underlying must
+            # replace a stuck STARTING board even if epoch raced again.
+            existing = await cache.get_snapshot(tenant_key)
+            if (
+                payload.get("feed_source") == "live"
+                and isinstance(existing, dict)
+                and existing.get("feed_source") == "starting"
+            ):
+                payload = {
+                    **payload,
+                    "config_epoch": await cache.get_config_epoch(tenant_key),
+                }
+                wrote = await cache.set_snapshot(tenant_key, payload, force=True)
         if not wrote:
             logger.info(
                 "signal_ticker_stale_config_drop",

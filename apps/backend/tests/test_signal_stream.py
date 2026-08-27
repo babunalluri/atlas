@@ -686,6 +686,8 @@ async def test_refresh_publishes_and_invalidates_on_poisoned_commit(monkeypatch)
         return {
             "feed_source": "live",
             "engine_enabled": True,
+            "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+            "instrument": "NSE:NIFTY 50",
             "metrics": [{"id": "atm"}],
             "passed": 1,
             "evaluable": 1,
@@ -720,3 +722,115 @@ async def test_refresh_publishes_and_invalidates_on_poisoned_commit(monkeypatch)
     assert snap is not None
     assert snap["feed_source"] == "live"
     assert snap.get("computed_at_ms") is not None
+
+
+@pytest.mark.asyncio
+async def test_refresh_rebases_epoch_when_underlying_unchanged(
+    monkeypatch,
+) -> None:
+    """Mid-tick Start/PATCH bumps epoch; live tick for same under must still publish."""
+    import uuid
+
+    from app.domains import signal_engine_worker as worker
+    from app.domains.signal_engine import SignalEngineConfig
+
+    tenant_id = uuid.uuid4()
+    tenant_key = str(tenant_id)
+    await cache.bump_config_epoch(tenant_key)  # -> 1
+    await cache.set_snapshot(
+        tenant_key,
+        {
+            "feed_source": "starting",
+            "engine_enabled": True,
+            "config_epoch": 1,
+            "underlying": {"symbol": "NSE:NIFTY 50"},
+            "metrics": [],
+        },
+        force=True,
+    )
+
+    class PassTxn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.info: dict = {}
+
+        def begin(self):
+            return PassTxn()
+
+        def begin_nested(self):
+            return PassTxn()
+
+        async def invalidate(self) -> None:
+            return None
+
+    class FakeSessionCM:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class StubService:
+        def __init__(self, session, context) -> None:
+            self.session = session
+            self.context = context
+
+        async def _load_config(self) -> SignalEngineConfig:
+            return SignalEngineConfig(
+                engine_enabled=True, underlying_symbol="NSE:NIFTY 50"
+            )
+
+        async def maybe_persist_auto_atm_symbols(self, payload) -> bool:
+            # Simulate a concurrent Start bump during auto-ATM.
+            await cache.bump_config_epoch(tenant_key)  # 1 -> 2
+            return True
+
+    async def fake_guc(session, tenant) -> None:
+        return None
+
+    async def fake_sync(*args, **kwargs) -> bool:
+        return False
+
+    async def fake_compute(service, *, config, last_good=None):
+        return {
+            "feed_source": "live",
+            "engine_enabled": True,
+            "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+            "instrument": "NSE:NIFTY 50",
+            "metrics": [{"id": "atm", "passed": True}],
+            "passed": 1,
+            "evaluable": 1,
+        }
+
+    async def fake_tier_b(*args, **kwargs) -> None:
+        return None
+
+    async def not_due(*args, **kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(worker, "SessionFactory", lambda: FakeSessionCM())
+    monkeypatch.setattr(worker, "apply_tenant_guc", fake_guc)
+    monkeypatch.setattr(worker, "SignalEngineService", StubService)
+    monkeypatch.setattr(worker, "sync_kite_for_signal_tenant", fake_sync)
+    monkeypatch.setattr(worker, "_compute_state_payload", fake_compute)
+    monkeypatch.setattr(worker, "refresh_tier_b_for_tenant", fake_tier_b)
+    monkeypatch.setattr(worker, "schedule_watched_matrix_refresh", fake_tier_b)
+    monkeypatch.setattr(
+        "app.domains.param_chart_cache.metrics_persist_due", not_due
+    )
+    monkeypatch.setattr(
+        "app.domains.param_chart_cache.eod_finalize_due", not_due
+    )
+
+    ok = await worker.refresh_tenant_snapshot(tenant_id, auth_org_id="org-1")
+    assert ok is True
+    snap = await cache.get_snapshot(tenant_key)
+    assert snap is not None
+    assert snap["feed_source"] == "live"
+    assert snap.get("config_epoch") == 2
