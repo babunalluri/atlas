@@ -790,7 +790,7 @@ async def test_merge_secondary_ce_pe_quotes_does_not_corrupt_shared_quotes() -> 
     service = MagicMock()
     fetch_calls: list[list[str]] = []
 
-    async def mock_fetch(symbols: list[str]) -> dict[str, object]:
+    async def mock_fetch(symbols: list[str], **_kwargs) -> dict[str, object]:
         fetch_calls.append(list(symbols))
         if "BSE:SENSEX" in symbols:
             return {"BSE:SENSEX": {"last_price": 81000.0}}
@@ -1504,7 +1504,7 @@ async def test_refresh_tier_b_fetches_run_concurrently(
     async def fake_cache_set(*_a, **_k):
         return None
 
-    async def fake_fetch(symbols, prefer="get_quote", timeout_s=None):  # noqa: ARG001
+    async def fake_fetch(symbols, prefer="get_quote", timeout_s=None, **_kwargs):  # noqa: ARG001
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)

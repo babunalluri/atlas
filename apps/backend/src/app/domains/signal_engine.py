@@ -979,7 +979,9 @@ async def _merge_secondary_ce_pe_quotes(
         if _find_keyed_quote_row(quotes, sym) is None and _find_keyed_quote_row(overlay, sym) is None
     ]
     if missing:
-        overlay.update(await service._fetch_quote(missing))
+        overlay.update(
+            await service._fetch_quote(missing, allow_sandbox=False)
+        )
 
     option_symbols: list[str] = []
     resolve_plan: list[tuple[str, str, str, str]] = []
@@ -1004,7 +1006,12 @@ async def _merge_secondary_ce_pe_quotes(
         resolve_plan.append((ce_sym, pe_sym, str(meta["ce_key"]), str(meta["pe_key"])))
 
     if option_symbols:
-        overlay.update(await service._fetch_quote(list(dict.fromkeys(option_symbols))))
+        overlay.update(
+            await service._fetch_quote(
+                list(dict.fromkeys(option_symbols)),
+                allow_sandbox=False,
+            )
+        )
 
     for ce_sym, pe_sym, ce_key, pe_key in resolve_plan:
         ce_row = _find_quote_row(overlay, ce_sym) or _find_keyed_quote_row(quotes, ce_sym)
@@ -1469,7 +1476,11 @@ async def _merge_option_chain_tier(
     )
     if not ce_syms or not pe_syms:
         return
-    chain_quotes = await service._fetch_quote(ce_syms + pe_syms, prefer="get_quote")
+    chain_quotes = await service._fetch_quote(
+        ce_syms + pe_syms,
+        prefer="get_quote",
+        allow_sandbox=False,
+    )
     payload = chain_metrics_from_quotes(
         chain_quotes,
         find_row=_find_quote_row,
@@ -2875,7 +2886,10 @@ class SignalEngineService:
             crude_cached = await _cache_get(tenant_id, "crude_oil")
             if crude_cached is not None or not config.crude_symbol:
                 return
-            crude_q = await self._fetch_quote([config.crude_symbol])
+            crude_q = await self._fetch_quote(
+                [config.crude_symbol],
+                allow_sandbox=False,
+            )
             crude_row = _find_quote_row(crude_q, config.crude_symbol)
             if not crude_row:
                 return
@@ -2911,7 +2925,11 @@ class SignalEngineService:
                     ]
                 )
             )
-            vix_q = await self._fetch_quote(vix_symbols, prefer="get_ltp")
+            vix_q = await self._fetch_quote(
+                vix_symbols,
+                prefer="get_ltp",
+                allow_sandbox=False,
+            )
             vix_row = None
             for sym in vix_symbols:
                 vix_row = _find_quote_row(vix_q, sym)
@@ -2938,7 +2956,11 @@ class SignalEngineService:
             )
             # get_quote carries ohlc / net_change so stock big-move % can populate.
             aux_quotes = (
-                await self._fetch_quote(aux_symbols, prefer="get_quote")
+                await self._fetch_quote(
+                    aux_symbols,
+                    prefer="get_quote",
+                    allow_sandbox=False,
+                )
                 if aux_symbols
                 else {}
             )
@@ -3018,7 +3040,11 @@ class SignalEngineService:
                 pe_sym = _sanitize_option_symbol(cfg.pe_symbol)
                 if await _cache_get(tenant_id, atm_id) is None and (ce_sym or pe_sym):
                     iv_syms = [s for s in (ce_sym, pe_sym) if s]
-                    iv_quotes = await self._fetch_quote(iv_syms, prefer="get_quote")
+                    iv_quotes = await self._fetch_quote(
+                        iv_syms,
+                        prefer="get_quote",
+                        allow_sandbox=False,
+                    )
                     ce_row = _find_quote_row(iv_quotes, ce_sym) if ce_sym else None
                     pe_row = _find_quote_row(iv_quotes, pe_sym) if pe_sym else None
                     iv_val = _merge_option_iv(ce_row, pe_row)
