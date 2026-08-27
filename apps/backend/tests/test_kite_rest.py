@@ -129,6 +129,71 @@ async def test_rate_slot_is_per_api_key(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_history_rate_bucket_independent_of_quote() -> None:
+    """History ~3/s must not share the quote 1/s slot."""
+    kite_rest.reset_kite_rest_for_tests()
+    assert await kite_rest._await_rate_slot("k", bucket="quote", max_wait_s=0.0)
+    # Quote just reserved — history should still get an immediate slot.
+    assert await kite_rest._await_rate_slot("k", bucket="history", max_wait_s=0.0)
+    # Same history key refuses a second zero-wait reserve.
+    assert (
+        await kite_rest._await_rate_slot("k", bucket="history", max_wait_s=0.0) is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_kite_history_coalesces_and_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+    gate = asyncio.Event()
+
+    async def fake_http(**kwargs):  # noqa: ANN003
+        calls["n"] += 1
+        await gate.wait()
+        return {
+            "ok": True,
+            "data": {
+                "candles": [
+                    ["2026-03-26T09:15:00+0530", 1, 2, 0.5, 1.5, 10],
+                ]
+            },
+        }
+
+    monkeypatch.setattr(kite_rest, "_http_get_history", fake_http)
+
+    t1 = asyncio.create_task(
+        kite_rest.fetch_kite_history(
+            api_key="k",
+            access_token="t",
+            instrument_token=256265,
+            interval="minute",
+            from_date="2026-03-26 09:15:00",
+            to_date="2026-03-26 15:30:00",
+        )
+    )
+    t2 = asyncio.create_task(
+        kite_rest.fetch_kite_history(
+            api_key="k",
+            access_token="t",
+            instrument_token=256265,
+            interval="minute",
+            from_date="2026-03-26 09:15:00",
+            to_date="2026-03-26 15:30:00",
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    gate.set()
+    a, b = await asyncio.gather(t1, t2)
+    assert a is not None and b is not None
+    assert a["ok"] is True
+    assert len(a["data"]["candles"]) == 1
+    assert a == b
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
 async def test_rate_slot_sleeps_outside_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     held_during_sleep = {"v": False}
     real_sleep = asyncio.sleep
@@ -146,7 +211,7 @@ async def test_rate_slot_sleeps_outside_lock(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(asyncio, "sleep", slow_sleep)
     kite_rest.reset_kite_rest_for_tests()
-    kite_rest._next_allowed_at[kite_rest._rate_key("k")] = (
+    kite_rest._next_allowed_at[kite_rest._rate_key("k", bucket="quote")] = (
         __import__("time").monotonic() + 0.05
     )
     assert await kite_rest._await_rate_slot("k", max_wait_s=1.0) is True

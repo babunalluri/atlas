@@ -2160,6 +2160,26 @@ class SignalEngineService:
         elif structural or engine_toggled:
             await _invalidate_tenant_signal_cache(tenant_id)
             epoch = await cache.bump_config_epoch(tenant_id)
+            reason = (
+                "engine_stop"
+                if engine_toggled and patch.get("engine_enabled") is False
+                else "engine_start"
+                if engine_toggled and patch.get("engine_enabled") is True
+                else "structural"
+            )
+            logger.info(
+                "signal_config_epoch_bumped",
+                tenant_id=tenant_id,
+                epoch=epoch,
+                reason=reason,
+                under_changed=under_changed,
+                strike_changed=strike_changed,
+                engine_toggled=engine_toggled,
+                soft_pinned_switch=False,
+                old_underlying=(old_under[:80] if old_under else None),
+                new_underlying=(new_under[:80] if new_under else None),
+                patch_keys=sorted(str(k) for k in patch.keys())[:32],
+            )
         else:
             # Drop setup memo so the next tick loads the new overrides.
             await cache.delete_metric(tenant_id, "setup")
@@ -2358,6 +2378,37 @@ class SignalEngineService:
         *,
         timeout_s: float = 15.0,
     ) -> Any | None:
+        # Prefer first-party Kite historical so levels/trend leave the sandbox
+        # /v1/runs pool (own ~3 req/s bucket, independent of quote 1/s).
+        if name == "get_historical_candles":
+            try:
+                from app.domains.kite_rest import fetch_kite_history
+                from app.domains.kite_ticker_hub import resolve_kite_credentials
+
+                creds = await resolve_kite_credentials(self.session, self.context)
+                if creds is not None:
+                    api_key, access_token = creds
+                    first_party = await fetch_kite_history(
+                        api_key=api_key,
+                        access_token=access_token,
+                        instrument_token=int(kwargs.get("instrument_token") or 0),
+                        interval=str(kwargs.get("interval") or ""),
+                        from_date=str(
+                            kwargs.get("from_date") or kwargs.get("from") or ""
+                        ),
+                        to_date=str(kwargs.get("to_date") or kwargs.get("to") or ""),
+                        continuous=int(kwargs.get("continuous") or 0),
+                        oi=int(kwargs.get("oi") or 0),
+                        timeout_s=min(15.0, float(timeout_s)),
+                    )
+                    if first_party is not None:
+                        return first_party
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "kite_rest_history_path_failed",
+                    error=str(exc)[:200],
+                )
+
         for fn in await self._broker_tools():
             if getattr(fn, "__name__", "") != name:
                 continue
