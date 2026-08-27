@@ -5,7 +5,6 @@ import { useEffect, useState } from "react";
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { deskChatEmptyCopy } from "@/components/domains/DeskChat";
 import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
-import { OptionsLabPanel } from "@/components/domains/OptionsLabPanel";
 import { ParamChartPanel } from "@/components/domains/ParamChartPanel";
 import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
@@ -17,7 +16,7 @@ import { cn } from "@/lib/utils";
 const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
 const DESK_MAIN_TAB_KEY = "atlas-desk-main-tab";
 
-type DeskMainTab = "signals" | "param-chart" | "options-lab";
+type DeskMainTab = "signals" | "param-chart";
 
 function useDeskMainTab() {
   const [tab, setTabState] = useState<DeskMainTab>("signals");
@@ -25,16 +24,12 @@ function useDeskMainTab() {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DESK_MAIN_TAB_KEY);
-      if (
-        stored === "options-lab" ||
-        stored === "signals" ||
-        stored === "param-chart"
-      ) {
+      if (stored === "signals" || stored === "param-chart") {
         setTabState(stored);
-      } else if (stored === "automations") {
-        // Former Automations desk tab → Options Lab (Bot overlay).
-        setTabState("options-lab");
-        window.localStorage.setItem(DESK_MAIN_TAB_KEY, "options-lab");
+      } else if (stored === "options-lab" || stored === "automations") {
+        // Options Lab removed from the pilot desk (sandbox load on 2 OCPU).
+        setTabState("signals");
+        window.localStorage.setItem(DESK_MAIN_TAB_KEY, "signals");
       }
     } catch {
       // private mode / blocked storage
@@ -182,7 +177,7 @@ export function StockBrokerWorkspace({
           <div
             role="tablist"
             aria-label="Trading desk views"
-            className="grid w-full shrink-0 grid-cols-3 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
+            className="grid w-full shrink-0 grid-cols-2 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
           >
             {(
               [
@@ -195,11 +190,6 @@ export function StockBrokerWorkspace({
                   id: "param-chart" as const,
                   label: "Param Chart",
                   hint: "Monthly OHLC & shared params",
-                },
-                {
-                  id: "options-lab" as const,
-                  label: "Options Lab",
-                  hint: readOnly ? "Live chain (view)" : "Chain, builder, bots",
                 },
               ] as const
             ).map(({ id, label, hint }) => {
@@ -230,7 +220,7 @@ export function StockBrokerWorkspace({
             })}
           </div>
           {/* Keep Signal mounted (hidden) so /admin/signals/stream + Redis
-              watch stay alive when the user flips to Param Chart / Options Lab.
+              watch stay alive when the user flips to Param Chart.
               Unmounting aborted SSE and left the board on dashes / stale. */}
           <div
             className={cn(
@@ -252,11 +242,6 @@ export function StockBrokerWorkspace({
           {deskTab === "param-chart" ? (
             <div className="mt-3 min-h-0 flex-1">
               <ParamChartPanel active />
-            </div>
-          ) : null}
-          {deskTab === "options-lab" ? (
-            <div className="mt-3 min-h-0 flex-1">
-              <OptionsLabPanel active readOnly={readOnly} />
             </div>
           ) : null}
         </div>
