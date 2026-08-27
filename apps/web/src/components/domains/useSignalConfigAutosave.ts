@@ -49,6 +49,7 @@ export function useSignalConfigAutosave(
   enabled: boolean,
 ) {
   const [presets, setPresets] = useState<SignalUnderlyingPreset[]>([]);
+  const [pinnedInstruments, setPinnedInstruments] = useState<string[]>([]);
   const [presetKey, setPresetKey] = useState(CUSTOM_PRESET);
   const [config, setConfig] = useState<SignalEngineAdminConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -127,6 +128,7 @@ export function useSignalConfigAutosave(
       if (!token) return;
       const data = await getSignalConfig(token);
       setPresets(data.presets);
+      setPinnedInstruments(data.pinned_instruments ?? []);
       setConfig(data.config);
       lastSavedRef.current = signalConfigSnapshot(data.config);
       const match = data.presets.find(
@@ -320,6 +322,7 @@ export function useSignalConfigAutosave(
   return {
     config,
     presets,
+    pinnedInstruments,
     presetKey,
     presetLocked: presetKey !== CUSTOM_PRESET,
     loading,

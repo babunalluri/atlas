@@ -16,16 +16,22 @@ function streamHeaders(accessToken: string): Record<string, string> {
   };
 }
 
-/** Live admin signal board via SSE (~8 Hz, coalesced server-side). */
+/** Live signal board via SSE (~8 Hz, coalesced server-side). */
 export async function streamSignalState(options: {
   accessToken: string;
   signal?: AbortSignal;
+  /** Matrix row to watch (warm switch without structural flush). */
+  instrument?: string | null;
   onState: (state: SignalEngineState) => void;
 }): Promise<void> {
-  const { accessToken, signal, onState } = options;
+  const { accessToken, signal, onState, instrument } = options;
+  const qs =
+    instrument && instrument.trim()
+      ? `?instrument=${encodeURIComponent(instrument.trim())}`
+      : "";
   let response: Response;
   try {
-    response = await fetch(agentOsUrl("/admin/signals/stream"), {
+    response = await fetch(agentOsUrl(`/admin/signals/stream${qs}`), {
       method: "GET",
       headers: streamHeaders(accessToken),
       signal,

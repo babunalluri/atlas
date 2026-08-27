@@ -565,7 +565,7 @@ async def test_hub_restart_after_stop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_options_lab_stream_denies_end_user(options_lab_db, tenant_a) -> None:
+async def test_options_lab_stream_allows_end_user(options_lab_db, tenant_a) -> None:
     async with options_lab_db() as session:
         session.add(
             Tenant(
@@ -585,8 +585,24 @@ async def test_options_lab_stream_denies_end_user(options_lab_db, tenant_a) -> N
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        denied = await client.get("/admin/options-lab/stream", headers=headers)
+        # Avoid awaiting an infinite SSE body — probe ViewerContext via config/chain.
+        config = await client.get("/admin/options-lab/config", headers=headers)
+        assert config.status_code == 200
+
+        chain = await client.get("/admin/options-lab/chain", headers=headers)
+        assert chain.status_code == 200
+
+        denied = await client.patch(
+            "/admin/options-lab/config",
+            headers=headers,
+            json={"mock": True},
+        )
         assert denied.status_code == 403
+
+        reset = await client.post(
+            "/admin/options-lab/reset-oi-baseline", headers=headers
+        )
+        assert reset.status_code == 403
 
 
 @pytest.mark.asyncio

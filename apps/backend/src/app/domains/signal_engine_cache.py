@@ -25,7 +25,10 @@ logger = get_logger(__name__)
 _metric_cache: dict[str, dict[str, tuple[float, Any]]] = {}
 _session_store: dict[str, dict[str, Any]] = {}
 _snapshots: dict[str, tuple[float, dict[str, Any]]] = {}
+_globals: dict[str, tuple[float, dict[str, Any]]] = {}
+_rows: dict[str, tuple[float, dict[str, Any]]] = {}
 _watchers: dict[str, float] = {}
+_watch_instruments: dict[str, dict[str, float]] = {}
 _local_compute_locks: dict[str, asyncio.Lock] = {}
 _redis_lock_tokens: dict[str, str] = {}
 _redis_session_prune_due_ms: dict[str, float] = {}
@@ -90,6 +93,16 @@ def _snapshot_key(tenant_id: str) -> str:
     return f"atlas:signals:{tenant_id}:snapshot"
 
 
+def _globals_key(tenant_id: str) -> str:
+    return f"atlas:signals:{tenant_id}:globals"
+
+
+def _row_key(tenant_id: str, instrument: str) -> str:
+    from app.domains.signal_matrix import instrument_key
+
+    return f"atlas:signals:{tenant_id}:row:{instrument_key(instrument)}"
+
+
 def _session_key(tenant_id: str) -> str:
     return f"atlas:signals:{tenant_id}:sess"
 
@@ -101,6 +114,10 @@ def _epoch_key(tenant_id: str) -> str:
 
 def _watch_key(tenant_id: str) -> str:
     return f"atlas:signals:watch:{tenant_id}"
+
+
+def _watch_instruments_key(tenant_id: str) -> str:
+    return f"atlas:signals:watchinstr:{tenant_id}"
 
 
 def _lock_key(tenant_id: str) -> str:
@@ -115,7 +132,10 @@ def reset_signal_cache_for_tests() -> None:
     _metric_cache.clear()
     _session_store.clear()
     _snapshots.clear()
+    _globals.clear()
+    _rows.clear()
     _watchers.clear()
+    _watch_instruments.clear()
     _local_compute_locks.clear()
     _redis_lock_tokens.clear()
     _redis_session_prune_due_ms.clear()
@@ -309,38 +329,292 @@ async def set_snapshot(
                 json.dumps(payload, separators=(",", ":")),
                 px=ttl,
             )
+            # Dual-write matrix halves so warm instrument switches skip rebuild.
+            await _dual_write_matrix(client, tenant_id, payload, ttl_ms=ttl)
             return True
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_snapshot_set_failed", tenant_id=tenant_id)
 
     _snapshots[tenant_id] = (_now_ms() + ttl, payload)
+    await _dual_write_matrix_local(tenant_id, payload, ttl_ms=ttl)
     return True
 
 
-async def clear_watcher(tenant_id: str) -> None:
+async def _dual_write_matrix(
+    client: Any,
+    tenant_id: str,
+    payload: dict[str, Any],
+    *,
+    ttl_ms: int,
+) -> None:
+    from app.domains.signal_matrix import instrument_key, split_snapshot
+
+    globals_doc, row_doc = split_snapshot(payload)
+    await client.set(
+        _globals_key(tenant_id),
+        json.dumps(globals_doc, separators=(",", ":")),
+        px=ttl_ms,
+    )
+    instrument = str(row_doc.get("instrument") or "").strip()
+    if instrument:
+        await client.set(
+            _row_key(tenant_id, instrument),
+            json.dumps(row_doc, separators=(",", ":")),
+            px=ttl_ms,
+        )
+        # Keep a pointer so legacy readers know the primary row key.
+        await client.set(
+            f"atlas:signals:{tenant_id}:primary_row",
+            instrument_key(instrument),
+            px=ttl_ms,
+        )
+
+
+async def _dual_write_matrix_local(
+    tenant_id: str,
+    payload: dict[str, Any],
+    *,
+    ttl_ms: int,
+) -> None:
+    from app.domains.signal_matrix import instrument_key, split_snapshot
+
+    globals_doc, row_doc = split_snapshot(payload)
+    expires = _now_ms() + ttl_ms
+    _globals[tenant_id] = (expires, globals_doc)
+    instrument = str(row_doc.get("instrument") or "").strip()
+    if instrument:
+        _rows[f"{tenant_id}:{instrument_key(instrument)}"] = (expires, row_doc)
+
+
+async def get_globals(tenant_id: str) -> dict[str, Any] | None:
     client = await get_redis()
     if client is not None:
         try:
+            raw = await client.get(_globals_key(tenant_id))
+            if raw is None:
+                return None
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_globals_get_failed", tenant_id=tenant_id)
+
+    row = _globals.get(tenant_id)
+    if row is None:
+        return None
+    expires_at, payload = row
+    if _now_ms() >= expires_at:
+        return None
+    return payload
+
+
+async def set_globals(
+    tenant_id: str,
+    payload: dict[str, Any],
+    *,
+    ttl_ms: int | None = None,
+) -> None:
+    ttl = int(ttl_ms) if ttl_ms is not None else SNAPSHOT_TTL_MS
+    if ttl <= 0:
+        ttl = SNAPSHOT_TTL_MS
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.set(
+                _globals_key(tenant_id),
+                json.dumps(payload, separators=(",", ":")),
+                px=ttl,
+            )
+            return
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_globals_set_failed", tenant_id=tenant_id)
+    _globals[tenant_id] = (_now_ms() + ttl, payload)
+
+
+async def get_row(tenant_id: str, instrument: str) -> dict[str, Any] | None:
+    if not (instrument or "").strip():
+        return None
+    from app.domains.signal_matrix import instrument_key
+
+    key = instrument_key(instrument)
+    client = await get_redis()
+    if client is not None:
+        try:
+            raw = await client.get(_row_key(tenant_id, instrument))
+            if raw is None:
+                return None
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            await invalidate_redis()
+            logger.warning(
+                "signal_cache_row_get_failed",
+                tenant_id=tenant_id,
+                instrument=key,
+            )
+
+    row = _rows.get(f"{tenant_id}:{key}")
+    if row is None:
+        return None
+    expires_at, payload = row
+    if _now_ms() >= expires_at:
+        return None
+    return payload
+
+
+async def set_row(
+    tenant_id: str,
+    instrument: str,
+    payload: dict[str, Any],
+    *,
+    ttl_ms: int | None = None,
+) -> None:
+    if not (instrument or "").strip():
+        return
+    from app.domains.signal_matrix import instrument_key
+
+    key = instrument_key(instrument)
+    ttl = int(ttl_ms) if ttl_ms is not None else SNAPSHOT_TTL_MS
+    if ttl <= 0:
+        ttl = SNAPSHOT_TTL_MS
+    stamped = {**payload, "instrument": instrument}
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.set(
+                _row_key(tenant_id, instrument),
+                json.dumps(stamped, separators=(",", ":")),
+                px=ttl,
+            )
+            return
+        except Exception:
+            await invalidate_redis()
+            logger.warning(
+                "signal_cache_row_set_failed",
+                tenant_id=tenant_id,
+                instrument=key,
+            )
+    _rows[f"{tenant_id}:{key}"] = (_now_ms() + ttl, stamped)
+
+
+async def merged_frame(
+    tenant_id: str,
+    *,
+    instrument: str | None = None,
+) -> dict[str, Any] | None:
+    """Prefer globals+row merge; fall back to legacy monolithic snapshot.
+
+    Incomplete matrix halves (globals without a row, or vice versa with no
+    usable board fields) must not shadow the full ``snapshot`` key — that
+    caused SSE frames to lose ``passed`` / entry after dual-write of a
+    globals-only document.
+    """
+    from app.domains.signal_matrix import merge_globals_row
+
+    globals_doc = await get_globals(tenant_id)
+    selected = (instrument or "").strip()
+    if not selected:
+        # Prefer primary pointer, else underlying on legacy snapshot.
+        client = await get_redis()
+        if client is not None:
+            try:
+                raw = await client.get(f"atlas:signals:{tenant_id}:primary_row")
+                if raw:
+                    selected = str(raw)
+            except Exception:
+                pass
+        if not selected:
+            snap = await get_snapshot(tenant_id)
+            if isinstance(snap, dict):
+                under = snap.get("underlying") if isinstance(snap.get("underlying"), dict) else {}
+                selected = str(snap.get("instrument") or under.get("symbol") or "")
+    row_doc = await get_row(tenant_id, selected) if selected else None
+    # Require a row document before preferring the matrix merge. Globals alone
+    # are not a complete desk frame.
+    if row_doc is not None:
+        merged = merge_globals_row(globals_doc, row_doc)
+        if merged is not None:
+            return merged
+    return await get_snapshot(tenant_id)
+
+
+async def clear_watcher(tenant_id: str, *, instrument: str | None = None) -> None:
+    client = await get_redis()
+    if instrument:
+        from app.domains.signal_matrix import instrument_key
+
+        key = instrument_key(instrument)
+        if client is not None:
+            try:
+                await client.hdel(_watch_instruments_key(tenant_id), key)
+                return
+            except Exception:
+                await invalidate_redis()
+                logger.warning("signal_cache_watch_instr_clear_failed", tenant_id=tenant_id)
+        bucket = _watch_instruments.get(tenant_id)
+        if bucket is not None:
+            bucket.pop(key, None)
+        return
+
+    if client is not None:
+        try:
             await client.delete(_watch_key(tenant_id))
+            await client.delete(_watch_instruments_key(tenant_id))
             return
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_watch_clear_failed", tenant_id=tenant_id)
     _watchers.pop(tenant_id, None)
+    _watch_instruments.pop(tenant_id, None)
 
 
-async def touch_watcher(tenant_id: str) -> None:
+async def touch_watcher(tenant_id: str, *, instrument: str | None = None) -> None:
     client = await get_redis()
     if client is not None:
         try:
             await client.set(_watch_key(tenant_id), "1", ex=WATCH_TTL_SECONDS)
+            if instrument:
+                from app.domains.signal_matrix import instrument_key
+
+                key = instrument_key(instrument)
+                pipe = client.pipeline()
+                pipe.hset(_watch_instruments_key(tenant_id), key, "1")
+                pipe.expire(_watch_instruments_key(tenant_id), WATCH_TTL_SECONDS)
+                await pipe.execute()
             return
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_watch_touch_failed", tenant_id=tenant_id)
 
     _watchers[tenant_id] = _now_ms() + (WATCH_TTL_SECONDS * 1000)
+    if instrument:
+        from app.domains.signal_matrix import instrument_key
+
+        key = instrument_key(instrument)
+        bucket = _watch_instruments.setdefault(tenant_id, {})
+        bucket[key] = _now_ms() + (WATCH_TTL_SECONDS * 1000)
+
+
+async def list_watched_instruments(tenant_id: str) -> list[str]:
+    """Instrument keys currently watched for this tenant (may be Redis-safe keys)."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            fields = await client.hkeys(_watch_instruments_key(tenant_id))
+            return [str(f) for f in fields]
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_watch_instr_list_failed", tenant_id=tenant_id)
+
+    now = _now_ms()
+    bucket = _watch_instruments.get(tenant_id) or {}
+    alive = [k for k, exp in bucket.items() if exp > now]
+    for k in list(bucket):
+        if bucket[k] <= now:
+            bucket.pop(k, None)
+    return alive
 
 
 async def watcher_alive(tenant_id: str) -> bool:
@@ -590,14 +864,45 @@ async def bump_config_epoch(tenant_id: str) -> int:
     return nxt
 
 
-async def invalidate_underlying_dependent(tenant_id: str) -> None:
-    """Config-patch / Stop flush: underlying metrics + snapshot + session opens.
+async def list_metric_ids(tenant_id: str) -> list[str]:
+    """Return known metric ids for a tenant (local + Redis scan best-effort)."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            found: list[str] = []
+            cursor = 0
+            prefix = f"atlas:signals:{tenant_id}:m:"
+            pattern = f"{prefix}*"
+            while True:
+                cursor, keys = await client.scan(cursor=cursor, match=pattern, count=64)
+                for key in keys:
+                    raw = key.decode() if isinstance(key, (bytes, bytearray)) else str(key)
+                    if raw.startswith(prefix):
+                        found.append(raw[len(prefix) :])
+                if cursor == 0:
+                    break
+            return found
+        except Exception:
+            await invalidate_redis()
+            logger.warning("signal_cache_metric_list_failed", tenant_id=tenant_id)
+    bucket = _metric_cache.get(tenant_id) or {}
+    return list(bucket.keys())
 
-    Keeps yahoo / VIX / crude / aux / NSE / Dow warm so Stop→Start and preset
-    switches do not force a multi-minute slow-tier rebuild.
+
+async def invalidate_underlying_dependent(tenant_id: str) -> None:
+    """Config-patch / Stop flush: underlying metrics + rows + session opens.
+
+    Keeps yahoo / VIX / crude / aux / NSE / Dow warm — and keeps the shared
+    ``globals`` Redis blob so pinned-matrix switches do not cold-rebuild globals.
     """
+    from app.domains.signal_matrix import is_row_scoped_metric_id
+
     for metric_id in UNDERLYING_DEPENDENT_METRICS:
         await delete_metric(tenant_id, metric_id)
+    # Instrument-scoped variants (levels:NSE:NIFTY_50, …) must flush too.
+    for metric_id in await list_metric_ids(tenant_id):
+        if is_row_scoped_metric_id(metric_id):
+            await delete_metric(tenant_id, metric_id)
     session_fields = [
         f for f in await list_session_fields(tenant_id) if _is_underlying_session_field(f)
     ]
@@ -606,13 +911,27 @@ async def invalidate_underlying_dependent(tenant_id: str) -> None:
     client = await get_redis()
     if client is not None:
         try:
-            await client.delete(_snapshot_key(tenant_id))
+            keys = [_snapshot_key(tenant_id)]
+            # Drop instrument rows only — leave :globals intact.
+            cursor = 0
+            pattern = f"atlas:signals:{tenant_id}:row:*"
+            while True:
+                cursor, found = await client.scan(cursor=cursor, match=pattern, count=64)
+                keys.extend(found)
+                if cursor == 0:
+                    break
+            await client.delete(*keys)
+            await client.delete(f"atlas:signals:{tenant_id}:primary_row")
         except Exception:
             await invalidate_redis()
             logger.warning(
                 "signal_cache_underlying_invalidate_failed", tenant_id=tenant_id
             )
     _snapshots.pop(tenant_id, None)
+    prefix = f"{tenant_id}:"
+    for key in list(_rows):
+        if key.startswith(prefix):
+            _rows.pop(key, None)
 
 
 async def invalidate_tenant(tenant_id: str) -> None:
@@ -621,13 +940,25 @@ async def invalidate_tenant(tenant_id: str) -> None:
     if client is not None:
         try:
             cursor = 0
-            keys_to_delete = [_snapshot_key(tenant_id), _session_key(tenant_id)]
-            pattern = f"atlas:signals:{tenant_id}:m:*"
-            while True:
-                cursor, keys = await client.scan(cursor=cursor, match=pattern, count=64)
-                keys_to_delete.extend(keys)
-                if cursor == 0:
-                    break
+            keys_to_delete = [
+                _snapshot_key(tenant_id),
+                _session_key(tenant_id),
+                _globals_key(tenant_id),
+                f"atlas:signals:{tenant_id}:primary_row",
+            ]
+            patterns = (
+                f"atlas:signals:{tenant_id}:m:*",
+                f"atlas:signals:{tenant_id}:row:*",
+            )
+            for pattern in patterns:
+                cursor = 0
+                while True:
+                    cursor, keys = await client.scan(
+                        cursor=cursor, match=pattern, count=64
+                    )
+                    keys_to_delete.extend(keys)
+                    if cursor == 0:
+                        break
             if keys_to_delete:
                 await client.delete(*keys_to_delete)
         except Exception:
@@ -637,3 +968,8 @@ async def invalidate_tenant(tenant_id: str) -> None:
     _metric_cache.pop(tenant_id, None)
     _session_store.pop(tenant_id, None)
     _snapshots.pop(tenant_id, None)
+    _globals.pop(tenant_id, None)
+    prefix = f"{tenant_id}:"
+    for key in list(_rows):
+        if key.startswith(prefix):
+            _rows.pop(key, None)

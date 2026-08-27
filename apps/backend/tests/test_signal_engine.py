@@ -858,17 +858,19 @@ async def test_option_chain_cache_hits_without_writer_grip(monkeypatch: pytest.M
         SignalEngineConfig,
         _merge_option_chain_tier,
     )
+    from app.domains.signal_matrix import row_metric_id
 
     cache.reset_signal_cache_for_tests()
     tenant = "tenant-chain"
     feed: dict[str, object] = {}
     config = SignalEngineConfig(
+        underlying_symbol="NSE:NIFTY 50",
         nifty_fut_symbol="NFO:NIFTY26AUGFUT",
         strike_step=50,
     )
     await cache.set_metric(
         tenant,
-        "option_chain",
+        row_metric_id("option_chain", config.underlying_symbol),
         "medium",
         {"pcr": 1.15, "max_pain": 24300.0},
     )
@@ -1514,8 +1516,17 @@ async def test_refresh_tier_b_fetches_run_concurrently(
             out[sym] = {"last_price": 100.0, "close": 99.0, "ohlc": {"open": 98.0}}
         return out
 
+    async def fake_heavy(*_a, **_k):
+        return None
+
     monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
     monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    # Chain/levels/trend/Yahoo run in the same gather — keep them no-ops so this
+    # test still asserts crude/VIX/aux concurrency without wall-clock hist/Yahoo.
+    monkeypatch.setattr("app.domains.signal_engine._merge_option_chain_tier", fake_heavy)
+    monkeypatch.setattr("app.domains.signal_engine._merge_levels_tier", fake_heavy)
+    monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_slow_tier", fake_heavy)
+    monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_timing_tier", fake_heavy)
 
     session = MagicMock()
     session.info = {"tenant_id": tenant_id}
@@ -1528,6 +1539,11 @@ async def test_refresh_tier_b_fetches_run_concurrently(
     service = SignalEngineService(session, ctx)
     service._fetch_quote = fake_fetch  # type: ignore[method-assign]
 
+    async def fake_tier_a(self, symbols):  # noqa: ANN001,ARG001
+        return {}
+
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+
     cfg = SignalEngineConfig(
         mock=False,
         crude_symbol="MCX:CRUDEOILM",
@@ -1539,3 +1555,113 @@ async def test_refresh_tier_b_fetches_run_concurrently(
     assert max_in_flight >= 2
     assert elapsed < 0.12
 
+
+@pytest.mark.asyncio
+async def test_build_feed_does_not_inline_chain_or_yahoo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cause 2: Tier-A tick must not await chain/levels/Yahoo refreshes."""
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineConfig, SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    calls = {"chain": 0, "levels": 0, "yahoo": 0}
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        # Instrument-scoped Tier-B keys (F1).
+        if metric in {"option_chain", "option_chain:NSE:NIFTY_50"}:
+            return {"pcr": 1.1, "max_pain": 24500.0}
+        if metric in {"levels", "levels:NSE:NIFTY_50"}:
+            return {"pdh": 24600.0}
+        if metric in {"trend", "trend:NSE:NIFTY_50"}:
+            return {"adx": 22.0, "rsi": 55.0}
+        if metric == "yahoo_global":
+            return {"global_nikkei_chg": 0.4}
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def boom_chain(*_a, **_k):
+        calls["chain"] += 1
+        raise AssertionError("chain must not run on Tier-A tick")
+
+    async def boom_levels(*_a, **_k):
+        calls["levels"] += 1
+        raise AssertionError("levels must not run on Tier-A tick")
+
+    async def boom_yahoo(*_a, **_k):
+        calls["yahoo"] += 1
+        raise AssertionError("yahoo must not run on Tier-A tick")
+
+    async def fake_nse(*_a, **_k):
+        return None
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_secondary(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):  # noqa: ANN001,ARG001
+        return {
+            "NSE:NIFTY 50": {
+                "last_price": 24500.0,
+                "ohlc": {"open": 24400.0},
+                "instrument_token": 256265,
+            }
+        }
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_nse)
+    monkeypatch.setattr("app.domains.signal_engine._merge_option_chain_tier", boom_chain)
+    monkeypatch.setattr("app.domains.signal_engine._merge_levels_tier", boom_levels)
+    monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_slow_tier", boom_yahoo)
+    monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_timing_tier", boom_yahoo)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(
+        "app.domains.signal_engine._merge_secondary_ce_pe_quotes", fake_secondary
+    )
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+
+    session = MagicMock()
+    session.info = {"tenant_id": uuid.uuid4()}
+    ctx = TenantContext(
+        tenant_id=session.info["tenant_id"],
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = AsyncMock(return_value={})
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+        nifty_fut_symbol="NFO:NIFTY26SEPFUT",
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24500.0
+    assert feed["pcr"] == 1.1
+    assert feed["adx"] == 22.0
+    assert feed["global_nikkei_chg"] == 0.4
+    assert calls == {"chain": 0, "levels": 0, "yahoo": 0}
+    # FUT OI / secondary CE-PE may still REST; chain/levels/Yahoo must not.
+
+
+def test_phase3_metric_ttls_are_shorter_than_generic_medium() -> None:
+    from app.domains.signal_engine_constants import (
+        OPTION_CHAIN_TTL_MS,
+        TIER_B_REFRESH_GATE_MS,
+        TIER_TTL_MS,
+        TREND_TTL_MS,
+    )
+
+    assert OPTION_CHAIN_TTL_MS == 15_000
+    assert TREND_TTL_MS == 30_000
+    assert TIER_B_REFRESH_GATE_MS < OPTION_CHAIN_TTL_MS
+    assert OPTION_CHAIN_TTL_MS < TIER_TTL_MS["medium"]
+    assert TREND_TTL_MS < TIER_TTL_MS["medium"]

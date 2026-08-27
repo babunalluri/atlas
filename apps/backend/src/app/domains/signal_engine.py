@@ -33,9 +33,12 @@ from app.domains.desk_snapshot import (
 )
 from app.domains import signal_engine_cache as cache
 from app.domains.signal_engine_constants import (
+    ATM_IV_TTL_MS,
     BROKER_QUOTE_TTL_MS,
     ENGINE_STARTING_SNAPSHOT_MS,
     ENTRY_GATE_COVERAGE_RATIO,
+    LEVELS_TTL_MS,
+    OPTION_CHAIN_TTL_MS,
     SNAPSHOT_FRESH_MS,
     SNAPSHOT_TTL_MS,
     STATE_COMPUTE_TIMEOUT_MS,
@@ -43,6 +46,7 @@ from app.domains.signal_engine_constants import (
     STREAM_INTERVAL_MS,
     TIER_A_REST_GAP_FILL_MS,
     TIER_TTL_MS,
+    TREND_TTL_MS,
     Tier,
 )
 from app.domains.signal_engine_calendar import europe_session_max_abs_chg
@@ -57,6 +61,7 @@ from app.domains.signal_engine_levels import (
     mock_levels,
 )
 from app.domains.signal_engine_nse import fetch_nse_slow_fields, mock_nse_fields
+from app.domains.signal_matrix import row_metric_id
 from app.domains.signal_engine_yahoo import (
     CRYPTO_YAHOO_TICKERS,
     GLOBAL_YAHOO_TICKERS,
@@ -411,18 +416,29 @@ async def state_for_stream(
     return _annotate_snapshot_freshness(payload, computing=True)
 
 
-async def stream_frame_from_cache(tenant_id: str) -> dict[str, Any] | None:
+async def stream_frame_from_cache(
+    tenant_id: str,
+    *,
+    instrument: str | None = None,
+) -> dict[str, Any] | None:
     """Serve one SSE frame from Redis only.
 
     Returns None when ``engine_enabled`` or the snapshot is missing so the
     caller can open a DB session for the cold path.
+
+    When ``instrument`` is set, merge ``globals + row[instrument]`` so warm
+    switches paint without waiting on a structural rebuild.
     """
     enabled = await cache.get_metric(tenant_id, "engine_enabled")
-    snapshot = await cache.get_snapshot(tenant_id)
+    snapshot = await cache.merged_frame(tenant_id, instrument=instrument)
     if not isinstance(enabled, bool) or snapshot is None:
-        return None
+        # Fallback: legacy monolithic snapshot when matrix halves are cold.
+        if snapshot is None:
+            snapshot = await cache.get_snapshot(tenant_id)
+        if not isinstance(enabled, bool) or snapshot is None:
+            return None
     if enabled:
-        await cache.touch_watcher(tenant_id)
+        await cache.touch_watcher(tenant_id, instrument=instrument)
         computing = await cache.compute_lock_held(tenant_id)
         return _annotate_snapshot_freshness(snapshot, computing=computing)
     return _apply_engine_stopped_overlay(snapshot)
@@ -583,8 +599,20 @@ async def _cache_get(tenant_id: str, metric_id: str) -> Any | None:
     return await cache.get_metric(tenant_id, metric_id)
 
 
-async def _cache_set(tenant_id: str, metric_id: str, tier: Tier, value: Any) -> None:
-    await cache.set_metric(tenant_id, metric_id, tier, value)
+async def _cache_set(
+    tenant_id: str,
+    metric_id: str,
+    tier: Tier,
+    value: Any,
+    *,
+    ttl_ms: int | None = None,
+) -> None:
+    await cache.set_metric(tenant_id, metric_id, tier, value, ttl_ms=ttl_ms)
+
+
+def _row_metric(kind: str, underlying: str | None) -> str:
+    """Instrument-scoped Tier-B cache id (levels/trend/chain/atm_iv)."""
+    return row_metric_id(kind, underlying)
 
 
 async def _cache_delete(tenant_id: str, metric_id: str) -> None:
@@ -1155,8 +1183,12 @@ async def _merge_yahoo_slow_tier(
         payload = mock_yahoo_changes(GLOBAL_YAHOO_TICKERS)
         crypto = mock_yahoo_changes(CRYPTO_YAHOO_TICKERS)
     else:
-        payload = fetch_yahoo_changes(GLOBAL_YAHOO_TICKERS)
-        crypto = fetch_yahoo_changes(CRYPTO_YAHOO_TICKERS)
+        # Yahoo uses sync curl_cffi under a threading lock — never run on the
+        # event loop or every SSE / worker in-process stalls for ~30 tickers.
+        # Sequential to_thread: both share `_fetch_lock`, so gather would only
+        # contend; offloading still keeps the event loop free.
+        payload = await asyncio.to_thread(fetch_yahoo_changes, GLOBAL_YAHOO_TICKERS)
+        crypto = await asyncio.to_thread(fetch_yahoo_changes, CRYPTO_YAHOO_TICKERS)
     payload.update(crypto)
     # Compute from the merged payload so BTC (from GLOBAL) is included.
     max_crypto = crypto_max_abs_change(payload)
@@ -1184,7 +1216,9 @@ async def _merge_yahoo_timing_tier(
     if mock:
         payload = mock_yahoo_changes(TIMING_YAHOO_TICKERS)
     else:
-        payload = fetch_yahoo_session_changes(TIMING_YAHOO_TICKERS)
+        payload = await asyncio.to_thread(
+            fetch_yahoo_session_changes, TIMING_YAHOO_TICKERS
+        )
     if payload:
         feed.update(payload)
         await _cache_set(tenant_id, "yahoo_timing", "medium", payload)
@@ -1232,10 +1266,12 @@ async def _merge_levels_tier(
     *,
     spot_row: dict[str, Any] | None,
     mock: bool,
+    underlying: str | None = None,
 ) -> None:
     merged = False
+    levels_id = _row_metric("levels", underlying)
     try:
-        cached = await _cache_get(tenant_id, "levels")
+        cached = await _cache_get(tenant_id, levels_id)
         if cached is not None:
             feed.update(cached)
             merged = True
@@ -1244,7 +1280,7 @@ async def _merge_levels_tier(
             spot = float(feed.get("nifty_ltp") or 24312.5)
             payload = mock_levels(spot)
             feed.update(payload)
-            await _cache_set(tenant_id, "levels", "medium", payload)
+            await _cache_set(tenant_id, levels_id, "medium", payload, ttl_ms=LEVELS_TTL_MS)
             merged = True
             return
         if spot_row is None:
@@ -1288,7 +1324,7 @@ async def _merge_levels_tier(
         payload.update(expiry_levels_from_daily(daily_rows, ref=now.date()))
         if payload:
             feed.update(payload)
-            await _cache_set(tenant_id, "levels", "medium", payload)
+            await _cache_set(tenant_id, levels_id, "medium", payload, ttl_ms=LEVELS_TTL_MS)
             merged = True
 
         coros: list[Any] = []
@@ -1336,7 +1372,7 @@ async def _merge_levels_tier(
         if not payload:
             return
         feed.update(payload)
-        await _cache_set(tenant_id, "levels", "medium", payload)
+        await _cache_set(tenant_id, levels_id, "medium", payload, ttl_ms=LEVELS_TTL_MS)
         merged = True
     finally:
         if merged:
@@ -1406,7 +1442,8 @@ async def _merge_option_chain_tier(
     need_writer = feed.get("writer_grip_score") is None
     if not need_pcr and not need_max_pain and not need_writer:
         return
-    cached = await _cache_get(tenant_id, "option_chain")
+    chain_id = _row_metric("option_chain", config.underlying_symbol)
+    cached = await _cache_get(tenant_id, chain_id)
     if isinstance(cached, dict):
         _merge_chain_payload(feed, cached, config)
         if (not need_pcr or feed.get("pcr") is not None) and (
@@ -1420,7 +1457,9 @@ async def _merge_option_chain_tier(
             "writer_grip_score": 0.28,
         }
         _merge_chain_payload(feed, payload, config)
-        await _cache_set(tenant_id, "option_chain", "medium", payload)
+        await _cache_set(
+            tenant_id, chain_id, "medium", payload, ttl_ms=OPTION_CHAIN_TTL_MS
+        )
         return
     strikes, ce_syms, pe_syms = build_chain_symbols(
         config.nifty_fut_symbol,
@@ -1441,7 +1480,9 @@ async def _merge_option_chain_tier(
     if not payload:
         return
     _merge_chain_payload(feed, payload, config)
-    await _cache_set(tenant_id, "option_chain", "medium", payload)
+    await _cache_set(
+        tenant_id, chain_id, "medium", payload, ttl_ms=OPTION_CHAIN_TTL_MS
+    )
 
 
 def _oi_baseline_cache_key(symbol: str | None = None) -> str:
@@ -2019,9 +2060,18 @@ class SignalEngineService:
             [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
             equity_presets,
         )
+        from app.domains.signal_matrix import pinned_instruments
+
+        settings_raw: dict[str, Any] = {}
+        if tool is not None:
+            try:
+                settings_raw = await self._tool_settings(tool)
+            except Exception:  # noqa: BLE001
+                settings_raw = {}
         return {
             "config": config.to_admin_dict(),
             "presets": presets,
+            "pinned_instruments": pinned_instruments(settings_raw),
             "equity_source": equity_meta.get("source"),
             "equity_count": len(equity_presets),
             "tool_bound": tool is not None,
@@ -2052,7 +2102,22 @@ class SignalEngineService:
             "nifty_fut_symbol",
         )
         strike_changed = _config_fields_changed(current, patch, "strike_step")
-        structural = under_changed or strike_changed
+        from app.domains.signal_matrix import instrument_key, pinned_instruments
+
+        pinned = pinned_instruments(merged)
+        old_under = str(current.get("underlying_symbol") or "").strip()
+        new_under = str(merged.get("underlying_symbol") or "").strip()
+        soft_pinned_switch = bool(
+            under_changed
+            and old_under
+            and new_under
+            and instrument_key(old_under)
+            in {instrument_key(s) for s in pinned}
+            and instrument_key(new_under)
+            in {instrument_key(s) for s in pinned}
+            and not strike_changed
+        )
+        structural = (under_changed or strike_changed) and not soft_pinned_switch
         if under_changed and "ce_symbol" not in patch and "pe_symbol" not in patch:
             merged.pop("ce_symbol", None)
             merged.pop("pe_symbol", None)
@@ -2087,7 +2152,12 @@ class SignalEngineService:
             await cache.clear_watcher(tenant_id)
         # Only structural / Start-Stop flushes + epoch bumps. PCR / CE/PE / VIX
         # autosaves must not discard an in-flight tick (stale_config_drop loop).
-        if structural or engine_toggled:
+        if soft_pinned_switch:
+            # Warm matrix switch: keep globals, retarget primary row pointer only.
+            await cache.delete_metric(tenant_id, "setup")
+            await cache.touch_watcher(tenant_id, instrument=new_under)
+            epoch = 0
+        elif structural or engine_toggled:
             await _invalidate_tenant_signal_cache(tenant_id)
             epoch = await cache.bump_config_epoch(tenant_id)
         else:
@@ -2394,6 +2464,72 @@ class SignalEngineService:
             self._last_quote_error = None
             return reused
 
+        # Phase 3: first-party Kite REST for worker / desk (bypass sandbox pool).
+        # In-flight coalescing shares one HTTP call across Signal + Options Lab.
+        fetch_symbols = missing or symbols
+        first_party: dict[str, Any] = {}
+        try:
+            from app.domains.kite_rest import fetch_kite_quotes
+            from app.domains.kite_ticker_hub import resolve_kite_credentials
+
+            creds = await resolve_kite_credentials(self.session, self.context)
+            if creds is not None:
+                api_key, access_token = creds
+                first_party = await fetch_kite_quotes(
+                    api_key=api_key,
+                    access_token=access_token,
+                    symbols=fetch_symbols,
+                    prefer=prefer,
+                    timeout_s=min(12.0, float(timeout_s) if timeout_s else 8.0),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "kite_rest_quote_path_failed",
+                error=str(exc)[:200],
+            )
+            first_party = {}
+
+        if first_party:
+            # Only short-circuit when every requested symbol is present; otherwise
+            # fall through so sandbox / book can fill gaps.
+            covered = True
+            for sym in fetch_symbols:
+                if _find_quote_row(first_party, sym) is None:
+                    covered = False
+                    break
+            if covered:
+                merged = dict(first_party)
+                if ticker_live and overlay_ticker_rows is not None:
+                    merged = overlay_ticker_rows(merged, ticker_live)
+                if book_partial:
+                    for key, row in book_partial.items():
+                        if key not in merged and isinstance(row, dict):
+                            merged[key] = row
+                self._last_quote_error = None
+                await _cache_set(tenant_id, cached_key, "broker", merged)
+                if write_rest_quote_book is not None:
+                    try:
+                        await write_rest_quote_book(
+                            tenant_id,
+                            {
+                                key: row
+                                for key, row in merged.items()
+                                if key != "_flat" and isinstance(row, dict)
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "rest_quote_book_write_failed",
+                            error=str(exc)[:200],
+                        )
+                return merged
+            # Partial first-party hit: seed book_partial and keep going.
+            for key, row in first_party.items():
+                if key != "_flat" and isinstance(row, dict):
+                    book_partial[key] = row
+            missing = [sym for sym in symbols if not _row_reusable(sym)]
+            fetch_symbols = missing or symbols
+
         fns = await self._quote_tools()
         if not fns:
             if book_partial:
@@ -2410,8 +2546,7 @@ class SignalEngineService:
                 key=lambda fn: QUOTE_TOOL_PRIORITY.get(getattr(fn, "__name__", ""), 99)
             )
 
-        fetch_symbols = missing or symbols
-        merged: dict[str, Any] = {}
+        merged: dict[str, Any] = dict(first_party) if first_party else {}
         # Bound wait tightly on pilot — long quote waits + Tier B races were
         # wiping the board with empty ``starting`` frames.
         quote_timeout_s = float(timeout_s) if timeout_s is not None else 12.0
@@ -2623,12 +2758,20 @@ class SignalEngineService:
         )
         return out
 
-    async def refresh_tier_b_context(self, config: SignalEngineConfig) -> None:
+    async def refresh_tier_b_context(
+        self,
+        config: SignalEngineConfig,
+        *,
+        extra_row_configs: list[SignalEngineConfig] | None = None,
+    ) -> None:
         """Refresh crude / VIX / aux quote caches off the Tier A critical path.
 
         Safe to call from a background task; uses medium-tier TTLs so repeats
         within ~60s are no-ops via cache hits. Independent broker fetches run
         concurrently so sandbox slot waits do not stack serially.
+
+        ``extra_row_configs`` warms instrument-scoped levels/trend/chain/IV for
+        watched matrix rows (avoids NIFTY PCR bleeding onto SENSEX).
         """
         if config.mock:
             return
@@ -2738,7 +2881,115 @@ class SignalEngineService:
             if aux_payload:
                 await _cache_set(tenant_id, "aux_quotes", "medium", aux_payload)
 
-        await asyncio.gather(_refresh_crude(), _refresh_vix(), _refresh_aux())
+        async def _refresh_chain_levels_trend(cfg: SignalEngineConfig) -> None:
+            """PCR / levels / ADX·RSI / ATM IV — off the Tier-A paint path."""
+            scratch: dict[str, Any] = {}
+            under = cfg.underlying_symbol
+            atm_id = _row_metric("atm_iv", under)
+            trend_id = _row_metric("trend", under)
+            symbols = [
+                s
+                for s in (
+                    cfg.underlying_symbol,
+                    cfg.nifty_fut_symbol,
+                    cfg.ce_symbol,
+                    cfg.pe_symbol,
+                )
+                if s
+            ]
+            spot_row: dict[str, Any] | None = None
+            atm_strike: int | None = None
+            if symbols:
+                quotes = await self._tier_a_quotes(list(dict.fromkeys(symbols)))
+                if cfg.underlying_symbol:
+                    spot_row = _find_quote_row(quotes, cfg.underlying_symbol)
+                    spot_ltp = _pick_float(spot_row or {}, "last_price", "ltp", "last")
+                    if spot_ltp is not None:
+                        scratch["nifty_ltp"] = spot_ltp
+                        atm_strike = _round_strike(spot_ltp, cfg.strike_step)
+                # ATM IV from full quote shape when ticker lacks IV.
+                ce_sym = _sanitize_option_symbol(cfg.ce_symbol)
+                pe_sym = _sanitize_option_symbol(cfg.pe_symbol)
+                if await _cache_get(tenant_id, atm_id) is None and (ce_sym or pe_sym):
+                    iv_syms = [s for s in (ce_sym, pe_sym) if s]
+                    iv_quotes = await self._fetch_quote(iv_syms, prefer="get_quote")
+                    ce_row = _find_quote_row(iv_quotes, ce_sym) if ce_sym else None
+                    pe_row = _find_quote_row(iv_quotes, pe_sym) if pe_sym else None
+                    iv_val = _merge_option_iv(ce_row, pe_row)
+                    if iv_val is not None:
+                        await _cache_set(
+                            tenant_id, atm_id, "medium", iv_val, ttl_ms=ATM_IV_TTL_MS
+                        )
+
+            await _merge_option_chain_tier(
+                self,
+                tenant_id,
+                scratch,
+                cfg,
+                atm_strike=atm_strike,
+                mock=False,
+            )
+            await _merge_levels_tier(
+                self,
+                tenant_id,
+                scratch,
+                spot_row=spot_row,
+                mock=False,
+                underlying=under,
+            )
+            # Trend (ADX/RSI) from minute history.
+            if spot_row is not None and await _cache_get(tenant_id, trend_id) is None:
+                token_raw = spot_row.get("instrument_token")
+                try:
+                    token = int(token_raw) if token_raw is not None else 0
+                except (TypeError, ValueError):
+                    token = 0
+                if token > 0:
+                    now = _ist_now()
+                    hist_from = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+                    hist_to = now.strftime("%Y-%m-%d %H:%M:%S")
+                    hist = await self._invoke_broker_tool(
+                        "get_historical_candles",
+                        {
+                            "instrument_token": token,
+                            "interval": "minute",
+                            "from_date": hist_from,
+                            "to_date": hist_to,
+                        },
+                    )
+                    highs, lows, closes = _parse_historical_candles(hist)
+                    trend_payload: dict[str, Any] = {}
+                    adx_val = _compute_adx(highs, lows, closes)
+                    if adx_val is not None:
+                        trend_payload["adx"] = adx_val
+                    rsi_val = _compute_rsi(closes)
+                    if rsi_val is not None:
+                        trend_payload["rsi"] = rsi_val
+                    if trend_payload:
+                        await _cache_set(
+                            tenant_id,
+                            trend_id,
+                            "medium",
+                            trend_payload,
+                            ttl_ms=TREND_TTL_MS,
+                        )
+
+        async def _refresh_yahoo() -> None:
+            scratch: dict[str, Any] = {}
+            await _merge_yahoo_slow_tier(tenant_id, scratch, mock=False)
+            await _merge_yahoo_timing_tier(tenant_id, scratch, mock=False)
+
+        row_jobs = [_refresh_chain_levels_trend(config)]
+        for extra in extra_row_configs or []:
+            row_jobs.append(_refresh_chain_levels_trend(extra))
+
+        await asyncio.gather(
+            _refresh_crude(),
+            _refresh_vix(),
+            _refresh_aux(),
+            _refresh_yahoo(),
+            *row_jobs,
+        )
 
     async def _build_feed(self, config: SignalEngineConfig) -> dict[str, Any]:
         tenant_id = _tenant_key(self.context)
@@ -2955,29 +3206,13 @@ class SignalEngineService:
             iv_from_ce = _pick_float(ce_row, "implied_volatility", "iv")
             if iv_from_ce is not None:
                 feed["iv"] = iv_from_ce
-        # Ticker packets usually lack IV — REST when needed, medium-cached.
+        # Ticker packets usually lack IV — REST only in Tier-B background.
         if feed.get("iv") is None and (ce_symbol or pe_symbol):
-            if _budget(8.0):
-                iv_cached = await _cache_get(tenant_id, "atm_iv")
-                if iv_cached is not None:
-                    feed["iv"] = iv_cached
-                else:
-                    iv_syms = [s for s in (ce_symbol, pe_symbol) if s]
-                    iv_quotes = await self._fetch_quote(
-                        iv_syms,
-                        prefer="get_quote",
-                        timeout_s=min(10.0, max(3.0, _remaining() - 2.0)),
-                    )
-                    if ce_symbol:
-                        ce_row = _find_quote_row(iv_quotes, ce_symbol) or ce_row
-                    if pe_symbol:
-                        pe_row = _find_quote_row(iv_quotes, pe_symbol) or pe_row
-                    iv_val = _merge_option_iv(ce_row, pe_row)
-                    if iv_val is not None:
-                        feed["iv"] = iv_val
-                        await _cache_set(tenant_id, "atm_iv", "medium", iv_val)
-            else:
-                _mark_truncated(reason="atm_iv_rest")
+            iv_cached = await _cache_get(
+                tenant_id, _row_metric("atm_iv", config.underlying_symbol)
+            )
+            if iv_cached is not None:
+                feed["iv"] = iv_cached
 
         # OI — nearest fut if configured (book first; REST only when OI missing)
         fut_row: dict[str, Any] | None = None
@@ -3026,21 +3261,13 @@ class SignalEngineService:
             if config.iv_chg is None:
                 feed["iv_chg"] = iv_f - float(session_open)
 
-        # Sensibull-aligned fields — chain OI is expensive; skip when budget is tight.
-        if _budget(12.0):
-            await _merge_option_chain_tier(
-                self,
-                tenant_id,
-                feed,
-                config,
-                atm_strike=atm_strike,
-                mock=False,
-            )
-        else:
-            _mark_truncated(reason="option_chain")
-            cached_chain = await _cache_get(tenant_id, "option_chain")
-            if isinstance(cached_chain, dict):
-                _merge_chain_payload(feed, cached_chain, config)
+        # Sensibull-aligned fields — chain OI is expensive; Tier-A tick is
+        # cache-only so a PCR refresh cannot freeze spot/FUT/CE/PE paints.
+        cached_chain = await _cache_get(
+            tenant_id, _row_metric("option_chain", config.underlying_symbol)
+        )
+        if isinstance(cached_chain, dict):
+            _merge_chain_payload(feed, cached_chain, config)
         if config.pcr is None and feed.get("pcr") is None:
             estimated_pcr = _estimate_pcr(ce_row, pe_row)
             if estimated_pcr is not None:
@@ -3061,63 +3288,23 @@ class SignalEngineService:
                 if key == "pcr":
                     feed["pcr_source"] = "manual"
 
-        # ADX + RSI from Kite historical candles (medium tier)
-        trend_cached = await _cache_get(tenant_id, "trend")
+        # ADX + RSI — cache only on the critical path (refresh in Tier B).
+        trend_cached = await _cache_get(
+            tenant_id, _row_metric("trend", config.underlying_symbol)
+        )
         if isinstance(trend_cached, dict):
             if trend_cached.get("adx") is not None:
                 feed["adx"] = trend_cached["adx"]
             if trend_cached.get("rsi") is not None:
                 feed["rsi"] = trend_cached["rsi"]
-        elif spot_row is not None:
-            if _budget(10.0):
-                token_raw = spot_row.get("instrument_token")
-                try:
-                    token = int(token_raw) if token_raw is not None else 0
-                except (TypeError, ValueError):
-                    token = 0
-                if token > 0:
-                    # Kite toolkit takes from_date/to_date (not years/months/days).
-                    now = _ist_now()
-                    hist_from = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
-                    hist_to = now.strftime("%Y-%m-%d %H:%M:%S")
-                    hist = await self._invoke_broker_tool(
-                        "get_historical_candles",
-                        {
-                            "instrument_token": token,
-                            "interval": "minute",
-                            "from_date": hist_from,
-                            "to_date": hist_to,
-                        },
-                    )
-                    highs, lows, closes = _parse_historical_candles(hist)
-                    trend_payload: dict[str, Any] = {}
-                    adx_val = _compute_adx(highs, lows, closes)
-                    if adx_val is not None:
-                        trend_payload["adx"] = adx_val
-                        feed["adx"] = adx_val
-                    rsi_val = _compute_rsi(closes)
-                    if rsi_val is not None:
-                        trend_payload["rsi"] = rsi_val
-                        feed["rsi"] = rsi_val
-                    if trend_payload:
-                        await _cache_set(tenant_id, "trend", "medium", trend_payload)
-            else:
-                _mark_truncated(reason="trend_hist")
 
-        if _budget(12.0):
-            await _merge_levels_tier(
-                self,
-                tenant_id,
-                feed,
-                spot_row=spot_row,
-                mock=False,
-            )
-        else:
-            _mark_truncated(reason="levels_hist")
-            levels_cached = await _cache_get(tenant_id, "levels")
-            if isinstance(levels_cached, dict):
-                feed.update(levels_cached)
-            _refresh_level_spot_fields(feed, spot_row)
+        # Levels — cache only; spot-derived day high/low still refresh each tick.
+        levels_cached = await _cache_get(
+            tenant_id, _row_metric("levels", config.underlying_symbol)
+        )
+        if isinstance(levels_cached, dict):
+            feed.update(levels_cached)
+        _refresh_level_spot_fields(feed, spot_row)
 
         # India VIX / aux — already seeded from cache at top; refresh only if still missing
         # and budget remains (background Tier B usually fills these).
@@ -3142,11 +3329,13 @@ class SignalEngineService:
             if isinstance(aux_cached, dict):
                 feed.update(aux_cached)
 
-        if _budget(6.0):
-            await _merge_yahoo_slow_tier(tenant_id, feed, mock=False)
-            await _merge_yahoo_timing_tier(tenant_id, feed, mock=False)
-        else:
-            _mark_truncated(reason="yahoo_tiers")
+        # Yahoo globals / timing — cache only on the tick (to_thread refresh in Tier B).
+        yahoo_global = await _cache_get(tenant_id, "yahoo_global")
+        if isinstance(yahoo_global, dict):
+            feed.update(yahoo_global)
+        yahoo_timing = await _cache_get(tenant_id, "yahoo_timing")
+        if isinstance(yahoo_timing, dict):
+            feed.update(yahoo_timing)
         if feed.get("ce") is not None and feed.get("pe") is not None:
             feed["straddle"] = round(float(feed["ce"]) + float(feed["pe"]), 2)
         await _apply_straddle_decay(tenant_id, feed)

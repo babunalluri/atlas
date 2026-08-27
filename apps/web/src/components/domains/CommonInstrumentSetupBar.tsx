@@ -80,6 +80,8 @@ export function CommonInstrumentSetupBar({
   layoutExtras = null,
   dense = false,
   showTradingView = false,
+  readOnly = false,
+  allowPresetChange = false,
 }: {
   loading: boolean;
   loadingLabel: string;
@@ -112,6 +114,10 @@ export function CommonInstrumentSetupBar({
   dense?: boolean;
   /** Chart button between Preset and Underlying. */
   showTradingView?: boolean;
+  /** Org-wide viewers: show symbols, no setup edits. */
+  readOnly?: boolean;
+  /** When readOnly, still allow switching the viewed preset/row. */
+  allowPresetChange?: boolean;
 }) {
   if (loading || !config) {
     return <p className="text-sm text-slate-muted">{loadingLabel}</p>;
@@ -136,6 +142,7 @@ export function CommonInstrumentSetupBar({
             value={presetKey}
             onChange={onPresetChange}
             options={presetOptions}
+            disabled={readOnly && !allowPresetChange}
             placeholder="Search preset…"
           />
         </FieldShell>
@@ -172,8 +179,8 @@ export function CommonInstrumentSetupBar({
             value={config.underlying_symbol || ""}
             onChange={onUnderlyingChange}
             options={underlyingOptions}
-            disabled={presetLocked}
-            allowCustom={underlyingAllowCustom}
+            disabled={readOnly || presetLocked}
+            allowCustom={!readOnly && underlyingAllowCustom}
             placeholder={underlyingPlaceholder}
             emptyMessage={underlyingEmptyMessage}
           />
@@ -185,7 +192,8 @@ export function CommonInstrumentSetupBar({
             value={config.fut_symbol || ""}
             onChange={onFutChange}
             options={futOptions}
-            allowCustom
+            disabled={readOnly}
+            allowCustom={!readOnly}
             placeholder={futPlaceholder}
             emptyMessage={futEmptyMessage}
           />
@@ -206,10 +214,10 @@ export function CommonInstrumentSetupBar({
                 ? config.strike_step
                 : 50,
             )}
-            disabled={presetLocked}
+            disabled={readOnly || presetLocked}
             onChange={onStrikeStepChange}
             options={strikeOptions}
-            allowCustom={strikeAllowCustom}
+            allowCustom={!readOnly && strikeAllowCustom}
             placeholder={strikeAllowCustom ? "Search step…" : undefined}
             emptyMessage={strikeAllowCustom ? "Type strike step" : undefined}
           />

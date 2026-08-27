@@ -33,9 +33,12 @@ AdminContext = Annotated[
     TenantContext,
     Depends(require_roles(Role.platform_admin, Role.tenant_admin)),
 ]
-StreamAdminContext = Annotated[
+# Org-wide desk: end users may read config + chain stream; writes stay admin-only.
+ViewerContext = Annotated[
     TenantContext,
-    Depends(require_roles(Role.platform_admin, Role.tenant_admin)),
+    Depends(
+        require_roles(Role.platform_admin, Role.tenant_admin, Role.end_user)
+    ),
 ]
 TenantSession = Annotated[AsyncSession, Depends(tenant_session)]
 
@@ -50,10 +53,10 @@ class OptionsLabConfigPatchIn(BaseModel):
 
 @router.get("/config")
 async def get_options_lab_config(
-    context: AdminContext,
+    context: ViewerContext,
     session: TenantSession,
 ) -> dict[str, Any]:
-    """Options Lab setup — independent from Signal engine admin config."""
+    """Options Lab setup — org-wide read; independent from Signal engine."""
     return await OptionsLabService(session, context).get_admin_config()
 
 
@@ -148,7 +151,7 @@ async def delete_options_lab_gtt(
 
 @router.get("/chain")
 async def get_options_chain(
-    context: AdminContext,
+    context: ViewerContext,
     session: TenantSession,
     wings: int = Query(DEFAULT_WINGS, ge=MIN_WINGS, le=MAX_WINGS),
 ) -> dict[str, Any]:
@@ -159,7 +162,7 @@ async def get_options_chain(
 @router.get("/stream")
 async def stream_options_chain(
     request: Request,
-    context: StreamAdminContext,
+    context: ViewerContext,
     wings: int = Query(DEFAULT_WINGS, ge=MIN_WINGS, le=MAX_WINGS),
 ) -> StreamingResponse:
     """Server-sent events: ~8 Hz chain snapshots with coalesced ticks."""

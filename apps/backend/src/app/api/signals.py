@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,9 +43,12 @@ AdminContext = Annotated[
         require_roles(Role.platform_admin, Role.tenant_admin)
     ),
 ]
-StreamAdminContext = Annotated[
+# Org-wide desk: end users may read config + stream; writes stay admin-only.
+ViewerContext = Annotated[
     TenantContext,
-    Depends(require_roles(Role.platform_admin, Role.tenant_admin)),
+    Depends(
+        require_roles(Role.platform_admin, Role.tenant_admin, Role.end_user)
+    ),
 ]
 TenantSession = Annotated[AsyncSession, Depends(tenant_session)]
 
@@ -89,10 +92,10 @@ class SignalConfigPatchIn(BaseModel):
 
 @router.get("/config")
 async def get_signal_config(
-    context: AdminContext,
+    context: ViewerContext,
     session: TenantSession,
 ) -> dict[str, Any]:
-    """Admin-selected underlying, F&O symbols, and manual metrics."""
+    """Selected underlying, F&O symbols, and manual metrics (org-wide read)."""
     return await SignalEngineService(session, context).get_admin_config()
 
 
@@ -123,10 +126,10 @@ async def patch_signal_config(
 
 @router.get("/state")
 async def get_signal_state(
-    context: AdminContext,
+    context: ViewerContext,
     session: TenantSession,
 ) -> dict[str, Any]:
-    """Single snapshot (prefer GET /stream for live admin desk)."""
+    """Single snapshot (prefer GET /stream for live desk)."""
     service = SignalEngineService(session, context)
     return await state_for_stream(service)
 
@@ -134,7 +137,11 @@ async def get_signal_state(
 @router.get("/stream")
 async def stream_signal_state(
     request: Request,
-    context: StreamAdminContext,
+    context: ViewerContext,
+    instrument: str | None = Query(
+        default=None,
+        description="Matrix row to watch (e.g. NSE:NIFTY 50). Defaults to admin primary.",
+    ),
 ) -> StreamingResponse:
     """Server-sent events: ~8 Hz metric snapshots with coalesced engine ticks."""
 
@@ -142,6 +149,7 @@ async def stream_signal_state(
         tenant_key = str(context.tenant_id)
         last_rev: tuple[Any, ...] | None = None
         cleared_stopped_watcher = False
+        selected = (instrument or "").strip() or None
         try:
             while True:
                 if await request.is_disconnected():
@@ -149,7 +157,9 @@ async def stream_signal_state(
                 # Steady state: Redis only (no Postgres). Cold path opens a
                 # short-lived session to seed starting / engine_enabled, then
                 # hands compute to refresh_tenant_snapshot (does not await state()).
-                payload = await stream_frame_from_cache(tenant_key)
+                payload = await stream_frame_from_cache(
+                    tenant_key, instrument=selected
+                )
                 if payload is None:
                     async with SessionFactory() as session:
                         async with session.begin():
@@ -172,6 +182,7 @@ async def stream_signal_state(
                         cleared_stopped_watcher = True
                 else:
                     cleared_stopped_watcher = False
+                    await cache.touch_watcher(tenant_key, instrument=selected)
                 rev = stream_revision(payload)
                 if rev == last_rev:
                     # Worker has not published a new snapshot — keepalive only

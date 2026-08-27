@@ -25,6 +25,18 @@ TIER_TTL_MS: dict[Tier, int] = {
     "broker": BROKER_QUOTE_TTL_MS,
 }
 
+# Per-metric overrides (Phase 3 first-party Kite makes these affordable).
+# Keep generic ``medium`` at 60s for Dow/aux that still share that tier name.
+OPTION_CHAIN_TTL_MS = 15_000
+TREND_TTL_MS = 30_000
+LEVELS_TTL_MS = 30_000
+ATM_IV_TTL_MS = 15_000
+# Background Tier-B gate — must be ≤ chain TTL so PCR/IV refresh on cadence.
+TIER_B_REFRESH_GATE_MS = 12_000
+# Matrix row bg refresh gate — stops tick-cadence create_task pileups that
+# exhaust the DB pool when row compute (>tick) overlaps. Aligns with chain TTL.
+MATRIX_REFRESH_GATE_MS = 15_000
+
 # Ticker sleeps longer when no admin desk has an open SSE connection.
 TICKER_IDLE_POLL_SECONDS = 2.0
 

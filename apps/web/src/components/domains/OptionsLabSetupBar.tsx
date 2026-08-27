@@ -22,6 +22,7 @@ export function OptionsLabSetupBar({
   loading,
   atmHint = null,
   layoutExtras = null,
+  readOnly = false,
 }: {
   config: OptionsLabAdminConfig | null;
       presets: Array<{
@@ -38,6 +39,7 @@ export function OptionsLabSetupBar({
   atmHint?: number | null;
   /** Inline market strip (Spot / PCR / …) on the same dense row. */
   layoutExtras?: ReactNode;
+  readOnly?: boolean;
 }) {
   const presetOptions = useMemo(() => buildPresetOptions(presets), [presets]);
 
@@ -89,6 +91,8 @@ export function OptionsLabSetupBar({
       idPrefix="options-lab"
       dense
       showTradingView
+      readOnly={readOnly}
+      allowPresetChange={false}
       containerClassName="w-full rounded-md border border-line bg-canvas/40 px-2 py-1"
       layoutClassName="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1"
       futLabel="FUT"

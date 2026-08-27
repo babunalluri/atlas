@@ -38,6 +38,32 @@ from app.tenancy.context import TenantContext
 
 logger = get_logger(__name__)
 
+# Strong refs so matrix / Tier-B background work is not GC'd mid-flight.
+_BG_WORKER_TASKS: set[asyncio.Task[Any]] = set()
+# At most one in-flight matrix row refresh per tenant (pileup guard).
+_MATRIX_BG_BY_TENANT: dict[str, asyncio.Task[Any]] = {}
+
+
+def _track_bg_worker(task: asyncio.Task[Any]) -> None:
+    _BG_WORKER_TASKS.add(task)
+    task.add_done_callback(_BG_WORKER_TASKS.discard)
+
+
+def reset_matrix_bg_for_tests() -> None:
+    _MATRIX_BG_BY_TENANT.clear()
+    _BG_WORKER_TASKS.clear()
+
+
+def _track_matrix_bg(tenant_key: str, task: asyncio.Task[Any]) -> None:
+    _track_bg_worker(task)
+    _MATRIX_BG_BY_TENANT[tenant_key] = task
+
+    def _done(t: asyncio.Task[Any]) -> None:
+        if _MATRIX_BG_BY_TENANT.get(tenant_key) is t:
+            _MATRIX_BG_BY_TENANT.pop(tenant_key, None)
+
+    task.add_done_callback(_done)
+
 
 async def sync_kite_for_signal_tenant(
     tenant_id: uuid.UUID,
@@ -49,6 +75,9 @@ async def sync_kite_for_signal_tenant(
     config: Any | None = None,
 ) -> bool:
     """Subscribe the shared Kite hub to this tenant's Signal Engine symbols.
+
+    Includes pinned / watched matrix underlyings (+ suggested FUTs) so row
+    Tier-A reads hit the WS book instead of REST-stamping into 429s.
 
     When ``session`` / ``engine`` / ``config`` are provided (shared tick path),
     reuses that checkout instead of opening a second SessionFactory.
@@ -62,6 +91,9 @@ async def sync_kite_for_signal_tenant(
         svc: SignalEngineService,
         cfg: Any,
     ) -> bool:
+        from app.domains.options_lab import suggest_fut_symbol
+        from app.domains.signal_matrix import instrument_key, pinned_instruments
+
         symbols = [
             s
             for s in [
@@ -73,6 +105,35 @@ async def sync_kite_for_signal_tenant(
             ]
             if s
         ]
+        # Matrix rows: underlying + suggested FUT (~2 tokens/row; CE/PE land
+        # after auto-ATM and are added on later syncs when present on rows).
+        settings: dict[str, Any] = {}
+        try:
+            tool = await svc._signal_engine_tool()
+            if tool is not None:
+                settings = await svc._tool_settings(tool)
+        except Exception:
+            settings = {}
+        pinned = pinned_instruments(settings)
+        watched_keys = set(await cache.list_watched_instruments(str(tenant_id)))
+        primary_key = instrument_key(cfg.underlying_symbol or "")
+        for sym in pinned:
+            if not sym or instrument_key(sym) == primary_key:
+                continue
+            symbols.append(sym)
+            fut = suggest_fut_symbol(sym)
+            if fut:
+                symbols.append(fut)
+        for key in watched_keys:
+            if key == primary_key:
+                continue
+            match = next((s for s in pinned if instrument_key(s) == key), None)
+            if match and match not in symbols:
+                symbols.append(match)
+                fut = suggest_fut_symbol(match)
+                if fut and fut not in symbols:
+                    symbols.append(fut)
+        symbols = list(dict.fromkeys(s for s in symbols if s))
         if not symbols:
             return False
         creds = await resolve_kite_credentials(sess, ctx)
@@ -140,13 +201,85 @@ async def sync_kite_for_signal_tenant(
         return False
 
 
+async def _matrix_extra_configs(
+    service: SignalEngineService,
+    primary: SignalEngineConfig,
+    tenant_key: str,
+    *,
+    watched_only: bool,
+) -> list[SignalEngineConfig]:
+    """Build configs for non-primary matrix instruments that need warming."""
+    from app.domains.signal_engine import UNDERLYING_PRESETS
+    from app.domains.signal_matrix import (
+        config_for_instrument,
+        instrument_key,
+        pinned_instruments,
+    )
+
+    if not primary.engine_enabled:
+        return []
+
+    settings: dict[str, Any] = {}
+    try:
+        tool = await service._signal_engine_tool()
+        if tool is not None:
+            settings = await service._tool_settings(tool)
+    except Exception:
+        settings = {}
+
+    pinned = pinned_instruments(settings)
+    watched_keys = set(await cache.list_watched_instruments(tenant_key))
+    primary_sym = (primary.underlying_symbol or "").strip()
+    primary_key = instrument_key(primary_sym)
+
+    preset_by_symbol = {
+        str(p.get("symbol") or ""): p for p in UNDERLYING_PRESETS if p.get("symbol")
+    }
+
+    targets: list[str] = []
+    if watched_only:
+        for key in watched_keys:
+            if key == primary_key:
+                continue
+            match = next((s for s in pinned if instrument_key(s) == key), None)
+            if match:
+                targets.append(match)
+    else:
+        for sym in pinned:
+            if instrument_key(sym) == primary_key:
+                continue
+            targets.append(sym)
+
+    max_extra = 2 if primary_sym else 3
+    out: list[SignalEngineConfig] = []
+    for sym in targets[:max_extra]:
+        preset = preset_by_symbol.get(sym) or {}
+        out.append(
+            config_for_instrument(
+                primary,
+                symbol=sym,
+                label=str(preset.get("label") or sym),
+                strike_step=preset.get("strike_step"),
+            )
+        )
+    return out
+
+
 async def refresh_tier_b_for_tenant(tenant_id: uuid.UUID, *, auth_org_id: str) -> None:
     """Refresh crude/VIX/aux caches without gating the Tier A snapshot tick."""
     tenant_key = str(tenant_id)
-    # Gate at medium TTL so book-first ticks are not stampeded by aux REST.
+    # Gate slightly under chain TTL so PCR/IV refresh on the Phase-3 cadence.
+    from app.domains.signal_engine_constants import TIER_B_REFRESH_GATE_MS
+
     if await cache.get_metric(tenant_key, "tier_b_refresh_gate") is not None:
         return
-    await cache.set_metric(tenant_key, "tier_b_refresh_gate", "medium", True)
+    await cache.set_metric(
+        tenant_key,
+        "tier_b_refresh_gate",
+        "medium",
+        True,
+        ttl_ms=TIER_B_REFRESH_GATE_MS,
+    )
     context = TenantContext(
         tenant_id=tenant_id,
         user_id="signal-tier-b",
@@ -160,7 +293,12 @@ async def refresh_tier_b_for_tenant(tenant_id: uuid.UUID, *, auth_org_id: str) -
                 await apply_tenant_guc(session, tenant_id)
                 service = SignalEngineService(session, context)
                 config = await service._load_config()
-                await service.refresh_tier_b_context(config)
+                extras = await _matrix_extra_configs(
+                    service, config, tenant_key, watched_only=True
+                )
+                await service.refresh_tier_b_context(
+                    config, extra_row_configs=extras or None
+                )
     except Exception as exc:
         logger.warning(
             "signal_tier_b_refresh_failed",
@@ -304,13 +442,21 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
                 config_epoch=epoch_at_start,
             )
             return False
+        # Warm watched matrix rows off the Tier-A compute lock / tick budget.
+        await schedule_watched_matrix_refresh(
+            tenant_id,
+            auth_org_id=auth_org_id,
+            epoch=epoch_at_start,
+            primary_underlying=config.underlying_symbol,
+        )
         await seed_engine_enabled_metric(
             tenant_key,
             bool(payload.get("engine_enabled", config.engine_enabled)),
         )
-        asyncio.create_task(
+        task_b = asyncio.create_task(
             refresh_tier_b_for_tenant(tenant_id, auth_org_id=auth_org_id)
         )
+        _track_bg_worker(task_b)
         return True
     except Exception as exc:
         logger.warning("signal_ticker_refresh_failed", tenant_id=str(tenant_id), error=str(exc))
@@ -320,6 +466,140 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
         await cache.release_compute_lock(tenant_key)
+
+
+async def schedule_watched_matrix_refresh(
+    tenant_id: uuid.UUID,
+    *,
+    auth_org_id: str,
+    epoch: int,
+    primary_underlying: str | None,
+) -> asyncio.Task[Any] | None:
+    """Schedule matrix row refresh with pileup guards (peek + NX + single-flight).
+
+    Returns the background task when spawned, else None. Peek watchers before
+    any SessionFactory open; gate + in-process map stop tick-cadence pileups.
+    """
+    from app.domains.signal_engine_constants import MATRIX_REFRESH_GATE_MS
+    from app.domains.signal_matrix import instrument_key
+
+    tenant_key = str(tenant_id)
+    watched = await cache.list_watched_instruments(tenant_key)
+    primary_key = instrument_key(primary_underlying or "")
+    if not any(k != primary_key for k in watched):
+        return None
+    existing = _MATRIX_BG_BY_TENANT.get(tenant_key)
+    if existing is not None and not existing.done():
+        return None
+    if await cache.get_metric(tenant_key, "matrix_refresh_gate") is not None:
+        return None
+    await cache.set_metric(
+        tenant_key,
+        "matrix_refresh_gate",
+        "medium",
+        True,
+        ttl_ms=MATRIX_REFRESH_GATE_MS,
+    )
+    task = asyncio.create_task(
+        _refresh_watched_matrix_rows_bg(
+            tenant_id,
+            auth_org_id=auth_org_id,
+            epoch=epoch,
+            primary_underlying=primary_underlying,
+        )
+    )
+    _track_matrix_bg(tenant_key, task)
+    return task
+
+
+async def _refresh_watched_matrix_rows_bg(
+    tenant_id: uuid.UUID,
+    *,
+    auth_org_id: str,
+    epoch: int,
+    primary_underlying: str | None = None,
+) -> None:
+    """Background: compute only watched non-primary matrix rows."""
+    from app.domains.signal_matrix import instrument_key
+
+    tenant_key = str(tenant_id)
+    # Peek again before opening SessionFactory — zero extra watchers → no DB.
+    watched = await cache.list_watched_instruments(tenant_key)
+    primary_key = instrument_key(primary_underlying or "")
+    if not any(k != primary_key for k in watched):
+        return
+
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="signal-matrix",
+        role=Role.tenant_admin,
+        auth_org_id=auth_org_id,
+        principal_type="scheduler",
+    )
+    try:
+        async with SessionFactory() as session:
+            async with session.begin():
+                await apply_tenant_guc(session, tenant_id)
+                service = SignalEngineService(session, context)
+                primary = await service._load_config()
+                await _refresh_pinned_matrix_rows(
+                    service=service,
+                    session=session,
+                    tenant_key=tenant_key,
+                    primary=primary,
+                    epoch=epoch,
+                    watched_only=True,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "signal_matrix_pinned_refresh_failed",
+            tenant_id=tenant_key,
+            error=str(exc)[:200],
+        )
+
+
+async def _refresh_pinned_matrix_rows(
+    *,
+    service: SignalEngineService,
+    session: Any,
+    tenant_key: str,
+    primary: SignalEngineConfig,
+    epoch: int,
+    watched_only: bool = True,
+    primary_payload: dict[str, Any] | None = None,
+) -> None:
+    """Compute non-primary matrix instruments into row:{instrument} keys.
+
+    When ``watched_only`` (default), skip pinned symbols with no live SSE
+    instrument watcher — avoids burning the tick budget on idle rows.
+    """
+    from app.domains.signal_matrix import split_snapshot
+
+    extras = await _matrix_extra_configs(
+        service, primary, tenant_key, watched_only=watched_only
+    )
+    for row_cfg in extras:
+        sym = (row_cfg.underlying_symbol or "").strip()
+        if not sym:
+            continue
+        async with session.begin_nested():
+            row_payload = await _compute_state_payload(
+                service, config=row_cfg, last_good=None
+            )
+        if not isinstance(row_payload, dict):
+            continue
+        row_payload = {
+            **row_payload,
+            "computed_at_ms": int(time.time() * 1000),
+            "config_epoch": epoch,
+            "instrument": sym,
+        }
+        _globals, row_doc = split_snapshot(row_payload)
+        await cache.set_row(tenant_key, sym, row_doc)
+        if _globals:
+            existing = await cache.get_globals(tenant_key)
+            if existing is None:
+                await cache.set_globals(tenant_key, _globals)
 
 
 class SignalEngineWorker:

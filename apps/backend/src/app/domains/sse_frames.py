@@ -14,9 +14,14 @@ def stream_revision(payload: Mapping[str, Any]) -> tuple[Any, ...]:
     Deliberately ignores ``data_age_ms`` (changes every poll) so identical
     worker snapshots do not force React re-renders at STREAM_INTERVAL_MS.
     ``snapshot_stale`` is included so the UI still sees the Running→Stale flip.
+    ``globals_computed_at_ms`` + instrument ensure matrix row refreshes (and
+    globals-only refreshes) are not incorrectly deduped against each other.
     """
+    underlying = payload.get("underlying") if isinstance(payload.get("underlying"), dict) else {}
     return (
         payload.get("computed_at_ms"),
+        payload.get("globals_computed_at_ms"),
+        payload.get("instrument") or underlying.get("symbol"),
         payload.get("fetched_at"),
         payload.get("engine_computing"),
         payload.get("engine_enabled"),

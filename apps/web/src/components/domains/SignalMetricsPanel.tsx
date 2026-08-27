@@ -501,6 +501,7 @@ function BuySignalBanner({
   publishing,
   publishMsg,
   onOpenNotify,
+  readOnly = false,
 }: {
   state: SignalEngineState | null;
   entry: SignalEntry | null | undefined;
@@ -509,6 +510,7 @@ function BuySignalBanner({
   publishing: boolean;
   publishMsg: string | null;
   onOpenNotify: () => void;
+  readOnly?: boolean;
 }) {
   const tone = buySignalTone(state, entry, engineEnabled);
   const buyLine = engineEnabled
@@ -522,7 +524,11 @@ function BuySignalBanner({
         : "Loading buy signal…"));
   const statusLine = publishMsg ?? note;
   const canNotify =
-    engineEnabled && !publishing && entryReady && entry?.status === "ready";
+    !readOnly &&
+    engineEnabled &&
+    !publishing &&
+    entryReady &&
+    entry?.status === "ready";
 
   return (
     <div
@@ -564,28 +570,30 @@ function BuySignalBanner({
         <span className="min-w-0 flex-1 truncate text-[11px] leading-none opacity-80">
           {statusLine}
         </span>
-        <button
-          type="button"
-          disabled={!canNotify}
-          aria-label={
-            publishing
-              ? "Sending notification"
-              : "Notify all users"
-          }
-          title={
-            publishing
-              ? "Sending notification…"
-              : entryReady
-                ? "Notify all users — entry rules pass"
-                : tone === "blocked"
-                  ? "Notify all users — rules failing (edit before send)"
-                  : "Notify all users with current signal snapshot"
-          }
-          onClick={onOpenNotify}
-          className={notifyBellButtonClass(tone)}
-        >
-          <BellIcon />
-        </button>
+        {!readOnly ? (
+          <button
+            type="button"
+            disabled={!canNotify}
+            aria-label={
+              publishing
+                ? "Sending notification"
+                : "Notify all users"
+            }
+            title={
+              publishing
+                ? "Sending notification…"
+                : entryReady
+                  ? "Notify all users — entry rules pass"
+                  : tone === "blocked"
+                    ? "Notify all users — rules failing (edit before send)"
+                    : "Notify all users with current signal snapshot"
+            }
+            onClick={onOpenNotify}
+            className={notifyBellButtonClass(tone)}
+          >
+            <BellIcon />
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -596,14 +604,30 @@ function EditableOverrideValue({
   configKey,
   config,
   patchConfig,
+  readOnly = false,
 }: {
   row: SignalMetricRow;
   configKey: keyof SignalEngineAdminConfig;
   config: SignalEngineAdminConfig;
   patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
+  readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const override = config[configKey] as number | null | undefined;
+
+  if (readOnly) {
+    const display = override ?? row.value;
+    return (
+      <span
+        className={cn(
+          "w-full truncate text-right text-sm tnum tabular-nums",
+          override != null && "font-semibold text-info",
+        )}
+      >
+        {formatValue(display)}
+      </span>
+    );
+  }
 
   if (editing) {
     return (
@@ -655,6 +679,7 @@ function MetricCategoryWidget({
   config,
   patchConfig,
   valueTicks,
+  readOnly = false,
 }: {
   category: string;
   rows: SignalMetricRow[];
@@ -664,6 +689,7 @@ function MetricCategoryWidget({
   config: SignalEngineAdminConfig | null;
   patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
   valueTicks: Map<string, ValueTick>;
+  readOnly?: boolean;
 }) {
   const failCount = rows.filter((r) => r.gates_entry && r.passed === false).length;
 
@@ -708,6 +734,7 @@ function MetricCategoryWidget({
                   config={config}
                   patchConfig={patchConfig}
                   valueTicks={valueTicks}
+                  readOnly={readOnly}
                 />
               </div>
             ))}
@@ -723,11 +750,13 @@ function MetricTable({
   config,
   patchConfig,
   valueTicks,
+  readOnly = false,
 }: {
   rows: SignalMetricRow[];
   config: SignalEngineAdminConfig | null;
   patchConfig: (patch: Partial<SignalEngineAdminConfig>) => void;
   valueTicks: Map<string, ValueTick>;
+  readOnly?: boolean;
 }) {
   if (rows.length === 0) return null;
 
@@ -772,6 +801,7 @@ function MetricTable({
                       configKey={overrideKey}
                       config={config}
                       patchConfig={patchConfig}
+                      readOnly={readOnly}
                     />
                   ) : (
                     <LiveMetricValue
@@ -819,6 +849,7 @@ export function SignalMetricsPanel({
   onRefreshBooks,
   fetchedAt,
   rangeDays,
+  readOnly = false,
 }: {
   deskSnapshot?: DomainDashboard["desk_snapshot"];
   brokerTools?: DomainBrokerTool[];
@@ -826,6 +857,8 @@ export function SignalMetricsPanel({
   onRefreshBooks?: () => void;
   fetchedAt?: string;
   rangeDays?: number;
+  /** Org-wide viewers: board only — no setup edits / Start-Stop / notify. */
+  readOnly?: boolean;
 } = {}) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [state, setState] = useState<SignalEngineState | null>(null);
@@ -856,6 +889,7 @@ export function SignalMetricsPanel({
   const {
     config,
     presets,
+    pinnedInstruments,
     presetKey,
     presetLocked,
     loading: configLoading,
@@ -868,15 +902,25 @@ export function SignalMetricsPanel({
     syncResolvedOptions,
   } = useSignalConfigAutosave(getAccessToken, isLoaded && isSignedIn);
 
+  const [viewInstrument, setViewInstrument] = useState<string>("");
+  useEffect(() => {
+    const fromConfig = config?.underlying_symbol?.trim() || "";
+    if (!viewInstrument && fromConfig) {
+      setViewInstrument(fromConfig);
+    }
+  }, [config?.underlying_symbol, viewInstrument]);
+
   const configRef = useRef(config);
   configRef.current = config;
 
   useEffect(() => {
     if (!state) return;
     // Same guard as metricsAtmAligned: ignore stale SSE while underlying switches.
+    const activeUnderlying =
+      viewInstrument.trim() || config?.underlying_symbol || "";
     if (
-      !config?.underlying_symbol ||
-      state.underlying?.symbol !== config.underlying_symbol
+      !activeUnderlying ||
+      state.underlying?.symbol !== activeUnderlying
     ) {
       return;
     }
@@ -886,6 +930,7 @@ export function SignalMetricsPanel({
     });
   }, [
     state,
+    viewInstrument,
     config?.underlying_symbol,
     syncResolvedOptions,
   ]);
@@ -913,10 +958,12 @@ export function SignalMetricsPanel({
     return atm != null ? Math.round(atm) : null;
   }, [metrics]);
   // H4: SSE can lag behind a screener pick — don't blend old ATM into new FUT CE/PE.
+  const activeUnderlying =
+    viewInstrument.trim() || config?.underlying_symbol || "";
   const metricsAtmAligned =
     metricsAtmHint != null &&
-    Boolean(config?.underlying_symbol) &&
-    state?.underlying?.symbol === config?.underlying_symbol
+    Boolean(activeUnderlying) &&
+    state?.underlying?.symbol === activeUnderlying
       ? metricsAtmHint
       : null;
   const atmHint = metricsAtmAligned ?? screenerAtmHint;
@@ -1055,9 +1102,16 @@ export function SignalMetricsPanel({
     (value: string) => {
       // Dropdown path has no screener ATM — drop a stale hint from a prior pick.
       setScreenerAtmHint(null);
+      if (value && value !== "custom") {
+        setViewInstrument(value);
+      }
+      if (readOnly) {
+        // Viewers switch matrix row only — no config PATCH.
+        return;
+      }
       onPresetChange(value);
     },
-    [onPresetChange],
+    [onPresetChange, readOnly],
   );
 
   // Mirror Options Lab stream / setup into Signal Engine when this tab mounts
@@ -1132,6 +1186,7 @@ export function SignalMetricsPanel({
           await streamSignalState({
             accessToken: token,
             signal: controller.signal,
+            instrument: viewInstrument || null,
             onState: (data) => {
               if (mounted.current) {
                 setState(data);
@@ -1161,7 +1216,7 @@ export function SignalMetricsPanel({
       mounted.current = false;
       controller.abort();
     };
-  }, [getAccessToken, isLoaded, isSignedIn, refreshOnce]);
+  }, [getAccessToken, isLoaded, isSignedIn, refreshOnce, viewInstrument]);
 
   async function onToggleEngine(nextEnabled: boolean) {
     if (engineBusy) return;
@@ -1351,40 +1406,44 @@ export function SignalMetricsPanel({
             >
               Books
             </Button>
-            <label
-              htmlFor="signal-mock"
-              title="Rehearsal mode — demo metrics without live broker quotes"
-              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink"
-            >
-              <input
-                id="signal-mock"
-                type="checkbox"
-                checked={Boolean(config?.mock)}
-                onChange={(e) => patchConfig({ mock: e.target.checked })}
-                className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
-              />
-              Mock
-            </label>
-            {engineEnabled ? (
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<PauseIcon />}
-                disabled={engineBusy}
-                onClick={() => void onToggleEngine(false)}
+            {!readOnly ? (
+              <label
+                htmlFor="signal-mock"
+                title="Rehearsal mode — demo metrics without live broker quotes"
+                className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink"
               >
-                {engineBusy ? "Stopping…" : "Stop"}
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                icon={<PlayIcon />}
-                disabled={engineBusy}
-                onClick={() => void onToggleEngine(true)}
-              >
-                {engineBusy ? "Starting…" : "Start"}
-              </Button>
-            )}
+                <input
+                  id="signal-mock"
+                  type="checkbox"
+                  checked={Boolean(config?.mock)}
+                  onChange={(e) => patchConfig({ mock: e.target.checked })}
+                  className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
+                />
+                Mock
+              </label>
+            ) : null}
+            {!readOnly ? (
+              engineEnabled ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<PauseIcon />}
+                  disabled={engineBusy}
+                  onClick={() => void onToggleEngine(false)}
+                >
+                  {engineBusy ? "Stopping…" : "Stop"}
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  icon={<PlayIcon />}
+                  disabled={engineBusy}
+                  onClick={() => void onToggleEngine(true)}
+                >
+                  {engineBusy ? "Starting…" : "Start"}
+                </Button>
+              )
+            ) : null}
             <Button
               variant="secondary"
               size="sm"
@@ -1456,32 +1515,58 @@ export function SignalMetricsPanel({
         publishing={publishing}
         publishMsg={publishMsg}
         onOpenNotify={openNotifyDialog}
+        readOnly={readOnly}
       />
 
-      <NotifySignalDialog
-        open={notifyOpen}
-        tone={buyTone}
-        title={notifyTitle}
-        body={notifyBody}
-        publishing={publishing}
-        onTitleChange={setNotifyTitle}
-        onBodyChange={setNotifyBody}
-        onClose={() => {
-          if (!publishing) setNotifyOpen(false);
-        }}
-        onSend={() => void onPublish(notifyTitle, notifyBody)}
-      />
+      {!readOnly ? (
+        <NotifySignalDialog
+          open={notifyOpen}
+          tone={buyTone}
+          title={notifyTitle}
+          body={notifyBody}
+          publishing={publishing}
+          onTitleChange={setNotifyTitle}
+          onBodyChange={setNotifyBody}
+          onClose={() => {
+            if (!publishing) setNotifyOpen(false);
+          }}
+          onSend={() => void onPublish(notifyTitle, notifyBody)}
+        />
+      ) : null}
 
       <div className="mt-2 shrink-0">
         <SignalSetupBar
-          config={config}
-          presets={presets}
-          presetKey={presetKey}
-          presetLocked={presetLocked}
+          config={
+            readOnly && viewInstrument && config
+              ? {
+                  ...config,
+                  underlying_symbol: viewInstrument,
+                  underlying_label:
+                    presets.find((p) => p.symbol === viewInstrument)?.label ||
+                    viewInstrument,
+                }
+              : config
+          }
+          presets={
+            readOnly && pinnedInstruments.length > 0
+              ? presets.filter((p) =>
+                  pinnedInstruments.some(
+                    (pin) => pin === p.symbol || pin.replace(/ /g, "_") === p.symbol.replace(/ /g, "_"),
+                  ),
+                )
+              : presets
+          }
+          presetKey={
+            readOnly && viewInstrument
+              ? viewInstrument
+              : presetKey
+          }
+          presetLocked={presetLocked && !readOnly}
           onPresetChange={onPresetChangeFromBar}
           patchConfig={patchConfig}
           loading={configLoading}
           atmHint={atmHint}
+          readOnly={readOnly}
         />
       </div>
 
@@ -1521,6 +1606,7 @@ export function SignalMetricsPanel({
                 config={config}
                 patchConfig={patchConfig}
                 valueTicks={valueTicks}
+                readOnly={readOnly}
               />
             ))}
           </div>

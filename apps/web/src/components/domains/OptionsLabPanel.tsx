@@ -188,7 +188,14 @@ function QuoteHit({
   );
 }
 
-export function OptionsLabPanel({ active = true }: { active?: boolean }) {
+export function OptionsLabPanel({
+  active = true,
+  readOnly = false,
+}: {
+  active?: boolean;
+  /** Org-wide viewers: chain only — no setup edits / resets / bots. */
+  readOnly?: boolean;
+}) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [analysisPane, setAnalysisPane] = useState<AnalysisPane>("quotes");
   const [overlay, setOverlay] = useState<DeskOverlay>(null);
@@ -753,60 +760,64 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
             ) : null}
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-            <Button
-              variant={overlay === "screener" ? "primary" : "secondary"}
-              size="sm"
-              icon={<SearchIcon />}
-              onClick={() => setOverlay((prev) => (prev === "screener" ? null : "screener"))}
-            >
-              Screener
-            </Button>
-            <Button
-              variant={overlay === "heatmap" ? "primary" : "secondary"}
-              size="sm"
-              icon={<LayersIcon />}
-              onClick={() => {
-                setScreenerUniverse("equities");
-                setOverlay((prev) => (prev === "heatmap" ? null : "heatmap"));
-              }}
-            >
-              Heat map
-            </Button>
-            <Button
-              variant={overlay === "flows" ? "primary" : "secondary"}
-              size="sm"
-              icon={<BuildingIcon />}
-              onClick={() => setOverlay((prev) => (prev === "flows" ? null : "flows"))}
-            >
-              Flows
-            </Button>
-            <Button
-              variant={overlay === "ideas" ? "primary" : "secondary"}
-              size="sm"
-              icon={<ChartLineIcon />}
-              onClick={() => {
-                setScreenerUniverse("all");
-                setOverlay((prev) => (prev === "ideas" ? null : "ideas"));
-              }}
-            >
-              Ideas
-            </Button>
-            <Button
-              variant={overlay === "backtest" ? "primary" : "secondary"}
-              size="sm"
-              icon={<HistoryIcon />}
-              onClick={() => setOverlay((prev) => (prev === "backtest" ? null : "backtest"))}
-            >
-              Backtest
-            </Button>
-            <Button
-              variant={overlay === "bots" ? "primary" : "secondary"}
-              size="sm"
-              icon={<PlayIcon />}
-              onClick={() => setOverlay((prev) => (prev === "bots" ? null : "bots"))}
-            >
-              Bot
-            </Button>
+            {!readOnly ? (
+              <>
+                <Button
+                  variant={overlay === "screener" ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<SearchIcon />}
+                  onClick={() => setOverlay((prev) => (prev === "screener" ? null : "screener"))}
+                >
+                  Screener
+                </Button>
+                <Button
+                  variant={overlay === "heatmap" ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<LayersIcon />}
+                  onClick={() => {
+                    setScreenerUniverse("equities");
+                    setOverlay((prev) => (prev === "heatmap" ? null : "heatmap"));
+                  }}
+                >
+                  Heat map
+                </Button>
+                <Button
+                  variant={overlay === "flows" ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<BuildingIcon />}
+                  onClick={() => setOverlay((prev) => (prev === "flows" ? null : "flows"))}
+                >
+                  Flows
+                </Button>
+                <Button
+                  variant={overlay === "ideas" ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<ChartLineIcon />}
+                  onClick={() => {
+                    setScreenerUniverse("all");
+                    setOverlay((prev) => (prev === "ideas" ? null : "ideas"));
+                  }}
+                >
+                  Ideas
+                </Button>
+                <Button
+                  variant={overlay === "backtest" ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<HistoryIcon />}
+                  onClick={() => setOverlay((prev) => (prev === "backtest" ? null : "backtest"))}
+                >
+                  Backtest
+                </Button>
+                <Button
+                  variant={overlay === "bots" ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<PlayIcon />}
+                  onClick={() => setOverlay((prev) => (prev === "bots" ? null : "bots"))}
+                >
+                  Bot
+                </Button>
+              </>
+            ) : null}
             <Button
               variant={overlay === "books" ? "primary" : "secondary"}
               size="sm"
@@ -815,20 +826,22 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
             >
               Books
             </Button>
-            <label
-              htmlFor="options-lab-mock"
-              title="Rehearsal mode — demo chain without live Kite quotes"
-              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink"
-            >
-              <input
-                id="options-lab-mock"
-                type="checkbox"
-                checked={Boolean(config?.mock)}
-                onChange={(e) => patchConfig({ mock: e.target.checked })}
-                className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
-              />
-              Mock
-            </label>
+            {!readOnly ? (
+              <label
+                htmlFor="options-lab-mock"
+                title="Rehearsal mode — demo chain without live Kite quotes"
+                className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-raised px-2 py-1 text-xs font-medium text-ink"
+              >
+                <input
+                  id="options-lab-mock"
+                  type="checkbox"
+                  checked={Boolean(config?.mock)}
+                  onChange={(e) => patchConfig({ mock: e.target.checked })}
+                  className="size-3.5 shrink-0 rounded border-line text-teal focus-visible:ring-2 focus-visible:ring-teal/30"
+                />
+                Mock
+              </label>
+            ) : null}
             <label className="flex items-center gap-1.5 text-xs text-slate-muted">
               Wings
               <select
@@ -843,7 +856,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                 ))}
               </select>
             </label>
-            {analysisPane === "iv" ? (
+            {!readOnly && analysisPane === "iv" ? (
               <Button
                 variant="secondary"
                 size="sm"
@@ -853,7 +866,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
                 Reset IV
               </Button>
             ) : null}
-            {analysisPane === "oi" ? (
+            {!readOnly && analysisPane === "oi" ? (
               <Button
                 variant="secondary"
                 size="sm"
@@ -889,6 +902,7 @@ export function OptionsLabPanel({ active = true }: { active?: boolean }) {
           patchConfig={patchConfig}
           loading={configLoading}
           atmHint={atmHint}
+          readOnly={readOnly}
           layoutExtras={
             <div className="grid min-w-0 flex-[1.4] grid-cols-4 gap-x-3 gap-y-1 border-l border-line pl-3">
               {summaryItems.map(({ label, parts }) => (

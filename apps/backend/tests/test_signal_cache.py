@@ -48,6 +48,17 @@ async def test_invalidate_underlying_keeps_slow_tiers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalidate_underlying_clears_instrument_scoped_metrics() -> None:
+    await cache.set_metric("tenant-a", "levels:NSE:NIFTY_50", "medium", {"x": 1})
+    await cache.set_metric("tenant-a", "trend:BSE:SENSEX", "medium", {"adx": 20})
+    await cache.set_metric("tenant-a", "yahoo_global", "slow", {"ok": True})
+    await cache.invalidate_underlying_dependent("tenant-a")
+    assert await cache.get_metric("tenant-a", "levels:NSE:NIFTY_50") is None
+    assert await cache.get_metric("tenant-a", "trend:BSE:SENSEX") is None
+    assert await cache.get_metric("tenant-a", "yahoo_global") == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_invalidate_underlying_clears_session_opens() -> None:
     await cache.set_session_value("tenant-a", "underlying_open:NSE:NIFTY_50:2026-08-26", 24500.0)
     await cache.set_session_value("tenant-a", "straddle_session_open:NSE:NIFTY_50:2026-08-26", 200.0)

@@ -24,6 +24,7 @@ export function SignalSetupBar({
   patchConfig,
   loading,
   atmHint = null,
+  readOnly = false,
 }: {
   config: SignalEngineAdminConfig | null;
   presets: Array<{ label: string; symbol: string; strike_step: number }>;
@@ -34,6 +35,7 @@ export function SignalSetupBar({
   loading: boolean;
   /** Live ATM from signal metrics — used to suggest CE/PE strikes. */
   atmHint?: number | null;
+  readOnly?: boolean;
 }) {
   const presetOptions = useMemo(() => buildPresetOptions(presets), [presets]);
 
@@ -132,6 +134,8 @@ export function SignalSetupBar({
       idPrefix="signal"
       dense
       showTradingView
+      readOnly={readOnly}
+      allowPresetChange={readOnly}
       containerClassName="w-full rounded-md border border-line bg-canvas/40 px-2 py-1"
       layoutClassName="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1"
       underlyingAllowCustom={!presetLocked}
@@ -153,7 +157,8 @@ export function SignalSetupBar({
                 value={ceValue}
                 onChange={onCeChange}
                 options={ceOptions}
-                allowCustom
+                disabled={readOnly}
+                allowCustom={!readOnly}
                 placeholder="CE option…"
                 emptyMessage={
                   atmHint != null
@@ -174,7 +179,8 @@ export function SignalSetupBar({
                 value={peValue}
                 onChange={onPeChange}
                 options={peOptions}
-                allowCustom
+                disabled={readOnly}
+                allowCustom={!readOnly}
                 placeholder="PE option…"
                 emptyMessage={
                   atmHint != null

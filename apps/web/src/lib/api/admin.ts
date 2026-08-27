@@ -3642,6 +3642,7 @@ export interface SignalEngineAdminConfig {
 export interface SignalEngineConfigResponse {
   config: SignalEngineAdminConfig;
   presets: SignalUnderlyingPreset[];
+  pinned_instruments?: string[];
   tool_bound: boolean;
   tool_slug: string | null;
 }

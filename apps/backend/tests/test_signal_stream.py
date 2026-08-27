@@ -542,7 +542,7 @@ async def test_signal_stream_requires_auth(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_signal_stream_denies_end_user(signals_db, tenant_a) -> None:
+async def test_signal_stream_allows_end_user(signals_db, tenant_a) -> None:
     async with signals_db() as session:
         session.add(
             Tenant(
@@ -562,8 +562,23 @@ async def test_signal_stream_denies_end_user(signals_db, tenant_a) -> None:
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        denied = await client.get("/admin/signals/stream", headers=headers)
+        # Avoid awaiting an infinite SSE body — probe auth via config/state GETs
+        # which share ViewerContext with /stream.
+        config = await client.get("/admin/signals/config", headers=headers)
+        assert config.status_code == 200
+
+        state = await client.get("/admin/signals/state", headers=headers)
+        assert state.status_code == 200
+
+        denied = await client.patch(
+            "/admin/signals/config",
+            headers=headers,
+            json={"mock": True},
+        )
         assert denied.status_code == 403
+
+        publish = await client.post("/admin/signals/publish", headers=headers, json={})
+        assert publish.status_code == 403
 
 
 @pytest.mark.asyncio

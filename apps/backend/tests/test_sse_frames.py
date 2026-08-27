@@ -44,3 +44,16 @@ def test_stream_revision_lab_fetched_at() -> None:
 def test_sse_keepalive_is_comment() -> None:
     assert SSE_KEEPALIVE.startswith(b":")
     assert SSE_KEEPALIVE.endswith(b"\n\n")
+
+
+def test_stream_revision_includes_globals_stamp_and_instrument() -> None:
+    row_a = {
+        "computed_at_ms": 1000,
+        "globals_computed_at_ms": 900,
+        "instrument": "NSE:NIFTY 50",
+        "passed": 3,
+    }
+    row_b = {**row_a, "globals_computed_at_ms": 901}
+    row_c = {**row_a, "instrument": "BSE:SENSEX"}
+    assert stream_revision(row_a) != stream_revision(row_b)
+    assert stream_revision(row_a) != stream_revision(row_c)

@@ -93,6 +93,7 @@ export function StockBrokerWorkspace({
   showPageHeader?: boolean;
 }) {
   const customer = variant === "customer";
+  const readOnly = customer;
   const { collapsed: chatCollapsed, setCollapsed: setChatCollapsed } =
     useDeskChatCollapsed();
   const { tab: deskTab, setTab: setDeskTab } = useDeskMainTab();
@@ -147,11 +148,9 @@ export function StockBrokerWorkspace({
 
       <section
         className={cn(
-          "min-h-0 min-w-0 flex-1 px-5 lg:basis-[66%]",
+          "min-h-0 min-w-0 flex-1 overflow-y-auto px-5 lg:basis-[66%]",
           showPageHeader ? "py-5" : "py-2",
-          !customer
-            ? "flex flex-col overflow-hidden"
-            : "overflow-y-auto",
+          "flex flex-col",
         )}
       >
         {showPageHeader ? (
@@ -173,94 +172,94 @@ export function StockBrokerWorkspace({
           </div>
         ) : null}
 
-        {!customer ? (
+        <div
+          className={cn(
+            (showPageHeader || customer) && "mt-5",
+            "flex min-h-0 flex-1 flex-col",
+            customer && "min-h-[42rem]",
+          )}
+        >
+          <div
+            role="tablist"
+            aria-label="Trading desk views"
+            className="grid w-full shrink-0 grid-cols-3 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
+          >
+            {(
+              [
+                {
+                  id: "signals" as const,
+                  label: "Signal Engine",
+                  hint: readOnly ? "Live checklist (view)" : "Checklist & live feeds",
+                },
+                {
+                  id: "param-chart" as const,
+                  label: "Param Chart",
+                  hint: "Monthly OHLC & shared params",
+                },
+                {
+                  id: "options-lab" as const,
+                  label: "Options Lab",
+                  hint: readOnly ? "Live chain (view)" : "Chain, builder, bots",
+                },
+              ] as const
+            ).map(({ id, label, hint }) => {
+              const selected = deskTab === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  title={hint}
+                  onClick={() => setDeskTab(id)}
+                  className={cn(
+                    "flex items-baseline gap-2 rounded-md px-3 py-2 text-left transition duration-150",
+                    selected
+                      ? "bg-raised text-ink shadow-sm ring-1 ring-line/80"
+                      : "text-slate-muted hover:bg-raised/50 hover:text-ink",
+                  )}
+                >
+                  <span className="text-base font-semibold tracking-tight">
+                    {label}
+                  </span>
+                  <span className="truncate text-sm text-slate-muted">
+                    {hint}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {/* Keep Signal mounted (hidden) so /admin/signals/stream + Redis
+              watch stay alive when the user flips to Param Chart / Options Lab.
+              Unmounting aborted SSE and left the board on dashes / stale. */}
           <div
             className={cn(
-              showPageHeader && "mt-5",
-              "flex min-h-0 flex-1 flex-col",
+              "mt-3 min-h-0 flex-1",
+              deskTab !== "signals" && "hidden",
             )}
+            aria-hidden={deskTab !== "signals"}
           >
-            <div
-              role="tablist"
-              aria-label="Trading desk views"
-              className="grid w-full shrink-0 grid-cols-3 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
-            >
-              {(
-                [
-                  {
-                    id: "signals" as const,
-                    label: "Signal Engine",
-                    hint: "Checklist & live feeds",
-                  },
-                  {
-                    id: "param-chart" as const,
-                    label: "Param Chart",
-                    hint: "Monthly OHLC & shared params",
-                  },
-                  {
-                    id: "options-lab" as const,
-                    label: "Options Lab",
-                    hint: "Chain, builder, bots",
-                  },
-                ] as const
-              ).map(({ id, label, hint }) => {
-                const selected = deskTab === id;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    title={hint}
-                    onClick={() => setDeskTab(id)}
-                    className={cn(
-                      "flex items-baseline gap-2 rounded-md px-3 py-2 text-left transition duration-150",
-                      selected
-                        ? "bg-raised text-ink shadow-sm ring-1 ring-line/80"
-                        : "text-slate-muted hover:bg-raised/50 hover:text-ink",
-                    )}
-                  >
-                    <span className="text-base font-semibold tracking-tight">
-                      {label}
-                    </span>
-                    <span className="truncate text-sm text-slate-muted">
-                      {hint}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {/* Keep Signal mounted (hidden) so /admin/signals/stream + Redis
-                watch stay alive when the user flips to Param Chart / Options Lab.
-                Unmounting aborted SSE and left the board on dashes / stale. */}
-            <div
-              className={cn(
-                "mt-3 min-h-0 flex-1",
-                deskTab !== "signals" && "hidden",
-              )}
-              aria-hidden={deskTab !== "signals"}
-            >
-              <SignalMetricsPanel
-                deskSnapshot={data.desk_snapshot}
-                brokerTools={data.broker_tools ?? []}
-                refreshing={refreshing}
-                onRefreshBooks={onRefresh}
-                fetchedAt={data.fetched_at}
-                rangeDays={data.range_days}
-              />
-            </div>
-            {deskTab === "param-chart" ? (
-              <div className="mt-3 min-h-0 flex-1">
-                <ParamChartPanel active />
-              </div>
-            ) : null}
-            {deskTab === "options-lab" ? (
-              <div className="mt-3 min-h-0 flex-1">
-                <OptionsLabPanel active />
-              </div>
-            ) : null}
+            <SignalMetricsPanel
+              deskSnapshot={data.desk_snapshot}
+              brokerTools={data.broker_tools ?? []}
+              refreshing={refreshing}
+              onRefreshBooks={onRefresh}
+              fetchedAt={data.fetched_at}
+              rangeDays={data.range_days}
+              readOnly={readOnly}
+            />
           </div>
-        ) : null}
+          {deskTab === "param-chart" ? (
+            <div className="mt-3 min-h-0 flex-1">
+              <ParamChartPanel active />
+            </div>
+          ) : null}
+          {deskTab === "options-lab" ? (
+            <div className="mt-3 min-h-0 flex-1">
+              <OptionsLabPanel active readOnly={readOnly} />
+            </div>
+          ) : null}
+        </div>
 
         {customer ? (
           <DeskBooksPanel
