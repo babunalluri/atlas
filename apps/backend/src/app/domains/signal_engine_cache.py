@@ -551,12 +551,19 @@ async def get_config_epoch(tenant_id: str) -> int:
     if client is not None:
         try:
             raw = await client.get(_epoch_key(tenant_id))
-            if raw is None:
-                return 0
-            return int(raw)
+            value = int(raw) if raw is not None else 0
+            local = int(_epoch_local.get(tenant_id, 0))
+            if value < local:
+                # Redis lost a bump taken while it was down — stay monotonic.
+                return local
+            _epoch_local[tenant_id] = value
+            return value
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_epoch_get_failed", tenant_id=tenant_id)
+    # Redis blip: return last-known, never 0 — a 0 stamp marks the whole tick
+    # stale and set_snapshot refuses the finished work once Redis recovers
+    # (pilot 05:14:34 "epoch 0 vs 11" drop).
     return int(_epoch_local.get(tenant_id, 0))
 
 
@@ -566,7 +573,15 @@ async def bump_config_epoch(tenant_id: str) -> int:
     if client is not None:
         try:
             # INCR creates the key at 1 with no expiry when missing.
-            return int(await client.incr(_epoch_key(tenant_id)))
+            value = int(await client.incr(_epoch_key(tenant_id)))
+            local = int(_epoch_local.get(tenant_id, 0))
+            if value <= local:
+                # Redis lost bumps taken during a blip — heal it forward so a
+                # new bump is always greater than anything already stamped.
+                value = local + 1
+                await client.set(_epoch_key(tenant_id), value)
+            _epoch_local[tenant_id] = value
+            return value
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_epoch_incr_failed", tenant_id=tenant_id)

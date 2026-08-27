@@ -589,3 +589,119 @@ async def test_signal_state_snapshot(signals_db, tenant_a) -> None:
         assert "metrics" in payload
         assert payload.get("stream") is True
         assert payload.get("poll_ms") == STREAM_INTERVAL_MS
+
+
+@pytest.mark.asyncio
+async def test_refresh_publishes_and_invalidates_on_poisoned_commit(monkeypatch) -> None:
+    """Pilot 05:15:44: wait_for cancel mid-SQL broke the connection, COMMIT
+    failed, and the computed frame was lost. The worker must still publish the
+    frame and invalidate the poisoned session so the pool discards it."""
+    import uuid
+
+    from app.domains import signal_engine_worker as worker
+    from app.domains.signal_engine import SignalEngineConfig
+
+    tenant_id = uuid.uuid4()
+    tenant_key = str(tenant_id)
+
+    class PassTxn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FailingCommitTxn:
+        """Body succeeds; COMMIT on exit raises (aborted PG transaction)."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            if exc_type is None:
+                raise RuntimeError("RELEASE SAVEPOINT failed — connection poisoned")
+            return False
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.info: dict = {}
+            self.invalidated = False
+
+        def begin(self):
+            return FailingCommitTxn()
+
+        def begin_nested(self):
+            return PassTxn()
+
+        async def invalidate(self) -> None:
+            self.invalidated = True
+
+        async def flush(self) -> None:
+            return None
+
+    fake_session = FakeSession()
+
+    class FakeSessionCM:
+        async def __aenter__(self):
+            return fake_session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class StubService:
+        def __init__(self, session, context) -> None:
+            self.session = session
+            self.context = context
+
+        async def _load_config(self) -> SignalEngineConfig:
+            return SignalEngineConfig(
+                engine_enabled=True, underlying_symbol="NSE:NIFTY 50"
+            )
+
+        async def maybe_persist_auto_atm_symbols(self, payload) -> bool:
+            return False
+
+    async def fake_guc(session, tenant) -> None:
+        return None
+
+    async def fake_sync(*args, **kwargs) -> bool:
+        return False
+
+    async def fake_compute(service, *, config, last_good=None):
+        return {
+            "feed_source": "live",
+            "engine_enabled": True,
+            "metrics": [{"id": "atm"}],
+            "passed": 1,
+            "evaluable": 1,
+        }
+
+    async def fake_tier_b(*args, **kwargs) -> None:
+        return None
+
+    async def not_due(*args, **kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(worker, "SessionFactory", lambda: FakeSessionCM())
+    monkeypatch.setattr(worker, "apply_tenant_guc", fake_guc)
+    monkeypatch.setattr(worker, "SignalEngineService", StubService)
+    monkeypatch.setattr(worker, "sync_kite_for_signal_tenant", fake_sync)
+    monkeypatch.setattr(worker, "_compute_state_payload", fake_compute)
+    monkeypatch.setattr(worker, "refresh_tier_b_for_tenant", fake_tier_b)
+    monkeypatch.setattr(
+        "app.domains.param_chart_cache.metrics_persist_due", not_due
+    )
+    monkeypatch.setattr(
+        "app.domains.param_chart_cache.eod_finalize_due", not_due
+    )
+
+    ok = await worker.refresh_tenant_snapshot(tenant_id, auth_org_id="org-1")
+
+    assert ok is True
+    # Poisoned connection dropped from the pool, not recycled.
+    assert fake_session.invalidated is True
+    # The computed frame still reached Redis/local — desk does not stick on STARTING.
+    snap = await cache.get_snapshot(tenant_key)
+    assert snap is not None
+    assert snap["feed_source"] == "live"
+    assert snap.get("computed_at_ms") is not None

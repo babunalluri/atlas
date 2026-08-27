@@ -215,8 +215,8 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
         epoch_at_start = await cache.get_config_epoch(tenant_key)
         payload: dict[str, Any] | None = None
         config: SignalEngineConfig | None = None
-        try:
-            async with SessionFactory() as session:
+        async with SessionFactory() as session:
+            try:
                 async with session.begin():
                     await apply_tenant_guc(session, tenant_id)
                     service = SignalEngineService(session, context)
@@ -275,16 +275,21 @@ async def refresh_tenant_snapshot(tenant_id: uuid.UUID, *, auth_org_id: str) -> 
                                 tenant_id=tenant_key,
                                 error=str(exc)[:160],
                             )
-        except Exception as exc:
-            logger.warning(
-                "signal_ticker_refresh_failed",
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
-            # Still publish a computed timeout/starting frame if we have one —
-            # otherwise a poisoned commit leaves the desk on STARTING forever.
-            if payload is None or config is None:
-                return False
+            except Exception as exc:
+                logger.warning(
+                    "signal_ticker_refresh_failed",
+                    tenant_id=str(tenant_id),
+                    error=str(exc),
+                )
+                # A wait_for cancel mid-SQL breaks the asyncpg connection —
+                # savepoint RELEASE / txn COMMIT then fail. Invalidate so the
+                # pool discards it instead of recycling a poisoned connection.
+                with contextlib.suppress(Exception):
+                    await session.invalidate()
+                # Still publish a computed timeout/starting frame if we have one —
+                # otherwise a poisoned commit leaves the desk on STARTING forever.
+                if payload is None or config is None:
+                    return False
         if payload is None or config is None:
             return False
         keep_last_good = should_preserve_computed_at_ms(payload)

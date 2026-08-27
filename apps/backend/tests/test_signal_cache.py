@@ -89,6 +89,98 @@ async def test_config_epoch_is_monotonic_without_ttl_reset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_epoch_survives_redis_blip(monkeypatch) -> None:
+    """Pilot 05:14:34: Redis blip at tick start read epoch 0, snapshot later
+    refused as 0 < 11 and 45s of work dropped. A blip must return last-known."""
+    tenant = "tenant-epoch-blip"
+
+    class GoodClient:
+        def __init__(self) -> None:
+            self.store: dict[str, int] = {}
+
+        async def incr(self, key: str) -> int:
+            self.store[key] = int(self.store.get(key, 0)) + 1
+            return self.store[key]
+
+        async def get(self, key: str) -> str | None:
+            value = self.store.get(key)
+            return None if value is None else str(value)
+
+        async def set(self, key: str, value, **_kw) -> bool:
+            self.store[key] = int(value)
+            return True
+
+    class BlipClient:
+        async def get(self, key: str):
+            raise ConnectionError("redis down")
+
+        async def incr(self, key: str):
+            raise ConnectionError("redis down")
+
+    good = GoodClient()
+
+    async def redis_good():
+        return good
+
+    async def redis_blip():
+        return BlipClient()
+
+    async def noop_invalidate():
+        return None
+
+    monkeypatch.setattr(cache, "invalidate_redis", noop_invalidate)
+    monkeypatch.setattr(cache, "get_redis", redis_good)
+    for _ in range(11):
+        await cache.bump_config_epoch(tenant)
+    assert await cache.get_config_epoch(tenant) == 11
+
+    # Blip: reads return last-known (mirror), never 0.
+    monkeypatch.setattr(cache, "get_redis", redis_blip)
+    assert await cache.get_config_epoch(tenant) == 11
+    # A bump during the blip stays monotonic locally.
+    assert await cache.bump_config_epoch(tenant) == 12
+
+    # Redis recovers having missed the blip bump: reads stay monotonic and the
+    # next bump heals Redis forward instead of reissuing 12.
+    monkeypatch.setattr(cache, "get_redis", redis_good)
+    assert await cache.get_config_epoch(tenant) == 12
+    assert await cache.bump_config_epoch(tenant) == 13
+    assert await cache.get_config_epoch(tenant) == 13
+
+
+@pytest.mark.asyncio
+async def test_set_snapshot_not_refused_after_epoch_blip(monkeypatch) -> None:
+    """End-to-end pilot chain: tick stamps the epoch read during a blip; the
+    write must be accepted once Redis recovers (blip returns mirror, not 0)."""
+    tenant = "tenant-epoch-blip-write"
+    live = {"feed_source": "live", "metrics": [{"id": "atm"}], "evaluable": 40}
+
+    for _ in range(11):
+        await cache.bump_config_epoch(tenant)
+
+    real_get_redis = cache.get_redis
+
+    class BlipClient:
+        async def get(self, key: str):
+            raise ConnectionError("redis down")
+
+    async def redis_blip():
+        return BlipClient()
+
+    async def noop_invalidate():
+        return None
+
+    monkeypatch.setattr(cache, "invalidate_redis", noop_invalidate)
+    monkeypatch.setattr(cache, "get_redis", redis_blip)
+    epoch_at_start = await cache.get_config_epoch(tenant)  # blip mid-read
+    monkeypatch.setattr(cache, "get_redis", real_get_redis)
+
+    assert epoch_at_start == 11  # not 0
+    wrote = await cache.set_snapshot(tenant, {**live, "config_epoch": epoch_at_start})
+    assert wrote is True
+
+
+@pytest.mark.asyncio
 async def test_watcher_tracking_in_memory() -> None:
     await cache.touch_watcher("tenant-a")
     tenants = await cache.list_watched_tenant_ids()
