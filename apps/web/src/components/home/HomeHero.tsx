@@ -144,7 +144,7 @@ function SignedOutLanding({
 
       <div className="relative mx-auto max-w-6xl px-6 py-10 md:px-8 md:py-14">
         <header className="portal-rise">
-          <BrandMark href="/" subtitle={tHome("brandSubtitle")} />
+          <BrandMark href="/" size="lg" subtitle={tHome("brandSubtitle")} />
         </header>
 
         <section
@@ -157,7 +157,7 @@ function SignedOutLanding({
             <h1 className="max-w-xl font-display text-4xl font-semibold tracking-tight text-ink sm:text-5xl lg:text-[3.35rem] lg:leading-[1.08]">
               {tHome("headline")}
             </h1>
-            <p className="mt-5 max-w-md text-lg leading-relaxed text-slate-muted">
+            <p className="mt-5 max-w-lg text-lg leading-relaxed text-slate-muted">
               {tHome("support")}
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -178,7 +178,44 @@ function SignedOutLanding({
           </div>
         </section>
 
-        <section className="portal-rise portal-rise-delay-3 mt-16 border-t border-line/70 pt-12 md:mt-20">
+        <section className="portal-rise portal-rise-delay-3 mt-14 md:mt-16">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
+            {tHome("tenantsEyebrow")}
+          </p>
+          <h2 className="mt-3 max-w-2xl font-display text-3xl font-semibold tracking-tight text-ink">
+            {tHome("tenantsTitle")}
+          </h2>
+          <div className="mt-8 grid gap-4 sm:grid-cols-3">
+            {[
+              {
+                name: tHome("tenantStockbroker"),
+                hint: tHome("tenantStockbrokerHint"),
+              },
+              {
+                name: tHome("tenantDental"),
+                hint: tHome("tenantDentalHint"),
+              },
+              {
+                name: tHome("tenantMore"),
+                hint: tHome("tenantMoreHint"),
+              },
+            ].map((card) => (
+              <div
+                key={card.name}
+                className="rounded-2xl border border-line/80 bg-canvas/80 p-4 shadow-[0_1px_0_rgba(7,16,24,0.04)]"
+              >
+                <p className="font-display text-lg font-semibold tracking-tight text-ink">
+                  {card.name}
+                </p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-muted">
+                  {card.hint}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="mt-16 border-t border-line/70 pt-12 md:mt-20">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-teal">
             {tHome("twoDoorsEyebrow")}
           </p>
