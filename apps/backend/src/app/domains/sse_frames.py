@@ -18,6 +18,7 @@ def stream_revision(payload: Mapping[str, Any]) -> tuple[Any, ...]:
     globals-only refreshes) are not incorrectly deduped against each other.
     """
     underlying = payload.get("underlying") if isinstance(payload.get("underlying"), dict) else {}
+    kite_live = payload.get("kite_live") if isinstance(payload.get("kite_live"), dict) else {}
     return (
         payload.get("computed_at_ms"),
         payload.get("globals_computed_at_ms"),
@@ -35,4 +36,9 @@ def stream_revision(payload: Mapping[str, Any]) -> tuple[Any, ...]:
         payload.get("passed"),
         payload.get("evaluable"),
         payload.get("error"),
+        # Param Chart overlay: LTP can move many times inside one fetched_at second.
+        kite_live.get("spot"),
+        kite_live.get("ce"),
+        kite_live.get("pe"),
+        payload.get("quote_stale"),
     )

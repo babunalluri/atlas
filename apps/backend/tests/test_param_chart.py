@@ -678,3 +678,224 @@ async def test_param_chart_read_config_uses_setup_memo(monkeypatch) -> None:
     assert cfg.month == 8
     assert cfg.underlying_symbol == "NSE:NIFTY 50"
     signal_cache.reset_signal_cache_for_tests()
+
+
+def test_merge_desk_instrument_prefers_shared_board() -> None:
+    from app.domains.param_chart_constants import (
+        DESK_INSTRUMENT_SETTINGS_KEY,
+        PARAM_CHART_SETTINGS_KEY,
+        merge_desk_instrument_into_chart,
+    )
+
+    merged = merge_desk_instrument_into_chart(
+        {
+            PARAM_CHART_SETTINGS_KEY: {
+                "underlying_symbol": "NSE:NIFTY BANK",
+                "year": 2026,
+                "month": 8,
+                "interval": "1D",
+                "entry_ce_premium": 100.0,
+            },
+            DESK_INSTRUMENT_SETTINGS_KEY: {
+                "underlying_symbol": "NSE:NIFTY 50",
+                "ce_symbol": "NFO:NIFTY26AUG24000CE",
+                "pe_symbol": "NFO:NIFTY26AUG24000PE",
+            },
+        }
+    )
+    assert merged["underlying_symbol"] == "NSE:NIFTY 50"
+    assert merged["ce_symbol"] == "NFO:NIFTY26AUG24000CE"
+    assert merged["year"] == 2026
+    assert merged["entry_ce_premium"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_refresh_overlay_from_cache_is_book_only() -> None:
+    import uuid
+
+    from app.domains import signal_engine_cache as signal_cache
+    from app.domains.kite_ticker_hub import write_ticker_rows
+    from app.domains.param_chart import _ist_today, refresh_overlay_from_cache
+    from app.domains.param_chart_constants import PARAM_CHART_SETTINGS_KEY
+
+    signal_cache.reset_signal_cache_for_tests()
+    tenant = str(uuid.uuid4())
+    today_d = _ist_today()
+    today = today_d.isoformat()
+    await signal_cache.set_metric(
+        tenant,
+        "setup",
+        "medium",
+        {
+            "settings": {
+                PARAM_CHART_SETTINGS_KEY: {
+                    "year": today_d.year,
+                    "month": today_d.month,
+                    "interval": "1D",
+                    "underlying_symbol": "NSE:NIFTY 50",
+                    "ce_symbol": "NFO:NIFTY26AUG24000CE",
+                    "pe_symbol": "NFO:NIFTY26AUG24000PE",
+                }
+            }
+        },
+    )
+    await write_ticker_rows(
+        tenant,
+        {
+            "NSE:NIFTY 50": {
+                "last_price": 24150.0,
+                "ohlc": {"open": 24100.0, "high": 24200.0, "low": 24050.0, "close": 24120.0},
+            },
+            "NFO:NIFTY26AUG24000CE": {"last_price": 110.5},
+            "NFO:NIFTY26AUG24000PE": {"last_price": 95.25},
+        },
+    )
+    await pc_cache.set_month_pack(
+        tenant,
+        year=today_d.year,
+        month=today_d.month,
+        interval="1D",
+        payload={
+            "year": today_d.year,
+            "month": today_d.month,
+            "interval": "1D",
+            "days": [{"date": today, "open": 1, "high": 1, "low": 1, "close": 1}],
+        },
+    )
+    frame = await refresh_overlay_from_cache(tenant)
+    assert frame is not None
+    assert frame["stream_patch"] is True
+    assert frame["kite_live"]["source"] == "book"
+    assert frame["kite_live"]["spot"] == 24150.0
+    assert frame["kite_live"]["ce"] == 110.5
+    assert frame["kite_live"]["pe"] == 95.25
+    assert frame["days"]
+    assert frame["days"][-1]["close"] == 24150.0
+    cached = await pc_cache.get_overlay(tenant)
+    assert cached == frame
+    signal_cache.reset_signal_cache_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_refresh_overlay_pack_miss_is_not_building() -> None:
+    """Pack TTL miss must not freeze SSE on building=True / empty days."""
+    import uuid
+
+    from app.domains import signal_engine_cache as signal_cache
+    from app.domains.kite_ticker_hub import write_ticker_rows
+    from app.domains.param_chart import refresh_overlay_from_cache
+    from app.domains.param_chart_constants import PARAM_CHART_SETTINGS_KEY
+
+    signal_cache.reset_signal_cache_for_tests()
+    tenant = str(uuid.uuid4())
+    await signal_cache.set_metric(
+        tenant,
+        "setup",
+        "medium",
+        {
+            "settings": {
+                PARAM_CHART_SETTINGS_KEY: {
+                    "interval": "15m",
+                    "underlying_symbol": "NSE:NIFTY 50",
+                    "year": 2026,
+                    "month": 8,
+                }
+            }
+        },
+    )
+    await write_ticker_rows(
+        tenant,
+        {"NSE:NIFTY 50": {"last_price": 24150.0}},
+    )
+    frame = await refresh_overlay_from_cache(tenant)
+    assert frame is not None
+    assert frame["building"] is False
+    assert frame["days"] == []
+    assert frame["kite_live"]["spot"] == 24150.0
+    signal_cache.reset_signal_cache_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_apply_today_overlay_paints_latest_today_bar() -> None:
+    from app.domains.param_chart import ParamChartConfig, apply_today_overlay
+
+    cfg = ParamChartConfig(
+        underlying_symbol="NSE:NIFTY 50",
+        entry_ce_premium=100.0,
+        entry_pe_premium=100.0,
+    )
+    pack = {
+        "year": 2099,
+        "month": 1,
+        "days": [
+            {"date": "2099-01-01", "close": 1},
+        ],
+    }
+    live = {
+        "live_metrics": {"chk_008": {"id": "chk_008", "value": 1.4}},
+        "kite_live": {"source": "book", "spot": 10, "ce": 2, "pe": 3, "error": None},
+        "spot_close": 10.0,
+        "ce": 2.0,
+        "pe": 3.0,
+        "total": 5.0,
+        "pct": 97.5,
+    }
+    out = apply_today_overlay(cfg, pack, live)
+    assert out["live_metrics"]["chk_008"]["value"] == 1.4
+    assert out["kite_live"]["source"] == "book"
+
+
+@pytest.mark.asyncio
+async def test_param_chart_source_merges_without_dropping_signal(monkeypatch) -> None:
+    import asyncio
+    import contextlib
+
+    from app.domains.kite_ticker_hub import (
+        SOURCE_PARAM_CHART,
+        SOURCE_SIGNAL,
+        get_kite_ticker_hub,
+        reset_kite_ticker_hub_for_tests,
+    )
+
+    class _Settings:
+        kite_ticker_enabled = True
+
+    monkeypatch.setattr("app.core.settings.get_settings", lambda: _Settings())
+    reset_kite_ticker_hub_for_tests()
+    hub = get_kite_ticker_hub()
+    hub._enabled = True
+    await hub.sync_tenant(
+        "t-pc",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={1: "NSE:NIFTY 50", 2: "NFO:NIFTYFUT"},
+        source=SOURCE_SIGNAL,
+    )
+    feed = hub._tenants["t-pc"]
+    if feed.task is not None:
+        feed.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feed.task
+        feed.task = asyncio.create_task(asyncio.sleep(3600))
+    await hub.sync_tenant(
+        "t-pc",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={5: "NFO:NIFTY26AUG24000CE", 6: "NFO:NIFTY26AUG24000PE"},
+        source=SOURCE_PARAM_CHART,
+    )
+    assert feed.desired_tokens == {1, 2, 5, 6}
+    await hub.sync_tenant(
+        "t-pc",
+        api_key="k",
+        access_token="tok",
+        token_to_symbol={},
+        source=SOURCE_PARAM_CHART,
+    )
+    assert 1 in feed.desired_tokens
+    assert 2 in feed.desired_tokens
+    assert 5 not in feed.desired_tokens
+    feed.task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await feed.task
+    reset_kite_ticker_hub_for_tests()

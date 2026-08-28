@@ -15,6 +15,7 @@ from app.core.settings import Settings, get_settings
 from app.domains.kite_ticker_hub import KiteTickerHub, get_kite_ticker_hub
 from app.domains.options_lab_bots_worker import OptionsLabBotsWorker
 from app.domains.options_lab_worker import OptionsLabWorker
+from app.domains.param_chart_worker import ParamChartWorker
 from app.domains.signal_engine_worker import SignalEngineWorker
 
 logger = get_logger(__name__)
@@ -35,6 +36,7 @@ class DomainServices:
 
     signal_worker: SignalEngineWorker = field(default_factory=SignalEngineWorker)
     options_lab_worker: OptionsLabWorker = field(default_factory=OptionsLabWorker)
+    param_chart_worker: ParamChartWorker = field(default_factory=ParamChartWorker)
     options_lab_bots_worker: OptionsLabBotsWorker = field(
         default_factory=OptionsLabBotsWorker
     )
@@ -69,6 +71,10 @@ class DomainServices:
             self.options_lab_worker.start()
             self._active.append("options_lab")
             logger.info("domain_service_started", service="options_lab_worker")
+        if settings.param_chart_ticker_enabled:
+            self.param_chart_worker.start()
+            self._active.append("param_chart")
+            logger.info("domain_service_started", service="param_chart_worker")
         if settings.options_lab_bots_enabled:
             workers = web_concurrency()
             if workers > 1:
@@ -88,6 +94,8 @@ class DomainServices:
         # test-env no-op starts do not disable the shared Kite hub singleton.
         if "options_lab_bots" in self._active:
             await self.options_lab_bots_worker.stop()
+        if "param_chart" in self._active:
+            await self.param_chart_worker.stop()
         if "options_lab" in self._active:
             await self.options_lab_worker.stop()
         if "signal" in self._active:

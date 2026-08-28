@@ -181,6 +181,7 @@ services:
       SIGNAL_ENGINE_TICKER_ENABLED: "true"
       KITE_TICKER_ENABLED: "true"
       OPTIONS_LAB_TICKER_ENABLED: "true"
+      PARAM_CHART_TICKER_ENABLED: "true"
       # Armed paper bots (~60s). Requires WEB_CONCURRENCY=1 (default uvicorn).
       OPTIONS_LAB_BOTS_ENABLED: "true"
       # Pin single worker — Kite WS hub + paper bots disable themselves if >1.

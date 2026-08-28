@@ -15,11 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import require_roles
 from app.db.models import Role
 from app.db.session import SessionFactory, apply_tenant_guc, tenant_session
-from app.domains import param_chart_cache as pc_cache
 from app.domains.param_chart import (
     ParamChartService,
     month_state_for_stream,
     overlay_frame_from_cache,
+    refresh_overlay_from_cache,
 )
 from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
 from app.domains.sse_frames import SSE_KEEPALIVE, stream_revision
@@ -127,11 +127,12 @@ async def stream_param_chart(
                     break
                 payload = await overlay_frame_from_cache(tenant_key)
                 if payload is None:
+                    payload = await refresh_overlay_from_cache(tenant_key)
+                if payload is None:
                     async with SessionFactory() as session:
                         async with session.begin():
                             await apply_tenant_guc(session, context.tenant_id)
                             payload = await month_state_for_stream(session, context)
-                    await pc_cache.touch_watcher(tenant_key)
                 rev = stream_revision(payload)
                 if rev == last_rev:
                     yield SSE_KEEPALIVE

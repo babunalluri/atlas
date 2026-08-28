@@ -41,6 +41,14 @@ def test_stream_revision_lab_fetched_at() -> None:
     assert stream_revision(a) != stream_revision(c)
 
 
+def test_stream_revision_param_chart_kite_live() -> None:
+    base = {"fetched_at": 50, "kite_live": {"spot": 24100.0, "ce": 110.0, "pe": 90.0}}
+    same = {"fetched_at": 50, "kite_live": {"spot": 24100.0, "ce": 110.0, "pe": 90.0}}
+    tick = {"fetched_at": 50, "kite_live": {"spot": 24100.5, "ce": 110.0, "pe": 90.0}}
+    assert stream_revision(base) == stream_revision(same)
+    assert stream_revision(base) != stream_revision(tick)
+
+
 def test_sse_keepalive_is_comment() -> None:
     assert SSE_KEEPALIVE.startswith(b":")
     assert SSE_KEEPALIVE.endswith(b"\n\n")

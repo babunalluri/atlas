@@ -2,7 +2,8 @@
 
 Writes per-symbol quote rows into the broker metric cache so ``_fetch_quote``
 can overlay live LTP/OI on REST snapshots. REST remains the source for IV and
-any symbols the ticker book does not yet cover.
+any symbols the ticker book does not yet cover. Signal, Options Lab, and Param
+Chart merge subscriptions by ``source`` on one tenant feed.
 """
 
 from __future__ import annotations

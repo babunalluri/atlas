@@ -415,9 +415,9 @@ function DualAxisMonthChart({
   const histH = 64;
   const axisH = 18;
   const h = priceH + gap + metricH + metricGap + histH + axisH;
-  // Slim Y gutters — more width for candles; compact monospace ticks.
-  const left = 44;
-  const right = hasPriceOverlays ? 44 : 8;
+  // Slim Y gutters — smaller ticks so candles keep the width.
+  const left = 30;
+  const right = hasPriceOverlays ? 30 : 6;
   const top = 10;
   const priceBottomPad = 6;
   const innerW = w - left - right;
@@ -635,9 +635,7 @@ function DualAxisMonthChart({
 
   const fmtAxis = (v: number) => {
     const a = Math.abs(v);
-    if (a >= 1000) {
-      return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
-    }
+    if (a >= 1000) return String(Math.round(v));
     if (a >= 100) return (Math.round(v * 10) / 10).toString();
     return (Math.round(v * 100) / 100).toString();
   };
@@ -780,7 +778,7 @@ function DualAxisMonthChart({
                   y={y + 3}
                   textAnchor="end"
                   className="fill-rose-500/70"
-                  fontSize={8}
+                  fontSize={6}
                   fontFamily="ui-monospace, monospace"
                 >
                   {fmtAxis(pVal)}
@@ -791,7 +789,7 @@ function DualAxisMonthChart({
                     y={y + 3}
                     textAnchor="start"
                     className="fill-sky-500/70"
-                    fontSize={8}
+                    fontSize={6}
                     fontFamily="ui-monospace, monospace"
                   >
                     {fmtAxis(oVal)}
@@ -869,7 +867,7 @@ function DualAxisMonthChart({
                       y={y + 3}
                       textAnchor="end"
                       className="fill-violet-500/80"
-                      fontSize={8}
+                      fontSize={6}
                       fontFamily="ui-monospace, monospace"
                     >
                       {fmtAxis(mVal)}
@@ -998,7 +996,7 @@ function DualAxisMonthChart({
                           y={yAdj + 3}
                           textAnchor="end"
                           fill="#fff"
-                          fontSize={8}
+                          fontSize={6}
                           fontFamily="ui-monospace, monospace"
                         >
                           {label}
@@ -1730,8 +1728,14 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   }, [active, applySnapshot, getAccessToken, isLoaded, isSignedIn]);
 
   const selectedDay = useMemo(() => {
-    if (!month?.days || !selectedDate) return null;
-    return month.days.find((d) => d.date === selectedDate) ?? null;
+    const days = month?.days;
+    if (!days?.length) return null;
+    return (
+      days.find((d) => d.date === selectedDate) ??
+      days.find((d) => d.is_today) ??
+      days[days.length - 1] ??
+      null
+    );
   }, [month, selectedDate]);
 
   const overlayLabels = useMemo(
@@ -2153,6 +2157,47 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
                 </p>
               </div>
             </div>
+            {selectedDay ? (
+              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-line bg-canvas/50 px-2.5 py-1.5 text-xs">
+                <span className="text-slate-muted">
+                  Day {selectedDay.day_index} · {selectedDay.date}
+                </span>
+                <span className="text-slate-muted">·</span>
+                <span className="font-mono tabular-nums">
+                  Close {fmt(selectedDay.close)} · Total{" "}
+                  {fmt(selectedDay.total, 1)}
+                </span>
+                {overlaySeries.map((id, idx) => {
+                  if (id === "total" || id === "close") return null;
+                  const label = overlayLabels[idx];
+                  let value: string = "—";
+                  if (id === "ce") value = fmt(selectedDay.ce, 1);
+                  else if (id === "pe") value = fmt(selectedDay.pe, 1);
+                  else if (id.startsWith("metric:")) {
+                    const v = seriesValue(selectedDay, id, {
+                      metricsByDay: month?.metrics_by_day,
+                      liveMetrics: month?.live_metrics,
+                      today: month?.today,
+                    });
+                    value = v == null ? "—" : String(v);
+                  }
+                  return (
+                    <span key={id} className="inline-flex items-center gap-1">
+                      <span className="text-slate-muted">·</span>
+                      <span
+                        className="size-1.5 shrink-0 rounded-full"
+                        style={{
+                          backgroundColor:
+                            OVERLAY_COLORS[idx % OVERLAY_COLORS.length],
+                        }}
+                      />
+                      <span className="font-medium text-ink">{label}</span>
+                      <span className="font-mono tabular-nums">{value}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            ) : null}
             <DualAxisMonthChart
               days={month?.days ?? []}
               selectedDate={selectedDate}
@@ -2193,47 +2238,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
               );
             })()}
           </div>
-
-          {selectedDay ? (
-            <div className="rounded-md border border-line bg-canvas/40 px-3 py-2 text-sm">
-              <span className="text-slate-muted">
-                Day {selectedDay.day_index} · {selectedDay.date}
-              </span>
-              <span className="mx-2 text-slate-muted">·</span>
-              <span className="font-mono tabular-nums">
-                Close {fmt(selectedDay.close)} · Total {fmt(selectedDay.total, 1)}
-              </span>
-              {overlaySeries.map((id, idx) => {
-                if (id === "total" || id === "close") return null;
-                const label = overlayLabels[idx];
-                let value: string = "—";
-                if (id === "ce") value = fmt(selectedDay.ce, 1);
-                else if (id === "pe") value = fmt(selectedDay.pe, 1);
-                else if (id.startsWith("metric:")) {
-                  const v = seriesValue(selectedDay, id, {
-                    metricsByDay: month?.metrics_by_day,
-                    liveMetrics: month?.live_metrics,
-                    today: month?.today,
-                  });
-                  value = v == null ? "—" : String(v);
-                }
-                return (
-                  <span key={id}>
-                    <span className="mx-2 text-slate-muted">·</span>
-                    <span
-                      className="mr-1 inline-block size-1.5 rounded-full align-middle"
-                      style={{
-                        backgroundColor:
-                          OVERLAY_COLORS[idx % OVERLAY_COLORS.length],
-                      }}
-                    />
-                    <span className="font-medium text-ink">{label}</span>{" "}
-                    <span className="font-mono tabular-nums">{value}</span>
-                  </span>
-                );
-              })}
-            </div>
-          ) : null}
         </div>
       </div>
     </div>

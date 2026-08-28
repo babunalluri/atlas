@@ -303,6 +303,14 @@ class Settings(BaseSettings):
             "Default off; enable in desk Compose / env."
         ),
     )
+    param_chart_ticker_enabled: bool = Field(
+        default=False,
+        validation_alias="PARAM_CHART_TICKER_ENABLED",
+        description=(
+            "Paint Param Chart today-overlay from the ticker book and subscribe "
+            "under/FUT/CE/PE as source=param_chart. Default off; enable in desk Compose."
+        ),
+    )
     options_lab_bots_enabled: bool = Field(
         default=False,
         validation_alias="OPTIONS_LAB_BOTS_ENABLED",

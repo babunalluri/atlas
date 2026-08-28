@@ -532,6 +532,291 @@ class ParamChartConfig:
         return (self.year or today.year, self.month or today.month)
 
 
+def heal_option_symbols_for_month(
+    cfg: ParamChartConfig, *, year: int, month: int
+) -> ParamChartConfig:
+    """Roll CE/PE to the chart month's monthly expiry when stale/missing.
+
+    In-memory only — SSE/overlay must not persist on the live tick.
+    """
+    strike = int(cfg.strike or 0)
+    if strike <= 0:
+        return cfg
+    ce_ok = bool(cfg.ce_symbol) and _option_matches_chart_month(
+        cfg.ce_symbol, year, month
+    )
+    pe_ok = bool(cfg.pe_symbol) and _option_matches_chart_month(
+        cfg.pe_symbol, year, month
+    )
+    if ce_ok and pe_ok:
+        return cfg
+    when = datetime(year, month, 15, tzinfo=IST)
+    ce, pe = suggest_option_symbols(cfg.underlying_symbol, strike, when=when)
+    if ce == cfg.ce_symbol and pe == cfg.pe_symbol:
+        return cfg
+    return ParamChartConfig.from_dict(
+        {
+            **cfg.to_admin_dict(),
+            "ce_symbol": ce,
+            "pe_symbol": pe,
+            "year": year,
+            "month": month,
+        }
+    )
+
+
+async def config_from_setup_cache(tenant_id: str) -> ParamChartConfig | None:
+    """Param Chart config from the Signal setup memo. ``None`` on a cold miss."""
+    hit = await signal_cache.get_metric(tenant_id, "setup")
+    if hit is None:
+        return None
+    settings = hit.get("settings") if isinstance(hit, dict) else None
+    if not isinstance(settings, dict):
+        return ParamChartConfig()
+    merged = merge_desk_instrument_into_chart(settings)
+    return ParamChartConfig.from_dict(merged)
+
+
+async def _book_quotes(tenant_id: str, symbols: list[str]) -> dict[str, Any]:
+    """Ticker book only — never REST. Empty dict if the book has nothing."""
+    if not symbols:
+        return {}
+    from app.domains.kite_ticker_hub import assemble_quotes_from_book
+
+    live = await assemble_quotes_from_book(
+        tenant_id, symbols, require_all=False, require_alive=True
+    )
+    if live:
+        return live
+    soft = await assemble_quotes_from_book(
+        tenant_id, symbols, require_all=False, require_alive=False
+    )
+    return soft or {}
+
+
+async def live_quote_overlay(tenant_id: str, cfg: ParamChartConfig) -> dict[str, Any]:
+    """Book-first spot/CE/PE + Signal shared metrics (no hist, no REST)."""
+    metrics: dict[str, Any] = {}
+    snap = await signal_cache.get_snapshot(tenant_id)
+    if isinstance(snap, dict):
+        metrics = project_metrics_from_signal_rows(snap.get("metrics"))
+
+    ce = pe = total = pct = None
+    spot_close = spot_open = spot_high = spot_low = None
+    quote_error: str | None = None
+    quote_stale = False
+    allow_stale = _nse_pre_open()
+    try:
+        symbols = [
+            s for s in (cfg.underlying_symbol, cfg.ce_symbol, cfg.pe_symbol) if s
+        ]
+        quotes = await _book_quotes(tenant_id, symbols)
+        spot_row = _find_quote_row(quotes, cfg.underlying_symbol)
+        spot_close, spot_stale = _quote_ltp(
+            spot_row,
+            allow_previous_close=allow_stale,
+        )
+        if spot_stale:
+            quote_stale = True
+        ohlc = spot_row.get("ohlc") if isinstance(spot_row, dict) else None
+        if isinstance(ohlc, dict):
+            spot_open = _pick_float(ohlc, "open")
+            spot_high = _pick_float(ohlc, "high")
+            spot_low = _pick_float(ohlc, "low")
+        ce_ltp, ce_stale = _quote_ltp(
+            _find_quote_row(quotes, cfg.ce_symbol),
+            allow_previous_close=allow_stale,
+        )
+        pe_ltp, pe_stale = _quote_ltp(
+            _find_quote_row(quotes, cfg.pe_symbol),
+            allow_previous_close=allow_stale,
+        )
+        ce, pe = ce_ltp, pe_ltp
+        if ce_stale or pe_stale:
+            quote_stale = True
+        if ce is not None and pe is not None:
+            total = round(ce + pe, 2)
+            entry = cfg.entry_total()
+            if entry:
+                pct = round((entry - total) / entry * 100, 2)
+        if not quotes and symbols:
+            quote_error = "kite_quote_empty"
+    except Exception as exc:  # noqa: BLE001
+        quote_error = str(exc)[:200]
+        logger.warning("param_chart_today_quote_failed", tenant_id=tenant_id)
+
+    kite_live: dict[str, Any] = {
+        "source": "book",
+        "spot": spot_close,
+        "ce": ce,
+        "pe": pe,
+        "error": quote_error,
+    }
+    if quote_stale:
+        kite_live["quote_stale"] = True
+        kite_live["quote_reference"] = "previous_close"
+    return {
+        "live_metrics": metrics,
+        "kite_live": kite_live,
+        "quote_stale": quote_stale,
+        "quote_reference": "previous_close" if quote_stale else None,
+        "spot_close": spot_close,
+        "spot_open": spot_open,
+        "spot_high": spot_high,
+        "spot_low": spot_low,
+        "ce": ce,
+        "pe": pe,
+        "total": total,
+        "pct": pct,
+    }
+
+
+def apply_today_overlay(
+    cfg: ParamChartConfig,
+    pack: dict[str, Any],
+    live: dict[str, Any],
+) -> dict[str, Any]:
+    """Paint today's bar from a live overlay onto a cached month pack."""
+    today = _ist_today()
+    days = list(pack.get("days") or [])
+    today_s = today.isoformat()
+    today_idxs = _today_bar_indices(days, today_s)
+    today_row = days[today_idxs[-1]] if today_idxs else None
+
+    metrics = live["live_metrics"] if isinstance(live.get("live_metrics"), dict) else {}
+    spot_close = live.get("spot_close")
+    spot_open = live.get("spot_open")
+    spot_high = live.get("spot_high")
+    spot_low = live.get("spot_low")
+    ce = live.get("ce")
+    pe = live.get("pe")
+    total = live.get("total")
+    pct = live.get("pct")
+
+    if today_row is not None and today_idxs:
+        updated = dict(today_row)
+        updated["is_today"] = True
+        updated["metrics"] = {}
+        if spot_open is not None:
+            updated["open"] = spot_open
+        if spot_high is not None:
+            updated["high"] = spot_high
+        if spot_low is not None:
+            updated["low"] = spot_low
+        if spot_close is not None:
+            updated["close"] = spot_close
+            if updated.get("open") is None:
+                updated["open"] = spot_close
+            if updated.get("high") is None:
+                updated["high"] = spot_close
+            if updated.get("low") is None:
+                updated["low"] = spot_close
+        if ce is not None or pe is not None:
+            updated = _apply_premiums(
+                updated, ce=ce, pe=pe, entry_total=cfg.entry_total()
+            )
+        elif total is not None:
+            updated["total"] = total
+            updated["pct_vs_entry"] = pct
+        days = list(days)
+        days[today_idxs[-1]] = updated
+        for i in today_idxs[:-1]:
+            row = dict(days[i])
+            row["is_today"] = True
+            row["metrics"] = {}
+            days[i] = row
+    elif today.weekday() < 5 and (
+        pack.get("year") == today.year and pack.get("month") == today.month
+    ):
+        row = _empty_day(today, day_index=len(days) + 1)
+        row["metrics"] = {}
+        if spot_close is not None:
+            row["open"] = spot_open or spot_close
+            row["high"] = spot_high or spot_close
+            row["low"] = spot_low or spot_close
+            row["close"] = spot_close
+        if ce is not None or pe is not None:
+            row = _apply_premiums(
+                row, ce=ce, pe=pe, entry_total=cfg.entry_total()
+            )
+        days = [*days, row]
+
+    metrics_by_day = metrics_store.normalize_metrics_by_day(
+        pack.get("metrics_by_day")
+        if isinstance(pack.get("metrics_by_day"), dict)
+        else {}
+    )
+    if metrics:
+        prev_today = (
+            metrics_by_day.get(today_s)
+            if isinstance(metrics_by_day.get(today_s), dict)
+            else {}
+        )
+        metrics_by_day[today_s] = {**prev_today, **metrics}
+
+    kite_live = live.get("kite_live") if isinstance(live.get("kite_live"), dict) else {}
+    lean_days = metrics_store.strip_embedded_metrics(_attach_day_deltas(days))
+    out = {
+        **pack,
+        "days": lean_days,
+        "metrics_by_day": metrics_by_day,
+        "today": today.isoformat(),
+        "live_metrics": metrics,
+        "kite_live": kite_live,
+        "fetched_at": int(time.time()),
+        "stream_interval_ms": STREAM_INTERVAL_MS,
+    }
+    if live.get("quote_stale"):
+        out["quote_stale"] = True
+        out["quote_reference"] = live.get("quote_reference") or "previous_close"
+    return out
+
+
+async def refresh_overlay_from_cache(tenant_id: str) -> dict[str, Any] | None:
+    """Write today's SSE overlay from Redis + ticker book. No Postgres / Kite hist."""
+    await pc_cache.touch_watcher(tenant_id)
+    cfg = await config_from_setup_cache(tenant_id)
+    if cfg is None:
+        return None
+    y, m = cfg.resolved_year_month()
+    cfg = heal_option_symbols_for_month(cfg, year=y, month=m)
+    pack = await pc_cache.get_month_pack(
+        tenant_id, year=y, month=m, interval=cfg.interval
+    )
+    live = await live_quote_overlay(tenant_id, cfg)
+    if isinstance(pack, dict) and pack.get("days"):
+        merged = apply_today_overlay(cfg, pack, live)
+    else:
+        # Pack miss: live quotes only. Never stamp building=True on the overlay —
+        # that froze SSE (no fall-through) and the desk spinner. Hist stays on
+        # GET /month; empty days let the client keep a REST-loaded series.
+        today_s = _ist_today().isoformat()
+        live_metrics = (
+            live["live_metrics"] if isinstance(live.get("live_metrics"), dict) else {}
+        )
+        merged = {
+            "ok": True,
+            "building": False,
+            "year": y,
+            "month": m,
+            "interval": cfg.interval,
+            "today": today_s,
+            "days": [],
+            "metrics_by_day": {today_s: live_metrics} if live_metrics else {},
+            "live_metrics": live_metrics,
+            "kite_live": live.get("kite_live") or {"source": "book", "error": None},
+            "fetched_at": int(time.time()),
+            "stream_interval_ms": STREAM_INTERVAL_MS,
+            "config": cfg.to_admin_dict(),
+        }
+        if live.get("quote_stale"):
+            merged["quote_stale"] = True
+            merged["quote_reference"] = live.get("quote_reference") or "previous_close"
+    slim = _slim_stream_frame(merged)
+    await pc_cache.set_overlay(tenant_id, slim)
+    return slim
+
+
 class ParamChartService:
     """Param Chart data — Kite only (quotes + historical candles)."""
 
@@ -945,36 +1230,7 @@ class ParamChartService:
     async def _heal_option_symbols_for_month(
         self, cfg: ParamChartConfig, *, year: int, month: int
     ) -> ParamChartConfig:
-        """Roll CE/PE to the chart month's monthly expiry when stale/missing.
-
-        In-memory only — ``month_state`` is polled by SSE (~2 Hz). Persisting
-        here would risk a DB write every tick if the match invariant breaks.
-        Durable CE/PE updates happen via explicit admin config patches.
-        """
-        strike = int(cfg.strike or 0)
-        if strike <= 0:
-            return cfg
-        ce_ok = bool(cfg.ce_symbol) and _option_matches_chart_month(
-            cfg.ce_symbol, year, month
-        )
-        pe_ok = bool(cfg.pe_symbol) and _option_matches_chart_month(
-            cfg.pe_symbol, year, month
-        )
-        if ce_ok and pe_ok:
-            return cfg
-        when = datetime(year, month, 15, tzinfo=IST)
-        ce, pe = suggest_option_symbols(cfg.underlying_symbol, strike, when=when)
-        if ce == cfg.ce_symbol and pe == cfg.pe_symbol:
-            return cfg
-        return ParamChartConfig.from_dict(
-            {
-                **cfg.to_admin_dict(),
-                "ce_symbol": ce,
-                "pe_symbol": pe,
-                "year": year,
-                "month": month,
-            }
-        )
+        return heal_option_symbols_for_month(cfg, year=year, month=month)
 
     async def _backfill_from_kite(
         self,
@@ -1364,198 +1620,12 @@ class ParamChartService:
 
     async def _live_quote_overlay(self, cfg: ParamChartConfig) -> dict[str, Any]:
         """Book-first spot/CE/PE + Signal shared metrics (no hist)."""
-        tenant_id = _tenant_key(self.context)
-        metrics: dict[str, Any] = {}
-        snap = await signal_cache.get_snapshot(tenant_id)
-        if isinstance(snap, dict):
-            metrics = project_metrics_from_signal_rows(snap.get("metrics"))
-
-        ce = pe = total = pct = None
-        spot_close = spot_open = spot_high = spot_low = None
-        quote_error: str | None = None
-        quote_stale = False
-        allow_stale = _nse_pre_open()
-        try:
-            symbols = [
-                s
-                for s in (cfg.underlying_symbol, cfg.ce_symbol, cfg.pe_symbol)
-                if s
-            ]
-            quotes = await _book_quotes(tenant_id, symbols)
-            spot_row = _find_quote_row(quotes, cfg.underlying_symbol)
-            spot_close, spot_stale = _quote_ltp(
-                spot_row,
-                allow_previous_close=allow_stale,
-            )
-            if spot_stale:
-                quote_stale = True
-            ohlc = spot_row.get("ohlc") if isinstance(spot_row, dict) else None
-            if isinstance(ohlc, dict):
-                spot_open = _pick_float(ohlc, "open")
-                spot_high = _pick_float(ohlc, "high")
-                spot_low = _pick_float(ohlc, "low")
-            ce_ltp, ce_stale = _quote_ltp(
-                _find_quote_row(quotes, cfg.ce_symbol),
-                allow_previous_close=allow_stale,
-            )
-            pe_ltp, pe_stale = _quote_ltp(
-                _find_quote_row(quotes, cfg.pe_symbol),
-                allow_previous_close=allow_stale,
-            )
-            ce, pe = ce_ltp, pe_ltp
-            if ce_stale or pe_stale:
-                quote_stale = True
-            if ce is not None and pe is not None:
-                total = round(ce + pe, 2)
-                entry = cfg.entry_total()
-                if entry:
-                    pct = round((entry - total) / entry * 100, 2)
-            try:
-                from app.domains import param_chart_token_store as token_store
-
-                for sym in (cfg.underlying_symbol, cfg.ce_symbol, cfg.pe_symbol):
-                    if not sym:
-                        continue
-                    tok = _token_from_quote_row(_find_quote_row(quotes, sym))
-                    if tok:
-                        await token_store.put_instrument_token(sym, tok)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "param_chart_token_persist_failed",
-                    tenant_id=tenant_id,
-                    error=str(exc)[:200],
-                )
-            if not quotes and symbols:
-                quote_error = "kite_quote_empty"
-        except Exception as exc:  # noqa: BLE001
-            quote_error = str(exc)[:200]
-            logger.warning("param_chart_today_quote_failed", tenant_id=tenant_id)
-
-        kite_live: dict[str, Any] = {
-            "source": "kite",
-            "spot": spot_close,
-            "ce": ce,
-            "pe": pe,
-            "error": quote_error,
-        }
-        if quote_stale:
-            kite_live["quote_stale"] = True
-            kite_live["quote_reference"] = "previous_close"
-        return {
-            "live_metrics": metrics,
-            "kite_live": kite_live,
-            "quote_stale": quote_stale,
-            "quote_reference": "previous_close" if quote_stale else None,
-            "spot_close": spot_close,
-            "spot_open": spot_open,
-            "spot_high": spot_high,
-            "spot_low": spot_low,
-            "ce": ce,
-            "pe": pe,
-            "total": total,
-            "pct": pct,
-        }
+        return await live_quote_overlay(_tenant_key(self.context), cfg)
 
     async def _today_overlay(self, cfg: ParamChartConfig, pack: dict[str, Any]) -> dict[str, Any]:
         """Live today: ticker book for spot/CE/PE + Signal shared metrics overlay."""
-        today = _ist_today()
-        days = list(pack.get("days") or [])
-        today_s = today.isoformat()
-        today_idxs = _today_bar_indices(days, today_s)
-        today_row = days[today_idxs[-1]] if today_idxs else None
-
-        live = await self._live_quote_overlay(cfg)
-        metrics = live["live_metrics"] if isinstance(live.get("live_metrics"), dict) else {}
-        spot_close = live.get("spot_close")
-        spot_open = live.get("spot_open")
-        spot_high = live.get("spot_high")
-        spot_low = live.get("spot_low")
-        ce = live.get("ce")
-        pe = live.get("pe")
-        total = live.get("total")
-        pct = live.get("pct")
-
-        if today_row is not None and today_idxs:
-            updated = dict(today_row)
-            updated["is_today"] = True
-            # Keep bars lean — checklist values live in metrics_by_day / live_metrics.
-            updated["metrics"] = {}
-            if spot_open is not None:
-                updated["open"] = spot_open
-            if spot_high is not None:
-                updated["high"] = spot_high
-            if spot_low is not None:
-                updated["low"] = spot_low
-            if spot_close is not None:
-                updated["close"] = spot_close
-                if updated.get("open") is None:
-                    updated["open"] = spot_close
-                if updated.get("high") is None:
-                    updated["high"] = spot_close
-                if updated.get("low") is None:
-                    updated["low"] = spot_close
-            if ce is not None or pe is not None:
-                updated = _apply_premiums(
-                    updated, ce=ce, pe=pe, entry_total=cfg.entry_total()
-                )
-            elif total is not None:
-                updated["total"] = total
-                updated["pct_vs_entry"] = pct
-            days = list(days)
-            # Quotes rewrite only the latest today bar (intraday dates are
-            # ``YYYY-MM-DDTHH:MM``, not bare ``YYYY-MM-DD``).
-            days[today_idxs[-1]] = updated
-            for i in today_idxs[:-1]:
-                row = dict(days[i])
-                row["is_today"] = True
-                row["metrics"] = {}
-                days[i] = row
-        elif today.weekday() < 5 and (
-            pack.get("year") == today.year and pack.get("month") == today.month
-        ):
-            # Mid-month pack missing today (weekend rebuild edge) — append slot.
-            row = _empty_day(today, day_index=len(days) + 1)
-            row["metrics"] = {}
-            if spot_close is not None:
-                row["open"] = spot_open or spot_close
-                row["high"] = spot_high or spot_close
-                row["low"] = spot_low or spot_close
-                row["close"] = spot_close
-            if ce is not None or pe is not None:
-                row = _apply_premiums(
-                    row, ce=ce, pe=pe, entry_total=cfg.entry_total()
-                )
-            days = [*days, row]
-
-        metrics_by_day = metrics_store.normalize_metrics_by_day(
-            pack.get("metrics_by_day")
-            if isinstance(pack.get("metrics_by_day"), dict)
-            else {}
-        )
-        if metrics:
-            prev_today = (
-                metrics_by_day.get(today_s)
-                if isinstance(metrics_by_day.get(today_s), dict)
-                else {}
-            )
-            metrics_by_day[today_s] = {**prev_today, **metrics}
-
-        kite_live = live.get("kite_live") if isinstance(live.get("kite_live"), dict) else {}
-        lean_days = metrics_store.strip_embedded_metrics(_attach_day_deltas(days))
-        out = {
-            **pack,
-            "days": lean_days,
-            "metrics_by_day": metrics_by_day,
-            "today": today.isoformat(),
-            "live_metrics": metrics,
-            "kite_live": kite_live,
-            "fetched_at": int(time.time()),
-            "stream_interval_ms": STREAM_INTERVAL_MS,
-        }
-        if live.get("quote_stale"):
-            out["quote_stale"] = True
-            out["quote_reference"] = live.get("quote_reference") or "previous_close"
-        return out
+        live = await live_quote_overlay(_tenant_key(self.context), cfg)
+        return apply_today_overlay(cfg, pack, live)
 
     async def month_state(
         self,
@@ -1564,6 +1634,7 @@ class ParamChartService:
         month: int | None = None,
         force_refresh: bool = False,
         build_missing: bool = True,
+        persist_metrics: bool = True,
     ) -> dict[str, Any]:
         cfg = await self._read_config()
         y, m = cfg.resolved_year_month()
@@ -1607,7 +1678,7 @@ class ParamChartService:
                 "metrics_by_day": mbd,
                 "today": today_s,
                 "live_metrics": live_metrics,
-                "kite_live": live.get("kite_live") or {"source": "kite", "error": None},
+                "kite_live": live.get("kite_live") or {"source": "book", "error": None},
                 "fetched_at": int(time.time()),
                 "stream_interval_ms": STREAM_INTERVAL_MS,
                 "config": cfg.to_admin_dict(),
@@ -1621,8 +1692,8 @@ class ParamChartService:
 
         merged = await self._today_overlay(cfg, pack)
         # Persist shared checklist metrics into today's day card (history for overlays).
-        # Skip while pack is still building — avoid SSE/soft path triggering Kite rebuilds.
-        if not pack.get("building"):
+        # Skip on the SSE/soft path — never stamp EOD from a live tick.
+        if persist_metrics and not pack.get("building"):
             try:
                 await self.persist_metrics_from_signal_snapshot(force=False)
             except Exception:  # noqa: BLE001
@@ -1788,11 +1859,15 @@ async def month_state_for_stream(
     session: AsyncSession,
     context: Any,
 ) -> dict[str, Any]:
-    # Soft: never run Kite year rebuilds on the live SSE loop.
+    # Soft: never run Kite year rebuilds or EOD persist on the live SSE loop.
     full = await ParamChartService(session, context).month_state(
-        build_missing=False
+        build_missing=False,
+        persist_metrics=False,
     )
     slim = _slim_stream_frame(full)
+    # Overlay cache is the live path — do not persist a hist-building stub or
+    # SSE will keep serving building=True after the month pack expires.
+    slim["building"] = False
     await pc_cache.set_overlay(_tenant_key(context), slim)
     return slim
 

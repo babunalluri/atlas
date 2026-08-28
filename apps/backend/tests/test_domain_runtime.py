@@ -13,6 +13,7 @@ def _stub_settings(
     kite: bool = False,
     signal: bool = False,
     options_lab: bool = False,
+    param_chart: bool = False,
     bots: bool = False,
 ):
     class _Settings:
@@ -23,6 +24,7 @@ def _stub_settings(
     s.kite_ticker_enabled = kite
     s.signal_engine_ticker_enabled = signal
     s.options_lab_ticker_enabled = options_lab
+    s.param_chart_ticker_enabled = param_chart
     s.options_lab_bots_enabled = bots
     return s
 
@@ -150,6 +152,41 @@ async def test_domain_services_partial_flags(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_domain_services_param_chart_flag(monkeypatch) -> None:
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
+    started: list[str] = []
+
+    class _Hub:
+        def start(self) -> None:
+            started.append("hub")
+
+        async def stop(self) -> None:
+            started.append("hub_stop")
+
+    class _Worker:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def start(self) -> None:
+            started.append(self.name)
+
+        async def stop(self) -> None:
+            started.append(f"{self.name}_stop")
+
+    services = DomainServices(
+        signal_worker=_Worker("signal"),  # type: ignore[arg-type]
+        options_lab_worker=_Worker("options"),  # type: ignore[arg-type]
+        param_chart_worker=_Worker("param_chart"),  # type: ignore[arg-type]
+        options_lab_bots_worker=_Worker("bots"),  # type: ignore[arg-type]
+        kite_hub=_Hub(),  # type: ignore[arg-type]
+    )
+    services.start(_stub_settings(kite=True, param_chart=True))
+    assert started == ["hub", "param_chart"]
+    await services.stop()
+    assert started == ["hub", "param_chart", "param_chart_stop", "hub_stop"]
+
+
+@pytest.mark.asyncio
 async def test_domain_services_refuses_kite_when_multi_worker(monkeypatch) -> None:
     started: list[str] = []
 
@@ -229,5 +266,6 @@ def test_agent_os_does_not_import_desk_workers() -> None:
     assert "kite_ticker_hub" not in text
     assert "OptionsLabWorker" not in text
     assert "SignalEngineWorker" not in text
+    assert "ParamChartWorker" not in text
     assert "OptionsLabBotsWorker" not in text
     assert "domains.runtime" in text
