@@ -23,7 +23,7 @@ import {
 } from "@/lib/api/admin";
 import { streamParamChart } from "@/lib/api/param-chart-stream";
 import {
-  deskInstrumentKey,
+  deskInstrumentIdentityKey,
   publishDeskInstrument,
   readDeskInstrument,
   subscribeDeskInstrument,
@@ -1659,6 +1659,8 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   );
   const prefetchedIntervals = useRef(new Set<string>());
   const lastDeskInstrumentKey = useRef("");
+  const configRef = useRef(config);
+  configRef.current = config;
 
   useEffect(() => {
     setCustomPresets(loadCustomPresets());
@@ -1868,9 +1870,23 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     if (!active || !config) return;
     const apply = (selection: DeskInstrumentSelection) => {
       if (selection.source === "param-chart") return;
-      const key = deskInstrumentKey(selection);
+      const key = deskInstrumentIdentityKey(selection);
       if (key === lastDeskInstrumentKey.current) return;
+      const current = configRef.current;
+      const sameUnderlying =
+        current?.underlying_symbol?.trim() === selection.underlying_symbol;
+      const sameFut =
+        (current?.fut_symbol || "").trim() ===
+        (selection.fut_symbol || "").trim();
+      const sameStep =
+        selection.strike_step == null ||
+        current?.strike_step === selection.strike_step;
+      if (sameUnderlying && sameFut && sameStep) {
+        lastDeskInstrumentKey.current = key;
+        return;
+      }
       lastDeskInstrumentKey.current = key;
+      // Identity only — never apply live chain CE/PE (fixed-strike-per-month).
       void patchConfig({
         underlying_symbol: selection.underlying_symbol,
         underlying_label: selection.underlying_label,
@@ -1878,8 +1894,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         ...(selection.strike_step != null
           ? { strike_step: selection.strike_step }
           : {}),
-        ...(selection.ce_symbol ? { ce_symbol: selection.ce_symbol } : {}),
-        ...(selection.pe_symbol ? { pe_symbol: selection.pe_symbol } : {}),
       });
     };
     const existing = readDeskInstrument();

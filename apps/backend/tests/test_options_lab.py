@@ -385,3 +385,112 @@ def test_leg_from_quote_does_not_use_ohlc_as_oi_or_iv() -> None:
     assert leg["volume"] is None
     assert leg["iv"] is None
     assert leg["delta"] is None
+
+
+@pytest.mark.asyncio
+async def test_signal_chain_seed_uses_row_atm_without_underlying_ltp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from app.domains.options_lab import OptionsLabConfig, OptionsLabService
+
+    now_ms = int(time.time() * 1000)
+    snap = {
+        "instrument": "NSE:NIFTY 50",
+        "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+        "atm": 24500,
+        "ce_symbol": "NFO:NIFTY26AUG24500CE",
+        "pe_symbol": "NFO:NIFTY26AUG24500PE",
+        "computed_at_ms": now_ms,
+        "data_age_ms": 0,
+        "snapshot_stale": False,
+    }
+
+    async def fake_merged_frame(
+        tenant_id: str,
+        *,
+        instrument: str | None = None,
+    ) -> dict:
+        assert instrument == "NSE:NIFTY 50"
+        return snap
+
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.merged_frame",
+        fake_merged_frame,
+    )
+
+    session = MagicMock()
+    session.info = {"tenant_id": "tenant-seed"}
+    svc = OptionsLabService(
+        session=session,
+        context=SimpleNamespace(tenant_id="tenant-seed"),
+    )
+    config = OptionsLabConfig(
+        underlying_symbol="NSE:NIFTY 50",
+        fut_symbol="NFO:NIFTY26AUGFUT",
+        strike_step=50,
+        mock=False,
+    )
+    seed = await svc._signal_chain_seed(config)
+    assert seed is not None
+    assert seed["atm"] == 24500
+    assert seed["spot"] == 24500.0
+    assert seed["quote_source"] == "signal_board"
+
+
+@pytest.mark.asyncio
+async def test_signal_chain_seed_rejects_stale_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from app.domains.options_lab import OptionsLabConfig, OptionsLabService
+
+    snap = {
+        "instrument": "NSE:NIFTY 50",
+        "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+        "atm": 24500,
+        "nifty_ltp": 24487.5,
+        "snapshot_stale": True,
+    }
+
+    async def fake_merged_frame(
+        tenant_id: str,
+        *,
+        instrument: str | None = None,
+    ) -> dict:
+        return snap
+
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.merged_frame",
+        fake_merged_frame,
+    )
+
+    session = MagicMock()
+    session.info = {"tenant_id": "tenant-seed"}
+    svc = OptionsLabService(
+        session=session,
+        context=SimpleNamespace(tenant_id="tenant-seed"),
+    )
+    config = OptionsLabConfig(
+        underlying_symbol="NSE:NIFTY 50",
+        fut_symbol="NFO:NIFTY26AUGFUT",
+        strike_step=50,
+        mock=False,
+    )
+    assert await svc._signal_chain_seed(config) is None
+
+
+def test_signal_frame_fresh_ignores_misleading_data_age_ms() -> None:
+    import time
+
+    from app.domains.options_lab import _signal_frame_fresh_for_seed
+
+    old_ms = int(time.time() * 1000) - 600_000
+    assert _signal_frame_fresh_for_seed(
+        {"data_age_ms": 0, "computed_at_ms": old_ms, "snapshot_stale": False}
+    ) is False

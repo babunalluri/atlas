@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  deskInstrumentIdentityKey,
   deskInstrumentKey,
   publishDeskInstrument,
   readDeskInstrument,
-  resetDeskInstrumentForTests,
-  subscribeDeskInstrument,
 } from "@/components/domains/desk-instrument";
 
 // Export a test reset if missing — add below if not in module.
@@ -53,18 +52,24 @@ describe("desk-instrument", () => {
     expect(window.dispatchEvent).toHaveBeenCalled();
   });
 
-  it("builds a stable fingerprint", () => {
-    const key = deskInstrumentKey({
+  it("identity key ignores live chain CE/PE", () => {
+    const base = {
       underlying_symbol: "NSE:NIFTY 50",
       underlying_label: "NIFTY",
       fut_symbol: "NFO:NIFTY26AUGFUT",
       strike_step: 50,
+      updated_at_ms: 1,
+      source: "options-lab" as const,
+    };
+    const a = deskInstrumentIdentityKey(base);
+    const b = deskInstrumentIdentityKey({
+      ...base,
       ce_symbol: "NFO:NIFTY26AUG24500CE",
       pe_symbol: "NFO:NIFTY26AUG24500PE",
-      updated_at_ms: 1,
-      source: "options-lab",
     });
-    expect(key).toContain("NSE:NIFTY 50");
-    expect(key).toContain("NFO:NIFTY26AUGFUT");
+    expect(a).toBe(b);
+    expect(deskInstrumentKey({ ...base, ce_symbol: "NFO:X", pe_symbol: "NFO:Y" })).not.toBe(
+      deskInstrumentKey(base),
+    );
   });
 });

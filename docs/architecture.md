@@ -95,3 +95,10 @@ disabled; Atlas owns schedules, approvals, sessions, and channel interfaces.
 ## Isolation trade-offs
 
 Shared runtime is the default for cost and operability. Dedicated DB/runtime cells remain possible later behind the same factory/credential interfaces.
+
+## Trading desk
+
+Stock-broker desk surfaces (Signal Engine, Options Lab, Param Chart) share instrument identity via Postgres `desk_instrument` and optional same-tab `sessionStorage` handoff. Signal matrix live state lives in Redis; Lab chain cache is separate.
+
+- [Desk instrument board](desk-instrument.md) — architecture, Redis/Postgres keys, Signal → Lab walkthrough.
+- [Options Lab market profile](options-lab-market-profile.md) — deferred US/IN market abstraction.

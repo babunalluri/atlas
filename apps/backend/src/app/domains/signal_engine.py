@@ -3950,6 +3950,8 @@ class SignalEngineService:
             payload["pe_symbol"] = feed.get("pe_symbol")
         if feed.get("atm") is not None:
             payload["atm"] = feed.get("atm")
+        if feed.get("nifty_ltp") is not None:
+            payload["nifty_ltp"] = feed.get("nifty_ltp")
         # Persist empty/mismatched CE/PE so setup bar + ticker stay in sync.
         try:
             await self.maybe_persist_auto_atm_symbols(payload)

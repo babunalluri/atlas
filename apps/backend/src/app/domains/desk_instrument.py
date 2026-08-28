@@ -23,6 +23,11 @@ IDENTITY_FIELDS: tuple[str, ...] = (
     "atm",
 )
 
+# ``ce_symbol`` / ``pe_symbol`` on the board reflect the last *manual* identity
+# PATCH from a desk. Signal auto-ATM persists CE/PE on the signal config only
+# (``maybe_persist_auto_atm_symbols``) and deliberately does not touch this
+# board — otherwise every ATM roll would rewrite Param Chart packs.
+
 # Param Chart nest field names (subset of identity).
 _DESK_INSTRUMENT_TO_CHART: dict[str, str] = {
     "underlying_symbol": "underlying_symbol",

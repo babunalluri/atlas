@@ -16,7 +16,7 @@ import { OptionsLabStrategyPanel } from "@/components/domains/OptionsLabStrategy
 import { OptionsLabStraddleChart } from "@/components/domains/OptionsLabStraddleChart";
 import { useOptionsLabConfigAutosave } from "@/components/domains/useOptionsLabConfigAutosave";
 import {
-  deskInstrumentKey,
+  deskInstrumentIdentityKey,
   publishDeskInstrument,
   readDeskInstrument,
   subscribeDeskInstrument,
@@ -250,6 +250,9 @@ export function OptionsLabPanel({
     patchConfig,
     onPresetChange,
   } = useOptionsLabConfigAutosave(getAccessToken, isLoaded && isSignedIn && active);
+
+  const configRef = useRef(config);
+  configRef.current = config;
 
   const atmHint = useMemo(
     () => (snapshot?.atm != null ? Math.round(snapshot.atm) : null),
@@ -487,8 +490,21 @@ export function OptionsLabPanel({
     if (!active || readOnly || !configReady) return;
     const apply = (selection: DeskInstrumentSelection) => {
       if (selection.source === "options-lab") return;
-      const key = deskInstrumentKey(selection);
+      const key = deskInstrumentIdentityKey(selection);
       if (key === lastDeskApplyKey.current) return;
+      const current = configRef.current;
+      const sameUnderlying =
+        current?.underlying_symbol?.trim() === selection.underlying_symbol;
+      const sameFut =
+        (current?.fut_symbol || "").trim() ===
+        (selection.fut_symbol || "").trim();
+      const sameStep =
+        selection.strike_step == null ||
+        current?.strike_step === selection.strike_step;
+      if (sameUnderlying && sameFut && sameStep) {
+        lastDeskApplyKey.current = key;
+        return;
+      }
       lastDeskApplyKey.current = key;
       patchConfig({
         underlying_symbol: selection.underlying_symbol,
@@ -502,7 +518,7 @@ export function OptionsLabPanel({
     return subscribeDeskInstrument(apply);
   }, [active, configReady, patchConfig, readOnly]);
 
-  // Push Options Lab instrument (+ ATM CE/PE from the live chain) to other desks.
+  // Push Options Lab instrument identity to other desks (not live chain CE/PE).
   useEffect(() => {
     if (!active) return;
     const underlying =
@@ -510,7 +526,6 @@ export function OptionsLabPanel({
       config?.underlying_symbol?.trim() ||
       "";
     if (!underlying) return;
-    const atmRow = snapshot?.rows?.find((row) => row.is_atm);
     const selection = {
       underlying_symbol: underlying,
       underlying_label:
@@ -522,12 +537,9 @@ export function OptionsLabPanel({
         config?.fut_symbol?.trim() ||
         undefined,
       strike_step: snapshot?.strike_step ?? config?.strike_step,
-      ce_symbol: atmRow?.ce?.symbol || undefined,
-      pe_symbol: atmRow?.pe?.symbol || undefined,
-      updated_at_ms: Date.now(),
       source: "options-lab" as const,
     };
-    const key = deskInstrumentKey(selection);
+    const key = deskInstrumentIdentityKey(selection);
     if (key === lastDeskPublishKey.current) return;
     lastDeskPublishKey.current = key;
     publishDeskInstrument(selection);
@@ -538,7 +550,6 @@ export function OptionsLabPanel({
     config?.underlying_label,
     config?.underlying_symbol,
     snapshot?.fut_symbol,
-    snapshot?.rows,
     snapshot?.strike_step,
     snapshot?.underlying_label,
     snapshot?.underlying_symbol,

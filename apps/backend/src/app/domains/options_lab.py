@@ -1013,6 +1013,26 @@ def _decorate_stream_payload(payload: dict[str, Any], *, tenant_id: str) -> dict
     return out
 
 
+def _signal_frame_fresh_for_seed(snap: dict[str, Any]) -> bool:
+    """Reject stopped/stale Signal rows — Redis TTL alone is not freshness.
+
+    Uses ``computed_at_ms`` only (stored on worker rows). ``data_age_ms`` is
+    annotated on the read path and must not override a stale ``computed_at_ms``.
+    """
+    from app.domains.signal_engine_constants import SNAPSHOT_FRESH_MS
+
+    if snap.get("snapshot_stale") is True:
+        return False
+    computed = snap.get("computed_at_ms")
+    if computed is None:
+        return False
+    try:
+        age_ms = max(0, int(time.time() * 1000) - int(computed))
+    except (TypeError, ValueError):
+        return False
+    return age_ms <= SNAPSHOT_FRESH_MS
+
+
 class OptionsLabService:
     def __init__(self, session: AsyncSession, context: Any) -> None:
         self.session = session
@@ -1307,17 +1327,22 @@ class OptionsLabService:
         ).strip()
         if row_under != config.underlying_symbol.strip():
             return None
-        underlying = snap.get("underlying") if isinstance(snap.get("underlying"), dict) else {}
-        spot = _pick_float(underlying, "ltp", "last_price", "last", "spot")
-        if spot is None:
-            spot = _pick_float(snap, "spot", "ltp")
-        if spot is None:
+        if not _signal_frame_fresh_for_seed(snap):
             return None
         atm_raw = snap.get("atm")
         try:
             atm = int(round(float(atm_raw))) if atm_raw not in (None, "") else None
         except (TypeError, ValueError):
             atm = None
+        underlying = snap.get("underlying") if isinstance(snap.get("underlying"), dict) else {}
+        spot = _pick_float(snap, "nifty_ltp", "spot", "ltp")
+        if spot is None:
+            spot = _pick_float(underlying, "ltp", "last_price", "last", "spot")
+        if spot is None and atm is not None:
+            # Row carries ATM strike even when underlying is {symbol, label} only.
+            spot = float(atm)
+        if spot is None:
+            return None
         if atm is None:
             atm = _round_strike(spot, config.strike_step)
         ce = _sanitize_option_symbol(str(snap.get("ce_symbol") or ""))
@@ -1386,8 +1411,13 @@ class OptionsLabService:
 
         # Derive strikes from Signal board when aligned, else a spot quote round-trip.
         seed = await self._signal_chain_seed(config)
-        if seed and seed.get("spot") is not None:
-            spot = float(seed["spot"])
+        if seed and (
+            seed.get("spot") is not None or seed.get("atm") is not None
+        ):
+            if seed.get("spot") is not None:
+                spot = float(seed["spot"])
+            else:
+                spot = float(seed["atm"])
             atm = int(seed.get("atm") or _round_strike(spot, config.strike_step))
         else:
             spot_quotes = await self.engine._fetch_quote(

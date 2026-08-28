@@ -12,9 +12,24 @@ from app.domains.trade_desk_checklist import DEFAULT_METRICS
 
 # Re-export — canonical definition lives in desk_instrument.py.
 from app.domains.desk_instrument import (
-    DESK_INSTRUMENT_SETTINGS_KEY,
-    merge_desk_instrument_into_chart,
+    DESK_INSTRUMENT_SETTINGS_KEY as DESK_INSTRUMENT_SETTINGS_KEY,
+    merge_desk_instrument_into_chart as merge_desk_instrument_into_chart,
 )
+
+__all__ = [
+    "DEFAULT_PARAM_CHART_CONFIG",
+    "DESK_INSTRUMENT_SETTINGS_KEY",
+    "PARAM_CHART_INTERVALS",
+    "PARAM_CHART_INTERVAL_IDS",
+    "PARAM_CHART_SETTINGS_KEY",
+    "PARAM_CHART_SHARED_CHECK_NOS",
+    "merge_desk_instrument_into_chart",
+    "normalize_param_chart_interval",
+    "project_metrics_from_signal_rows",
+    "shared_categories",
+    "shared_metric_defs",
+    "shared_metric_ids",
+]
 
 # Nested under Signal engine tool settings (same pattern as Options Lab).
 PARAM_CHART_SETTINGS_KEY = "param_chart"

@@ -92,3 +92,21 @@ def test_board_changed_detects_strike_step() -> None:
         source="signal",
     )
     assert board_changed(prev, nxt) is True
+
+
+def test_matrix_row_carries_nifty_ltp_for_chain_seed() -> None:
+    from app.domains.signal_matrix import merge_globals_row, split_snapshot
+
+    payload = {
+        "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+        "instrument": "NSE:NIFTY 50",
+        "atm": 24500,
+        "nifty_ltp": 24487.5,
+        "ce_symbol": "NFO:NIFTY26AUG24500CE",
+        "metrics": [],
+    }
+    globals_doc, row_doc = split_snapshot(payload)
+    merged = merge_globals_row(globals_doc, row_doc)
+    assert merged is not None
+    assert merged.get("nifty_ltp") == 24487.5
+    assert merged.get("atm") == 24500

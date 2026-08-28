@@ -112,6 +112,25 @@ export function deskInstrumentKey(selection: DeskInstrumentSelection): string {
   ].join("|");
 }
 
+export type DeskInstrumentIdentity = Pick<
+  DeskInstrumentSelection,
+  "underlying_symbol" | "fut_symbol" | "strike_step"
+>;
+
+/** Identity-only fingerprint — Param Chart must not react to live chain CE/PE rolls. */
+export function deskInstrumentIdentityKey(
+  selection: DeskInstrumentIdentity & {
+    ce_symbol?: string;
+    pe_symbol?: string;
+  },
+): string {
+  return [
+    selection.underlying_symbol,
+    selection.fut_symbol ?? "",
+    selection.strike_step ?? "",
+  ].join("|");
+}
+
 /** Test helper. */
 export function resetDeskInstrumentForTests(): void {
   try {
