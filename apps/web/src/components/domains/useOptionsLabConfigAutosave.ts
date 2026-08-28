@@ -103,7 +103,8 @@ export function useOptionsLabConfigAutosave(
       setError(null);
       if (configSnapshot(bootstrapped) !== configSnapshot(data.config)) {
         lastSavedRef.current = "";
-        await persist(bootstrapped);
+        // Persist suggested FUT in background — do not block Live chain SSE.
+        void persist(bootstrapped);
       } else {
         lastSavedRef.current = configSnapshot(data.config);
         setSaveStatus("idle");
@@ -172,14 +173,13 @@ export function useOptionsLabConfigAutosave(
     [patchConfig, presets],
   );
 
-  const configReady = useMemo(
-    () =>
-      !loading &&
-      config !== null &&
-      saveStatus !== "pending" &&
-      saveStatus !== "saving",
-    [config, loading, saveStatus],
-  );
+  const configReady = useMemo(() => {
+    if (loading || config === null) return false;
+    return (
+      Boolean(config.underlying_symbol?.trim()) &&
+      Boolean(config.fut_symbol?.trim())
+    );
+  }, [config, loading]);
 
   return {
     config,

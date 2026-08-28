@@ -119,7 +119,7 @@ export function CommonInstrumentSetupBar({
   /** When readOnly, still allow switching the viewed preset/row. */
   allowPresetChange?: boolean;
 }) {
-  if (loading || !config) {
+  if (!config) {
     return <p className="text-sm text-slate-muted">{loadingLabel}</p>;
   }
 

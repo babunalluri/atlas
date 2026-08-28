@@ -1032,7 +1032,9 @@ class OptionsLabService:
     async def get_admin_config(self) -> dict[str, Any]:
         tool = await self.engine._signal_engine_tool()
         _, has_broker, team_ready = await self.engine._load_setup()
-        equity_presets, equity_meta = await self._equity_presets()
+        # Fast path: index presets + seed/cached equities only. A live NFO
+        # get_instruments dump on every config GET blocked the desk for minutes.
+        equity_presets, equity_meta = await self._equity_presets(allow_live_fetch=False)
         presets = merge_presets(
             [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
             equity_presets,
@@ -1048,7 +1050,11 @@ class OptionsLabService:
             "team_ready": team_ready,
         }
 
-    async def _equity_presets(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    async def _equity_presets(
+        self,
+        *,
+        allow_live_fetch: bool = True,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         from app.domains.desk_snapshot import DESK_TEAM_SLUGS, invoke_tool
         from app.domains.options_lab_trading import OptionsLabTradingService
         from app.domains.signal_engine import SIGNAL_TEAM_SLUG
@@ -1069,6 +1075,13 @@ class OptionsLabService:
 
         presets: list[dict[str, Any]] = []
         source = "seed"
+        if not allow_live_fetch:
+            for row in EQUITY_FNO_SEED:
+                item = dict(row)
+                item.setdefault("fut_symbol", suggest_fut_symbol(str(item["symbol"])))
+                presets.append(item)
+            return presets, {"source": "seed", "fetched_at": now}
+
         try:
             trading = OptionsLabTradingService(self.session, self.context)
             fn, name, _ = await trading._find_tool(
