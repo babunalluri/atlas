@@ -2592,7 +2592,9 @@ class OptionsLabService:
                             f"{avail_name or 'margins'} returned no usable available/used margin."
                         )
                 except Exception as exc:  # noqa: BLE001
-                    warnings.append(f"Available margins failed: {exc}")
+                    from app.domains.options_lab_trading import _sandbox_tool_warning
+
+                    warnings.append(_sandbox_tool_warning("Available margins failed", exc))
             else:
                 warnings.append("No get_margins / get_funds tool bound.")
 

@@ -16,7 +16,7 @@ from app.domains.options_lab_portfolios import (
     option_exchange,
     parse_option_symbol,
 )
-from app.domains.signal_engine import SIGNAL_TEAM_SLUG
+from app.domains.signal_engine import SIGNAL_TEAM_SLUG, _broker_auth_warning
 
 MARGIN_TOOL_NAMES = (
     "get_order_margins",
@@ -48,6 +48,36 @@ def estimate_lot_size(underlying: str | None = None, root: str | None = None) ->
         if key in text:
             return lot
     return 75
+
+
+def _sandbox_tool_warning(prefix: str, exc: BaseException) -> str:
+    """Short desk-safe warning — never leak sandbox tracebacks into the UI."""
+    raw = str(exc).strip() or exc.__class__.__name__
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    summary = lines[0] if lines else raw
+    for line in reversed(lines):
+        if ":" in line and line.split(":", 1)[0].endswith("Error"):
+            tail = line.split(":", 1)[1].strip()
+            if tail:
+                summary = tail
+                break
+
+    auth = _broker_auth_warning(summary) or _broker_auth_warning(raw)
+    if auth:
+        return f"{prefix}: {auth}"
+
+    lower = summary.lower()
+    if "upstream request failed" in lower or "http proxy failed" in lower:
+        return (
+            f"{prefix}: Kite proxy unreachable — refresh access_token on "
+            "kite-toolkit (~06:00 IST) or switch Options Lab to Mock."
+        )
+    if "timeout" in lower:
+        return f"{prefix}: Broker request timed out — retry or use Mock feed."
+
+    if len(summary) > 160:
+        summary = summary[:157] + "…"
+    return f"{prefix}: {summary}"
 
 
 def _pick_number(payload: Any, *keys: str) -> float | None:
@@ -580,7 +610,7 @@ class OptionsLabTradingService:
                     if available is None and avail_name:
                         warnings.append(f"{avail_name} returned no usable available cash.")
                 except Exception as exc:  # noqa: BLE001
-                    warnings.append(f"Available margins failed: {exc}")
+                    warnings.append(_sandbox_tool_warning("Available margins failed", exc))
 
             order_items: list[dict[str, Any]] = []
             skipped_build = 0
@@ -629,7 +659,7 @@ class OptionsLabTradingService:
                                 f"{basket_name or 'get_basket_margins'} returned no initial total."
                             )
                     except Exception as exc:  # noqa: BLE001
-                        warnings.append(f"Basket margins failed: {exc}")
+                        warnings.append(_sandbox_tool_warning("Basket margins failed", exc))
 
             if margin_needed is None:
                 order_fn, order_name, _ = await self._find_tool(
@@ -681,7 +711,10 @@ class OptionsLabTradingService:
                         except Exception as exc:  # noqa: BLE001
                             skipped_legs += 1
                             warnings.append(
-                                f"Order margin for {item['tradingsymbol']} failed: {exc}"
+                                _sandbox_tool_warning(
+                                    f"Order margin for {item['tradingsymbol']} failed",
+                                    exc,
+                                )
                             )
                     incomplete = skipped_legs > 0 or priced_legs < len(legs)
                     if totals and not incomplete:
@@ -1177,7 +1210,9 @@ class OptionsLabTradingService:
                                 }
                             )
                         except Exception as exc:  # noqa: BLE001
-                            warnings.append(f"GTT {tradingsymbol}: {exc}")
+                            warnings.append(
+                                _sandbox_tool_warning(f"GTT {tradingsymbol}", exc)
+                            )
                             gtts.append(
                                 {
                                     "leg_index": idx,

@@ -10,6 +10,7 @@ from app.domains.options_lab_trading import (
     _available_from_margins_payload,
     _basket_margin_totals,
     _margin_total_from_order_payload,
+    _sandbox_tool_warning,
     _split_exchange_symbol,
     estimate_lot_size,
     margins_snapshot_from_payload,
@@ -20,6 +21,20 @@ def test_estimate_lot_size_by_underlying() -> None:
     assert estimate_lot_size("NIFTY 50") == 75
     assert estimate_lot_size("BANKNIFTY") == 15
     assert estimate_lot_size(root="SENSEX") == 10
+
+
+def test_sandbox_tool_warning_strips_traceback_and_maps_proxy() -> None:
+    long_exc = RuntimeError(
+        "RuntimeError: Upstream request failed\n"
+        "Traceback (most recent call last):\n"
+        '  File "/sandbox/work/tool.py", line 102, in _get\n'
+        "    raise RuntimeError(result.get('error') or 'HTTP proxy failed')\n"
+        "RuntimeError: HTTP proxy failed"
+    )
+    msg = _sandbox_tool_warning("Basket margins failed", long_exc)
+    assert "Traceback" not in msg
+    assert "/sandbox/" not in msg
+    assert "kite-toolkit" in msg.lower() or "mock" in msg.lower()
 
 
 def test_margin_payload_parsers() -> None:
