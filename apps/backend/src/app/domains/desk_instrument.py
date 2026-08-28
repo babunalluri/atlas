@@ -119,6 +119,8 @@ def desk_instrument_tool_patch(
     previous_settings: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Tool-settings patch for ``desk_instrument``, or None when unchanged."""
+    if not str(board.get("underlying_symbol") or "").strip():
+        return None
     prev_board = read_desk_board(previous_settings)
     if not board_changed(prev_board, board):
         return None

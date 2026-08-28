@@ -45,6 +45,11 @@ def test_merge_board_fill_only_when_lab_empty() -> None:
     assert keep["underlying_symbol"] == "BSE:SENSEX"
 
 
+def test_desk_instrument_tool_patch_skips_empty_underlying() -> None:
+    board = board_from_mapping({"underlying_symbol": ""}, source="signal")
+    assert desk_instrument_tool_patch(board, {}) is None
+
+
 def test_desk_instrument_tool_patch_skips_unchanged() -> None:
     board = board_from_mapping(
         {"underlying_symbol": "NSE:NIFTY 50", "fut_symbol": "NFO:NIFTY26AUGFUT"},

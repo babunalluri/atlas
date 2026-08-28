@@ -9,8 +9,10 @@ import {
   buildStrikeStepOptions,
   buildUnderlyingOptions,
   sanitizeOptionSymbol,
+  suggestFutSymbol,
 } from "@/components/domains/signal-setup-options";
 import { CommonInstrumentSetupBar } from "@/components/domains/CommonInstrumentSetupBar";
+import { publishDeskInstrument } from "@/components/domains/desk-instrument";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import type { SignalEngineAdminConfig } from "@/lib/api/admin";
 import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
@@ -95,6 +97,12 @@ export function SignalSetupBar({
     patchConfig({
       underlying_symbol: symbol,
       underlying_label: symbol,
+    });
+    publishDeskInstrument({
+      underlying_symbol: symbol,
+      underlying_label: symbol,
+      fut_symbol: suggestFutSymbol(symbol) || undefined,
+      source: "signal",
     });
   }
 

@@ -10,6 +10,7 @@ import {
   suggestFutSymbol,
 } from "@/components/domains/signal-setup-options";
 import { CommonInstrumentSetupBar } from "@/components/domains/CommonInstrumentSetupBar";
+import { publishDeskInstrument } from "@/components/domains/desk-instrument";
 import type { OptionsLabAdminConfig } from "@/lib/api/admin";
 
 export function OptionsLabSetupBar({
@@ -80,6 +81,13 @@ export function OptionsLabSetupBar({
           underlying_label: preset?.label ?? symbol,
           ...(preset?.strike_step != null ? { strike_step: preset.strike_step } : {}),
           ...(fut ? { fut_symbol: fut } : { fut_symbol: "" }),
+        });
+        publishDeskInstrument({
+          underlying_symbol: symbol,
+          underlying_label: preset?.label ?? symbol,
+          fut_symbol: fut || undefined,
+          strike_step: preset?.strike_step,
+          source: "options-lab",
         });
       }}
       onFutChange={(value) => patchConfig({ fut_symbol: value })}
