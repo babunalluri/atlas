@@ -219,9 +219,9 @@ export function StockBrokerWorkspace({
               );
             })}
           </div>
-          {/* Keep Signal mounted (hidden) so /admin/signals/stream + Redis
-              watch stay alive when the user flips to Param Chart.
-              Unmounting aborted SSE and left the board on dashes / stale. */}
+          {/* Keep Signal and Param Chart mounted (hidden) so SSE + Redis
+              watch stay alive when flipping tabs. Unmounting aborted the
+              stream and left the board on dashes / a hist reload. */}
           <div
             className={cn(
               "mt-3 min-h-0 flex-1",
@@ -239,11 +239,15 @@ export function StockBrokerWorkspace({
               readOnly={readOnly}
             />
           </div>
-          {deskTab === "param-chart" ? (
-            <div className="mt-3 min-h-0 flex-1">
-              <ParamChartPanel active />
-            </div>
-          ) : null}
+          <div
+            className={cn(
+              "mt-3 min-h-0 flex-1",
+              deskTab !== "param-chart" && "hidden",
+            )}
+            aria-hidden={deskTab !== "param-chart"}
+          >
+            <ParamChartPanel active />
+          </div>
         </div>
 
         {customer ? (

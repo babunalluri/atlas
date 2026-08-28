@@ -69,6 +69,12 @@ _ROW_TOP_KEYS = frozenset(
         "engine_computing",
         "data_age_ms",
         "instrument",
+        # Pre-open / after-close last print — must survive globals/row split.
+        "quote_stale",
+        "quote_reference",
+        "ce_stale",
+        "pe_stale",
+        "fut_stale",
     }
 )
 

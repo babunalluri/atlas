@@ -191,6 +191,44 @@ async def set_metric(
     bucket[metric_id] = (_now_ms() + ttl, value)
 
 
+async def try_set_metric(
+    tenant_id: str,
+    metric_id: str,
+    tier: Tier,
+    value: Any,
+    *,
+    ttl_ms: int | None = None,
+) -> bool:
+    """Create a metric key only if it is absent (Redis SET NX / in-memory analogue)."""
+    ttl = int(ttl_ms) if ttl_ms is not None else TIER_TTL_MS[tier]
+    if ttl <= 0:
+        ttl = TIER_TTL_MS[tier]
+    client = await get_redis()
+    if client is not None:
+        try:
+            acquired = await client.set(
+                _metric_key(tenant_id, metric_id),
+                json.dumps(value, separators=(",", ":")),
+                nx=True,
+                px=ttl,
+            )
+            return bool(acquired)
+        except Exception:
+            await invalidate_redis()
+            logger.warning(
+                "signal_cache_metric_try_set_failed",
+                tenant_id=tenant_id,
+                metric_id=metric_id,
+            )
+
+    bucket = _metric_cache.setdefault(tenant_id, {})
+    row = bucket.get(metric_id)
+    if row is not None and _now_ms() < row[0]:
+        return False
+    bucket[metric_id] = (_now_ms() + ttl, value)
+    return True
+
+
 async def delete_metric(tenant_id: str, metric_id: str) -> None:
     """Drop one metric key (e.g. setup memo after auto-ATM persist)."""
     client = await get_redis()

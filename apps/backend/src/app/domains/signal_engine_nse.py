@@ -128,9 +128,15 @@ def _parse_advance_decline(body: Any) -> float | None:
 
 
 def fetch_nse_slow_fields(*, force: bool = False) -> dict[str, float]:
-    """FII net + advance/decline ratio. Cached ~1 h."""
+    """FII net + advance/decline ratio. Cached ~1 h.
+
+    Non-blocking lock: a second caller must not wait on in-flight HTTP (worst
+    case several minutes). It returns whatever process cache already has.
+    """
     ts = time.monotonic()
-    with _lock:
+    if not _lock.acquire(blocking=False):
+        return dict(_cache["payload"])
+    try:
         if not force and _cache["cooldown_until"] > ts:
             return dict(_cache["payload"])
         age = ts - float(_cache["fetched_at"] or 0)
@@ -187,6 +193,8 @@ def fetch_nse_slow_fields(*, force: bool = False) -> dict[str, float]:
             _cache["cooldown_until"] = ts + NSE_COOLDOWN_SECONDS
 
         return dict(payload)
+    finally:
+        _lock.release()
 
 
 def mock_nse_fields() -> dict[str, float]:
@@ -198,6 +206,12 @@ def mock_nse_fields() -> dict[str, float]:
         "advance_decline_ratio": 1.15,
         **mock_calendar_fields(),
     }
+
+
+def peek_nse_holiday_dates() -> frozenset[date]:
+    """Return cached NSE holiday dates without hitting the network."""
+    dates = _holiday_cache.get("dates") or ()
+    return frozenset(dates)
 
 
 def fetch_nse_holiday_dates(*, force: bool = False) -> frozenset[date]:

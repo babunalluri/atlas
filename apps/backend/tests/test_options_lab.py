@@ -371,3 +371,17 @@ async def test_append_flows_day_preserves_partial_side() -> None:
     today = [r for r in again if r["label"] == "Today"][0]
     assert today["fii_net"] == 100.0
     assert today["dii_net"] == -10.0
+
+
+def test_leg_from_quote_does_not_use_ohlc_as_oi_or_iv() -> None:
+    from app.domains.options_lab import _leg_from_quote
+
+    leg = _leg_from_quote(
+        {"ohlc": {"close": 130.0}, "last_price": 12.5},
+        symbol="NFO:NIFTY26AUG24500CE",
+    )
+    assert leg["ltp"] == 12.5
+    assert leg["oi"] is None
+    assert leg["volume"] is None
+    assert leg["iv"] is None
+    assert leg["delta"] is None

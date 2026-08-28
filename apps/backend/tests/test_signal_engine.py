@@ -661,6 +661,26 @@ def test_estimate_pcr_from_atm_oi() -> None:
     assert pcr == 1.25
 
 
+def test_estimate_pcr_does_not_use_ohlc_close() -> None:
+    assert (
+        _estimate_pcr(
+            {"ohlc": {"close": 130.0}},
+            {"ohlc": {"close": 125.0}},
+        )
+        is None
+    )
+
+
+def test_merge_option_iv_ignores_ohlc_close() -> None:
+    assert (
+        _merge_option_iv(
+            {"ohlc": {"close": 127.5}},
+            {"ohlc": {"close": 110.0}},
+        )
+        is None
+    )
+
+
 def test_merge_option_iv_averages_ce_pe() -> None:
     iv = _merge_option_iv({"implied_volatility": 20.0}, {"implied_volatility": 24.0})
     assert iv == 22.0
@@ -1527,6 +1547,7 @@ async def test_refresh_tier_b_fetches_run_concurrently(
     monkeypatch.setattr("app.domains.signal_engine._merge_levels_tier", fake_heavy)
     monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_slow_tier", fake_heavy)
     monkeypatch.setattr("app.domains.signal_engine._merge_yahoo_timing_tier", fake_heavy)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_heavy)
 
     session = MagicMock()
     session.info = {"tenant_id": tenant_id}
@@ -1654,6 +1675,8 @@ async def test_build_feed_does_not_inline_chain_or_yahoo(
 
 def test_phase3_metric_ttls_are_shorter_than_generic_medium() -> None:
     from app.domains.signal_engine_constants import (
+        NSE_SLOW_FETCH_TIMEOUT_S,
+        NSE_SLOW_INFLIGHT_TTL_MS,
         OPTION_CHAIN_TTL_MS,
         TIER_B_REFRESH_GATE_MS,
         TIER_TTL_MS,
@@ -1663,5 +1686,637 @@ def test_phase3_metric_ttls_are_shorter_than_generic_medium() -> None:
     assert OPTION_CHAIN_TTL_MS == 15_000
     assert TREND_TTL_MS == 30_000
     assert TIER_B_REFRESH_GATE_MS < OPTION_CHAIN_TTL_MS
+    assert TIER_B_REFRESH_GATE_MS < NSE_SLOW_INFLIGHT_TTL_MS
+    assert NSE_SLOW_FETCH_TIMEOUT_S == 20.0
     assert OPTION_CHAIN_TTL_MS < TIER_TTL_MS["medium"]
     assert TREND_TTL_MS < TIER_TTL_MS["medium"]
+
+
+@pytest.mark.asyncio
+async def test_build_feed_uses_previous_close_pre_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: before 09:15 IST paint previous close instead of staying quote-less."""
+    import uuid
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def fake_nse(*_a, **_k):
+        return None
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):  # noqa: ANN001, ARG001
+        return {
+            "NSE:NIFTY 50": {
+                "ohlc": {"close": 24100.0},
+            }
+        }
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_nse)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+    monkeypatch.setattr(
+        "app.domains.signal_engine._ist_now",
+        lambda: datetime(2026, 8, 28, 8, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = AsyncMock(return_value={})
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24100.0
+    assert feed.get("quote_stale") is True
+    assert feed.get("quote_reference") == "previous_close"
+    assert "spot_chg" not in feed
+    assert feed.get("source") == "live"
+
+
+@pytest.mark.asyncio
+async def test_build_feed_keeps_spot_metrics_after_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Today's close after 15:30 still carries vs-prev / vs-open."""
+    import uuid
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def fake_nse(*_a, **_k):
+        return None
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_session_get(*_a, **_k):
+        return None
+
+    async def fake_session_set(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):  # noqa: ANN001, ARG001
+        return {
+            "NSE:NIFTY 50": {
+                "last_price": 24500.0,
+                "ohlc": {"open": 24400.0, "close": 24350.0},
+            }
+        }
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_nse)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.get_session_value", fake_session_get
+    )
+    monkeypatch.setattr(
+        "app.domains.signal_engine_cache.set_session_value", fake_session_set
+    )
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+    monkeypatch.setattr(
+        "app.domains.signal_engine._ist_now",
+        lambda: datetime(2026, 8, 28, 16, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = AsyncMock(return_value={})
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24500.0
+    assert feed.get("quote_stale") is True
+    assert feed.get("quote_reference") == "session_close"
+    assert feed.get("spot_chg") is not None
+    assert feed.get("_session_open_ltp") == 24400.0
+    assert feed.get("nifty_points_move") == 100.0
+
+
+@pytest.mark.asyncio
+async def test_merge_nse_slow_cache_only_skips_fetch(monkeypatch) -> None:
+    from app.domains.signal_engine import SignalEngineConfig, _merge_nse_slow_tier
+
+    called = {"fetch": False}
+
+    def boom_fetch():
+        called["fetch"] = True
+        return {}
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return None
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr(
+        "app.domains.signal_engine.fetch_nse_slow_fields",
+        boom_fetch,
+    )
+
+    feed: dict = {}
+    await _merge_nse_slow_tier(
+        "tenant",
+        feed,
+        SignalEngineConfig(engine_enabled=True),
+        mock=False,
+        cache_only=True,
+    )
+    assert called["fetch"] is False
+    assert feed == {}
+
+
+@pytest.mark.asyncio
+async def test_build_feed_paints_tier_a_before_nse_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0: Tier A must not wait on a blocking NSE slow fetch."""
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    order: list[str] = []
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def blocking_nse(*_a, **kwargs):
+        order.append("nse_slow")
+        if not kwargs.get("cache_only"):
+            raise AssertionError("hot path must use cache_only")
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):  # noqa: ANN001, ARG001
+        order.append("tier_a")
+        return {"NSE:NIFTY 50": {"last_price": 24500.0}}
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", blocking_nse)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = AsyncMock(return_value={})
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24500.0
+    assert "tier_a" in order
+    assert "nse_slow" in order
+
+
+def test_row_ltp_clock_and_recency(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.domains.signal_engine import _is_nse_pre_open, _row_ltp
+
+    ist = ZoneInfo("Asia/Kolkata")
+    friday_pre = datetime(2026, 8, 28, 8, 30, tzinfo=ist)
+    friday_open = datetime(2026, 8, 28, 10, 0, tzinfo=ist)
+    friday_close = datetime(2026, 8, 28, 16, 0, tzinfo=ist)
+    saturday = datetime(2026, 8, 29, 10, 0, tzinfo=ist)
+
+    monkeypatch.setattr("app.domains.signal_engine._ist_now", lambda: friday_pre)
+    assert _is_nse_pre_open() is True
+    # Real Kite get_ltp pre-open: yesterday's close in last_price, no timestamp.
+    printed = _row_ltp({"last_price": 24100.0})
+    assert printed.price == 24100.0
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+    # Zero last_price is not a live print; fall back to ohlc.close.
+    printed = _row_ltp({"last_price": 0, "ohlc": {"close": 24100.0}})
+    assert printed.price == 24100.0
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+
+    monkeypatch.setattr("app.domains.signal_engine._ist_now", lambda: friday_open)
+    assert _is_nse_pre_open() is False
+    printed = _row_ltp({"last_price": 24500.0})
+    assert printed.price == 24500.0
+    assert printed.stale is False
+    printed = _row_ltp({"last_price": 0})
+    assert printed.price is None
+    assert printed.stale is False
+    # leftover last_trade_time from yesterday → stale even during session.
+    printed = _row_ltp(
+        {
+            "last_price": 24100.0,
+            "last_trade_time": "2026-08-27 15:29:00",
+        }
+    )
+    assert printed.price == 24100.0
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+    # Quote packet time must not confirm a never-traded last_price as a live trade.
+    # Fresh timestamp with no last_trade_time stays the WS path (live).
+    printed = _row_ltp(
+        {
+            "last_price": 55.0,
+            "last_trade_time": None,
+            "timestamp": "2026-08-28 12:00:00",
+        }
+    )
+    assert printed.stale is False
+    # Old quote timestamp may invalidate.
+    printed = _row_ltp(
+        {
+            "last_price": 55.0,
+            "timestamp": "2026-08-27 15:29:00",
+        }
+    )
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+    # Session print with last_trade_time is live.
+    printed = _row_ltp(
+        {
+            "last_price": 24510.0,
+            "last_trade_time": "2026-08-28 10:00:01",
+        }
+    )
+    assert printed.price == 24510.0
+    assert printed.stale is False
+    # During session, ohlc.close alone is not a live print.
+    printed = _row_ltp({"ohlc": {"close": 24100.0}})
+    assert printed.price is None
+
+    monkeypatch.setattr("app.domains.signal_engine._ist_now", lambda: friday_close)
+    printed = _row_ltp({"last_price": 24500.0})
+    assert printed.price == 24500.0
+    assert printed.stale is True
+    assert printed.reference == "session_close"
+
+    monkeypatch.setattr("app.domains.signal_engine._ist_now", lambda: saturday)
+    assert _is_nse_pre_open() is False
+    printed = _row_ltp({"last_price": 24500.0})
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+
+
+def test_quote_positive_ltp_ignores_ohlc_and_zero() -> None:
+    from app.domains.signal_engine import _positive_price, _quote_positive_ltp
+
+    assert _quote_positive_ltp({"ohlc": {"close": 24100.0}}) is None
+    assert _quote_positive_ltp({"last_price": 0}) is None
+    assert _quote_positive_ltp({"last_price": 24500.0}) == 24500.0
+    assert _positive_price(float("inf")) is None
+    assert _positive_price(float("nan")) is None
+
+
+def test_row_ltp_naive_now_does_not_crash() -> None:
+    from datetime import datetime
+
+    from app.domains.signal_engine import _row_ltp
+
+    printed = _row_ltp(
+        {"last_price": 24500.0, "last_trade_time": "2026-08-28 10:00:01"},
+        now=datetime(2026, 8, 28, 10, 0),
+    )
+    assert printed.price == 24500.0
+    assert printed.stale is False
+
+
+def test_row_ltp_weekday_holiday_is_previous_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    from app.domains import signal_engine_nse as nse
+    from app.domains.signal_engine import _is_nse_pre_open, _row_ltp
+
+    nse.reset_nse_cache_for_tests()
+    nse._holiday_cache["dates"] = frozenset({date(2026, 8, 28)})
+    monkeypatch.setattr(
+        "app.domains.signal_engine._ist_now",
+        lambda: datetime(2026, 8, 28, 12, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+    assert _is_nse_pre_open() is False
+    printed = _row_ltp({"last_price": 24000.0})
+    assert printed.price == 24000.0
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+    nse.reset_nse_cache_for_tests()
+
+
+def test_fetch_nse_slow_fields_does_not_block_on_lock() -> None:
+    from app.domains import signal_engine_nse as nse
+
+    nse.reset_nse_cache_for_tests()
+    nse._cache["payload"] = {"fii_net": 1.0}
+    assert nse._lock.acquire(blocking=False)
+    try:
+        out = nse.fetch_nse_slow_fields()
+        assert out == {"fii_net": 1.0}
+    finally:
+        nse._lock.release()
+
+
+@pytest.mark.asyncio
+async def test_build_feed_get_ltp_pre_open_marks_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kite get_ltp puts yesterday's close in last_price before 09:15."""
+    import uuid
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def fake_nse(*_a, **_k):
+        return None
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):  # noqa: ANN001, ARG001
+        return {
+            "NSE:NIFTY 50": {"last_price": 24100.0},
+            "NFO:NIFTY26AUG24500CE": {"last_price": 120.0},
+            "NFO:NIFTY26AUG24500PE": {"last_price": 118.0},
+        }
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_nse)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+    monkeypatch.setattr(
+        "app.domains.signal_engine._ist_now",
+        lambda: datetime(2026, 8, 28, 8, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = AsyncMock(return_value={})
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+        nifty_fut_symbol="NFO:NIFTY26SEPFUT",
+        auto_atm_symbols=True,
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24100.0
+    assert feed.get("quote_stale") is True
+    assert feed.get("source") == "live"
+
+
+@pytest.mark.asyncio
+async def test_straddle_decay_does_not_seed_when_quote_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.domains import signal_engine_cache as cache
+    from app.domains.signal_engine import _apply_straddle_decay
+
+    cache.reset_signal_cache_for_tests()
+    session_store: dict[str, dict[str, object]] = {}
+
+    async def fake_get(tenant_id: str, field: str) -> object | None:
+        return session_store.get(tenant_id, {}).get(field)
+
+    async def fake_set(tenant_id: str, field: str, value: object) -> None:
+        session_store.setdefault(tenant_id, {})[field] = value
+
+    monkeypatch.setattr(cache, "get_session_value", fake_get)
+    monkeypatch.setattr(cache, "set_session_value", fake_set)
+    monkeypatch.setattr("app.domains.signal_engine._ist_session_date", lambda: "2026-08-28")
+
+    tenant = "tenant-stale-straddle"
+    feed = {
+        "straddle": 200.0,
+        "quote_stale": True,
+        "underlying_symbol": "NSE:NIFTY 50",
+    }
+    await _apply_straddle_decay(tenant, feed)
+    assert "_straddle_session_open" not in feed
+    assert session_store.get(tenant) in (None, {})
+
+
+@pytest.mark.asyncio
+async def test_prefetch_nse_slow_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    from app.domains import signal_engine_cache as cache
+    from app.domains.signal_engine import prefetch_nse_slow
+
+    cache.reset_signal_cache_for_tests()
+    monkeypatch.setattr("app.domains.signal_engine.NSE_SLOW_FETCH_TIMEOUT_S", 0.05)
+    called = {"n": 0}
+
+    def slow_fetch() -> dict:
+        called["n"] += 1
+        time.sleep(1.0)
+        return {"fii_net": 9.0}
+
+    monkeypatch.setattr("app.domains.signal_engine.fetch_nse_slow_fields", slow_fetch)
+    t0 = time.monotonic()
+    await prefetch_nse_slow("tenant-nse-timeout")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.5
+    assert await cache.get_metric("tenant-nse-timeout", "nse_slow") is None
+    assert await cache.get_metric("tenant-nse-timeout", "nse_slow_inflight") is None
+    assert called["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_prefetch_nse_slow_skips_when_inflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.domains import signal_engine_cache as cache
+    from app.domains.signal_engine import prefetch_nse_slow
+
+    cache.reset_signal_cache_for_tests()
+    await cache.try_set_metric(
+        "tenant-nse-inflight",
+        "nse_slow_inflight",
+        "slow",
+        True,
+        ttl_ms=25_000,
+    )
+    called = {"n": 0}
+
+    def boom() -> dict:
+        called["n"] += 1
+        return {"fii_net": 1.0}
+
+    monkeypatch.setattr("app.domains.signal_engine.fetch_nse_slow_fields", boom)
+    await prefetch_nse_slow("tenant-nse-inflight")
+    assert called["n"] == 0
+
+
+def test_row_ltp_nse_holiday_flag_without_process_cache() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.domains import signal_engine_nse as nse
+    from app.domains.signal_engine import _row_ltp
+
+    nse.reset_nse_cache_for_tests()
+    printed = _row_ltp(
+        {"last_price": 24000.0},
+        now=datetime(2026, 8, 28, 12, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+        nse_holiday=True,
+    )
+    assert printed.stale is True
+    assert printed.reference == "previous_close"
+
+
+@pytest.mark.asyncio
+async def test_build_feed_stale_ce_does_not_flip_desk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thin CE last_trade_time from yesterday must not mark the whole desk Prev close."""
+    import uuid
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.db.models import Role
+    from app.domains.signal_engine import SignalEngineService
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+
+    async def fake_cache_get(_tenant: str, metric: str):
+        return None
+
+    async def fake_cache_set(*_a, **_k):
+        return None
+
+    async def fake_nse(*_a, **_k):
+        return None
+
+    async def fake_straddle(*_a, **_k):
+        return None
+
+    async def fake_tier_a(self, symbols):  # noqa: ANN001, ARG001
+        return {
+            "NSE:NIFTY 50": {
+                "last_price": 24500.0,
+                "ohlc": {"open": 24400.0, "close": 24350.0},
+            },
+            "NFO:NIFTY26SEP24500CE": {
+                "last_price": 120.0,
+                "last_trade_time": "2026-08-27 15:29:00",
+            },
+            "NFO:NIFTY26SEP24500PE": {
+                "last_price": 118.0,
+                "last_trade_time": "2026-08-28 10:01:00",
+            },
+        }
+
+    monkeypatch.setattr("app.domains.signal_engine._cache_get", fake_cache_get)
+    monkeypatch.setattr("app.domains.signal_engine._cache_set", fake_cache_set)
+    monkeypatch.setattr("app.domains.signal_engine._merge_nse_slow_tier", fake_nse)
+    monkeypatch.setattr("app.domains.signal_engine._apply_straddle_decay", fake_straddle)
+    monkeypatch.setattr(SignalEngineService, "_tier_a_quotes", fake_tier_a)
+    monkeypatch.setattr(
+        "app.domains.signal_engine._ist_now",
+        lambda: datetime(2026, 8, 28, 12, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    ctx = TenantContext(
+        tenant_id=tenant_id,
+        user_id="test",
+        role=Role.tenant_admin,
+        auth_org_id="org",
+        principal_type="user",
+    )
+    service = SignalEngineService(session, ctx)
+    service._fetch_quote = AsyncMock(return_value={})
+    config = SignalEngineConfig(
+        mock=False,
+        underlying_symbol="NSE:NIFTY 50",
+        nifty_fut_symbol="NFO:NIFTY26SEPFUT",
+        auto_atm_symbols=True,
+    )
+    feed = await service._build_feed(config)
+    assert feed["nifty_ltp"] == 24500.0
+    assert feed.get("spot_chg") is not None
+    assert feed.get("quote_stale") is not True
+    assert feed.get("ce_stale") is True
+    assert feed.get("ce") == 120.0

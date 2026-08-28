@@ -1296,9 +1296,15 @@ export function SignalMetricsPanel({
           w,
         ),
       ));
-  // Engine/stream can be up while broker LTP is missing — don't call that Running.
+  const quoteStale = !engineStarting && Boolean(state?.quote_stale);
+  const quoteRef = state?.quote_reference ?? null;
+  // Engine/stream can be up while broker LTP is missing or stale — don't call that Running.
   const engineHealthy =
-    !showStopped && !engineStarting && engineRunning && !noLivePrint;
+    !showStopped &&
+    !engineStarting &&
+    engineRunning &&
+    !noLivePrint &&
+    !quoteStale;
 
   return (
     <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-raised/20 p-2">
@@ -1313,11 +1319,13 @@ export function SignalMetricsPanel({
                       ? "info"
                       : noLivePrint
                         ? "warning"
-                        : engineStale
+                        : quoteStale
                           ? "warning"
-                          : engineHealthy
-                            ? "success"
-                            : "warning"
+                          : engineStale
+                            ? "warning"
+                            : engineHealthy
+                              ? "success"
+                              : "warning"
                 }
                 live={engineHealthy}
               >
@@ -1327,11 +1335,15 @@ export function SignalMetricsPanel({
                     ? "Starting"
                     : noLivePrint
                       ? "No quote"
-                      : engineStale
-                        ? "Stale"
-                        : engineHealthy
-                          ? "Running"
-                          : "Reconnecting"}
+                      : quoteStale
+                        ? quoteRef === "session_close"
+                          ? "Closed"
+                          : "Prev close"
+                        : engineStale
+                          ? "Stale"
+                          : engineHealthy
+                            ? "Running"
+                            : "Reconnecting"}
               </Badge>
               {!showStopped ? (
                 <Badge tone={streaming ? "success" : "warning"} dot={false}>

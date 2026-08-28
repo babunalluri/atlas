@@ -32,6 +32,7 @@ TICKER_STALE_SECONDS = 5.0
 TICKER_ALIVE_TTL_MS = int(TICKER_STALE_SECONDS * 1000) * 2  # 10s
 SOURCE_SIGNAL = "signal"
 SOURCE_OPTIONS_LAB = "options_lab"
+SOURCE_PARAM_CHART = "param_chart"
 
 _hub: KiteTickerHub | None = None
 

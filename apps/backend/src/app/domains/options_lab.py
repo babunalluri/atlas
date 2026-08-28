@@ -172,7 +172,7 @@ def _parse_greek(row: dict[str, Any] | None, key: str) -> float | None:
                 return round(float(val), 4)
             except (TypeError, ValueError):
                 pass
-    return _pick_float(row, key)
+    return _pick_float(row, key, ohlc_fallback=False)
 
 
 def _leg_from_quote(row: dict[str, Any] | None, *, symbol: str) -> dict[str, Any]:
@@ -185,9 +185,9 @@ def _leg_from_quote(row: dict[str, Any] | None, *, symbol: str) -> dict[str, Any
         "symbol": symbol,
         "instrument_token": instrument_token,
         "ltp": _pick_float(row or {}, "last_price", "ltp", "last"),
-        "oi": _pick_float(row or {}, "open_interest", "oi"),
-        "volume": _pick_float(row or {}, "volume"),
-        "iv": _pick_float(row or {}, "implied_volatility", "iv"),
+        "oi": _pick_float(row or {}, "open_interest", "oi", ohlc_fallback=False),
+        "volume": _pick_float(row or {}, "volume", ohlc_fallback=False),
+        "iv": _pick_float(row or {}, "implied_volatility", "iv", ohlc_fallback=False),
         "delta": _parse_greek(row, "delta"),
     }
 

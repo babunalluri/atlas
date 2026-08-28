@@ -8,7 +8,11 @@ from typing import Any
 
 from app.core.logging import get_logger
 from app.core.redis_client import get_redis, invalidate_redis
-from app.domains.signal_engine_constants import TIER_TTL_MS, WATCH_TTL_SECONDS
+from app.domains.signal_engine_constants import (
+    SNAPSHOT_TTL_MS,
+    TIER_TTL_MS,
+    WATCH_TTL_SECONDS,
+)
 
 logger = get_logger(__name__)
 
@@ -19,6 +23,7 @@ STALE_PACK_TTL_MS = 60_000
 
 _packs: dict[str, tuple[float, dict[str, Any]]] = {}
 _watchers: dict[str, tuple[float, dict[str, Any]]] = {}
+_overlays: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _now_ms() -> float:
@@ -48,6 +53,10 @@ def _watch_key(tenant_id: str) -> str:
     return f"atlas:param-chart:watch:{tenant_id}"
 
 
+def _overlay_key(tenant_id: str) -> str:
+    return f"atlas:param-chart:{tenant_id}:overlay"
+
+
 def _metrics_gate_key(tenant_id: str, day: str) -> str:
     return f"atlas:param-chart:{tenant_id}:metrics-gate:{day}"
 
@@ -62,6 +71,7 @@ def _rebuild_lock_key(
 def reset_param_chart_cache_for_tests() -> None:
     _packs.clear()
     _watchers.clear()
+    _overlays.clear()
     # metrics gates live only in Redis; tests use in-memory packs.
 
 
@@ -203,6 +213,81 @@ async def watcher_alive(tenant_id: str) -> bool:
         _watchers.pop(tenant_id, None)
         return False
     return True
+
+
+async def get_overlay(tenant_id: str) -> dict[str, Any] | None:
+    """Lean today-overlay SSE frame (book + Signal snapshot)."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            raw = await client.get(_overlay_key(tenant_id))
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            await invalidate_redis()
+            logger.warning("param_chart_overlay_get_failed", tenant_id=tenant_id)
+    entry = _overlays.get(tenant_id)
+    if not entry:
+        return None
+    expires, payload = entry
+    if expires <= _now_ms():
+        _overlays.pop(tenant_id, None)
+        return None
+    return dict(payload)
+
+
+async def set_overlay(
+    tenant_id: str,
+    payload: dict[str, Any],
+    *,
+    ttl_ms: int = SNAPSHOT_TTL_MS,
+) -> None:
+    ttl = max(5_000, int(ttl_ms))
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.set(
+                _overlay_key(tenant_id),
+                json.dumps(payload),
+                px=ttl,
+            )
+        except Exception:
+            await invalidate_redis()
+            logger.warning("param_chart_overlay_set_failed", tenant_id=tenant_id)
+    _overlays[tenant_id] = (_now_ms() + ttl, dict(payload))
+
+
+async def list_watched_tenant_ids() -> list[str]:
+    """Tenants with an open Param Chart SSE desk."""
+    client = await get_redis()
+    if client is not None:
+        try:
+            cursor = 0
+            tenants: list[str] = []
+            pattern = "atlas:param-chart:watch:*"
+            prefix = "atlas:param-chart:watch:"
+            while True:
+                cursor, keys = await client.scan(cursor=cursor, match=pattern, count=64)
+                for key in keys:
+                    if not str(key).startswith(prefix):
+                        continue
+                    tenants.append(str(key)[len(prefix) :])
+                if cursor == 0:
+                    break
+            return tenants
+        except Exception:
+            await invalidate_redis()
+            logger.warning("param_chart_watch_list_failed")
+    now = _now_ms()
+    alive: list[str] = []
+    for tenant_id, (expires, _) in list(_watchers.items()):
+        if expires <= now:
+            _watchers.pop(tenant_id, None)
+            continue
+        alive.append(tenant_id)
+    return alive
 
 
 async def metrics_persist_due(tenant_id: str, *, day: str) -> bool:

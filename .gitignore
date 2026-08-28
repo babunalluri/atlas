@@ -3,6 +3,10 @@
 # Docs show the JSON shape; never commit filled files.
 Instructions/StockBroker/tools/kite_credentials
 Instructions/StockBroker/tools/*_credentials
+# Oracle Cloud tenancy credentials — never commit.
+docs/oracleCredentials.md
+# Local OCI log dumps from ops scripts — never commit.
+tmp_oci_logs.txt
 # OCI / SSH private keys — never commit
 keys/*
 !keys/.gitignore

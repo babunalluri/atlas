@@ -33,6 +33,11 @@ LEVELS_TTL_MS = 30_000
 ATM_IV_TTL_MS = 15_000
 # Background Tier-B gate — must be ≤ chain TTL so PCR/IV refresh on cadence.
 TIER_B_REFRESH_GATE_MS = 12_000
+# NSE public HTTP can take minutes (homepage + several paths). Cap the asyncio
+# wait so Tier B cannot pin a pooled DB connection; in-flight TTL must outlast
+# this wait so the 12s gate cannot stampede a second fetch.
+NSE_SLOW_FETCH_TIMEOUT_S = 20.0
+NSE_SLOW_INFLIGHT_TTL_MS = 25_000
 # Matrix row bg refresh gate — stops tick-cadence create_task pileups that
 # exhaust the DB pool when row compute (>tick) overlaps. Aligns with chain TTL.
 MATRIX_REFRESH_GATE_MS = 15_000

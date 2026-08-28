@@ -16,8 +16,13 @@ from app.auth.dependencies import require_roles
 from app.db.models import Role
 from app.db.session import SessionFactory, apply_tenant_guc, tenant_session
 from app.domains import param_chart_cache as pc_cache
-from app.domains.param_chart import ParamChartService, month_state_for_stream
+from app.domains.param_chart import (
+    ParamChartService,
+    month_state_for_stream,
+    overlay_frame_from_cache,
+)
 from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
+from app.domains.sse_frames import SSE_KEEPALIVE, stream_revision
 from app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/admin/param-chart", tags=["admin-param-chart"])
@@ -111,24 +116,30 @@ async def stream_param_chart(
     request: Request,
     context: StreamAdminContext,
 ) -> StreamingResponse:
-    """SSE: today overlay from Signal snapshot + CE/PE quotes (~8 Hz)."""
+    """SSE: today overlay from Redis (book + Signal snapshot), ~8 Hz."""
 
     async def event_stream() -> AsyncIterator[bytes]:
         tenant_key = str(context.tenant_id)
+        last_rev: tuple[Any, ...] | None = None
         try:
             while True:
                 if await request.is_disconnected():
                     break
-                await pc_cache.touch_watcher(tenant_key)
-                async with SessionFactory() as session:
-                    async with session.begin():
-                        await apply_tenant_guc(session, context.tenant_id)
-                        payload = await month_state_for_stream(session, context)
-                await pc_cache.touch_watcher(tenant_key)
-                frame = json.dumps(payload, separators=(",", ":"))
-                yield f"data: {frame}\n\n".encode()
-                # Today overlay only — reuse Signal cadence but floor at 500ms.
-                await asyncio.sleep(max(STREAM_INTERVAL_MS, 500) / 1000)
+                payload = await overlay_frame_from_cache(tenant_key)
+                if payload is None:
+                    async with SessionFactory() as session:
+                        async with session.begin():
+                            await apply_tenant_guc(session, context.tenant_id)
+                            payload = await month_state_for_stream(session, context)
+                    await pc_cache.touch_watcher(tenant_key)
+                rev = stream_revision(payload)
+                if rev == last_rev:
+                    yield SSE_KEEPALIVE
+                else:
+                    last_rev = rev
+                    frame = json.dumps(payload, separators=(",", ":"))
+                    yield f"data: {frame}\n\n".encode()
+                await asyncio.sleep(STREAM_INTERVAL_MS / 1000)
         except asyncio.CancelledError:
             raise
 

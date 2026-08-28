@@ -20,6 +20,7 @@ from app.domains.param_chart_constants import (
     DEFAULT_PARAM_CHART_CONFIG,
     PARAM_CHART_INTERVALS,
     PARAM_CHART_SETTINGS_KEY,
+    merge_desk_instrument_into_chart,
     project_metrics_from_signal_rows,
     shared_categories,
     shared_metric_defs,
@@ -38,6 +39,42 @@ MONTH_CODES = (
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 )
+
+
+def _nse_pre_open(now: datetime | None = None) -> bool:
+    """True before regular NSE cash session open (09:15 IST). Local to Param Chart."""
+    now = now or datetime.now(IST)
+    return (now.hour, now.minute) < (9, 15)
+
+
+def _quote_ltp(
+    row: dict[str, Any] | None,
+    *,
+    allow_previous_close: bool = False,
+) -> tuple[float | None, bool]:
+    """``(price, is_stale)`` — live last_price, else previous close when pre-open."""
+    if not row:
+        return None, False
+    for key in ("last_price", "ltp", "last"):
+        val = row.get(key)
+        if val is None or val == "":
+            continue
+        try:
+            live = float(val)
+        except (TypeError, ValueError):
+            continue
+        if live != 0:
+            return live, False
+    if not allow_previous_close:
+        return None, False
+    ohlc = row.get("ohlc") if isinstance(row.get("ohlc"), dict) else {}
+    close = ohlc.get("close") if isinstance(ohlc, dict) else None
+    if close is None or close == "":
+        return None, False
+    try:
+        return float(close), True
+    except (TypeError, ValueError):
+        return None, False
 
 
 def _tenant_key(context: Any) -> str:
@@ -516,18 +553,18 @@ class ParamChartService:
             hit = await signal_cache.get_metric(tenant_id, "setup")
         settings = hit.get("settings") if isinstance(hit, dict) else None
         if isinstance(settings, dict):
-            nested = settings.get(PARAM_CHART_SETTINGS_KEY)
-            if isinstance(nested, dict):
-                return ParamChartConfig.from_dict(nested)
+            merged = merge_desk_instrument_into_chart(settings)
+            if merged:
+                return ParamChartConfig.from_dict(merged)
             return ParamChartConfig()
         # Setup miss / empty — fall back to a direct tool read.
         tool = await self.engine._signal_engine_tool()
         if tool is None:
             return ParamChartConfig()
         raw = await self.engine._tool_settings(tool)
-        nested = raw.get(PARAM_CHART_SETTINGS_KEY)
-        if isinstance(nested, dict):
-            return ParamChartConfig.from_dict(nested)
+        merged = merge_desk_instrument_into_chart(raw)
+        if merged:
+            return ParamChartConfig.from_dict(merged)
         return ParamChartConfig()
 
     async def get_admin_config(self) -> dict[str, Any]:
@@ -1325,15 +1362,9 @@ class ParamChartService:
                 tenant_id, year=year, month=month, interval=ui_iv
             )
 
-    async def _today_overlay(self, cfg: ParamChartConfig, pack: dict[str, Any]) -> dict[str, Any]:
-        """Live today: Kite quotes for spot/CE/PE + Signal shared metrics overlay."""
+    async def _live_quote_overlay(self, cfg: ParamChartConfig) -> dict[str, Any]:
+        """Book-first spot/CE/PE + Signal shared metrics (no hist)."""
         tenant_id = _tenant_key(self.context)
-        today = _ist_today()
-        days = list(pack.get("days") or [])
-        today_s = today.isoformat()
-        today_idxs = _today_bar_indices(days, today_s)
-        today_row = days[today_idxs[-1]] if today_idxs else None
-
         metrics: dict[str, Any] = {}
         snap = await signal_cache.get_snapshot(tenant_id)
         if isinstance(snap, dict):
@@ -1342,40 +1373,43 @@ class ParamChartService:
         ce = pe = total = pct = None
         spot_close = spot_open = spot_high = spot_low = None
         quote_error: str | None = None
+        quote_stale = False
+        allow_stale = _nse_pre_open()
         try:
             symbols = [
                 s
                 for s in (cfg.underlying_symbol, cfg.ce_symbol, cfg.pe_symbol)
                 if s
             ]
-            quotes = await self.engine._fetch_quote(symbols, prefer="get_quote") if symbols else {}
+            quotes = await _book_quotes(tenant_id, symbols)
             spot_row = _find_quote_row(quotes, cfg.underlying_symbol)
-            spot_close = _pick_float(spot_row, "last_price", "ltp", "last")
+            spot_close, spot_stale = _quote_ltp(
+                spot_row,
+                allow_previous_close=allow_stale,
+            )
+            if spot_stale:
+                quote_stale = True
             ohlc = spot_row.get("ohlc") if isinstance(spot_row, dict) else None
             if isinstance(ohlc, dict):
                 spot_open = _pick_float(ohlc, "open")
                 spot_high = _pick_float(ohlc, "high")
                 spot_low = _pick_float(ohlc, "low")
-                if spot_close is None:
-                    spot_close = _pick_float(ohlc, "close")
-            ce = _pick_float(
+            ce_ltp, ce_stale = _quote_ltp(
                 _find_quote_row(quotes, cfg.ce_symbol),
-                "last_price",
-                "ltp",
-                "last",
+                allow_previous_close=allow_stale,
             )
-            pe = _pick_float(
+            pe_ltp, pe_stale = _quote_ltp(
                 _find_quote_row(quotes, cfg.pe_symbol),
-                "last_price",
-                "ltp",
-                "last",
+                allow_previous_close=allow_stale,
             )
+            ce, pe = ce_ltp, pe_ltp
+            if ce_stale or pe_stale:
+                quote_stale = True
             if ce is not None and pe is not None:
                 total = round(ce + pe, 2)
                 entry = cfg.entry_total()
                 if entry:
                     pct = round((entry - total) / entry * 100, 2)
-            # Capture live CE/PE tokens while contracts still quote.
             try:
                 from app.domains import param_chart_token_store as token_store
 
@@ -1396,6 +1430,50 @@ class ParamChartService:
         except Exception as exc:  # noqa: BLE001
             quote_error = str(exc)[:200]
             logger.warning("param_chart_today_quote_failed", tenant_id=tenant_id)
+
+        kite_live: dict[str, Any] = {
+            "source": "kite",
+            "spot": spot_close,
+            "ce": ce,
+            "pe": pe,
+            "error": quote_error,
+        }
+        if quote_stale:
+            kite_live["quote_stale"] = True
+            kite_live["quote_reference"] = "previous_close"
+        return {
+            "live_metrics": metrics,
+            "kite_live": kite_live,
+            "quote_stale": quote_stale,
+            "quote_reference": "previous_close" if quote_stale else None,
+            "spot_close": spot_close,
+            "spot_open": spot_open,
+            "spot_high": spot_high,
+            "spot_low": spot_low,
+            "ce": ce,
+            "pe": pe,
+            "total": total,
+            "pct": pct,
+        }
+
+    async def _today_overlay(self, cfg: ParamChartConfig, pack: dict[str, Any]) -> dict[str, Any]:
+        """Live today: ticker book for spot/CE/PE + Signal shared metrics overlay."""
+        today = _ist_today()
+        days = list(pack.get("days") or [])
+        today_s = today.isoformat()
+        today_idxs = _today_bar_indices(days, today_s)
+        today_row = days[today_idxs[-1]] if today_idxs else None
+
+        live = await self._live_quote_overlay(cfg)
+        metrics = live["live_metrics"] if isinstance(live.get("live_metrics"), dict) else {}
+        spot_close = live.get("spot_close")
+        spot_open = live.get("spot_open")
+        spot_high = live.get("spot_high")
+        spot_low = live.get("spot_low")
+        ce = live.get("ce")
+        pe = live.get("pe")
+        total = live.get("total")
+        pct = live.get("pct")
 
         if today_row is not None and today_idxs:
             updated = dict(today_row)
@@ -1462,15 +1540,9 @@ class ParamChartService:
             )
             metrics_by_day[today_s] = {**prev_today, **metrics}
 
-        kite_live = {
-            "source": "kite",
-            "spot": spot_close,
-            "ce": ce,
-            "pe": pe,
-            "error": quote_error,
-        }
+        kite_live = live.get("kite_live") if isinstance(live.get("kite_live"), dict) else {}
         lean_days = metrics_store.strip_embedded_metrics(_attach_day_deltas(days))
-        return {
+        out = {
             **pack,
             "days": lean_days,
             "metrics_by_day": metrics_by_day,
@@ -1478,8 +1550,12 @@ class ParamChartService:
             "live_metrics": metrics,
             "kite_live": kite_live,
             "fetched_at": int(time.time()),
-            "stream_interval_ms": max(STREAM_INTERVAL_MS, 500),
+            "stream_interval_ms": STREAM_INTERVAL_MS,
         }
+        if live.get("quote_stale"):
+            out["quote_stale"] = True
+            out["quote_reference"] = live.get("quote_reference") or "previous_close"
+        return out
 
     async def month_state(
         self,
@@ -1507,15 +1583,12 @@ class ParamChartService:
         # otherwise replace a full intraday hist with one empty row.
         if pack.get("building"):
             await pc_cache.touch_watcher(_tenant_key(self.context))
-            live_metrics: dict[str, Any] = {}
-            try:
-                snap = await signal_cache.get_snapshot(_tenant_key(self.context))
-                if isinstance(snap, dict):
-                    live_metrics = project_metrics_from_signal_rows(
-                        snap.get("metrics")
-                    )
-            except Exception:  # noqa: BLE001
-                live_metrics = {}
+            live = await self._live_quote_overlay(cfg)
+            live_metrics = (
+                live["live_metrics"]
+                if isinstance(live.get("live_metrics"), dict)
+                else {}
+            )
             today_s = _ist_today().isoformat()
             mbd = metrics_store.normalize_metrics_by_day(
                 pack.get("metrics_by_day")
@@ -1527,20 +1600,24 @@ class ParamChartService:
                     **(mbd.get(today_s) if isinstance(mbd.get(today_s), dict) else {}),
                     **live_metrics,
                 }
-            return {
+            out = {
                 **pack,
                 "ok": True,
                 "days": list(pack.get("days") or []),
                 "metrics_by_day": mbd,
                 "today": today_s,
                 "live_metrics": live_metrics,
-                "kite_live": {"source": "kite", "error": None},
+                "kite_live": live.get("kite_live") or {"source": "kite", "error": None},
                 "fetched_at": int(time.time()),
-                "stream_interval_ms": max(STREAM_INTERVAL_MS, 500),
+                "stream_interval_ms": STREAM_INTERVAL_MS,
                 "config": cfg.to_admin_dict(),
                 "shared_metrics": shared_metric_defs(),
                 "shared_categories": shared_categories(),
             }
+            if live.get("quote_stale"):
+                out["quote_stale"] = True
+                out["quote_reference"] = live.get("quote_reference") or "previous_close"
+            return out
 
         merged = await self._today_overlay(cfg, pack)
         # Persist shared checklist metrics into today's day card (history for overlays).
@@ -1558,7 +1635,7 @@ class ParamChartService:
             "shared_metrics": shared_metric_defs(),
             "shared_categories": shared_categories(),
             "data_source": "kite",
-            "poll_ms": max(STREAM_INTERVAL_MS, 500),
+            "poll_ms": STREAM_INTERVAL_MS,
         }
 
     async def persist_metrics_from_signal_snapshot(
@@ -1692,18 +1769,45 @@ def _slim_stream_frame(state: dict[str, Any]) -> dict[str, Any]:
         "kite": state.get("kite"),
         "config": state.get("config"),
         "fetched_at": state.get("fetched_at"),
-        "stream_interval_ms": state.get("stream_interval_ms"),
+        "stream_interval_ms": state.get("stream_interval_ms") or STREAM_INTERVAL_MS,
+        "quote_stale": state.get("quote_stale"),
+        "quote_reference": state.get("quote_reference"),
         # shared_metrics / categories are static — client already has them from
-        # REST /config; omit to keep 2 Hz frames small.
+        # REST /config; omit to keep 8 Hz frames small.
     }
+
+
+async def overlay_frame_from_cache(tenant_id: str) -> dict[str, Any] | None:
+    """SSE hot path: Redis overlay only (no Postgres / Kite)."""
+    await pc_cache.touch_watcher(tenant_id)
+    frame = await pc_cache.get_overlay(tenant_id)
+    return frame if isinstance(frame, dict) else None
 
 
 async def month_state_for_stream(
     session: AsyncSession,
     context: Any,
 ) -> dict[str, Any]:
-    # Soft: never run Kite year rebuilds on the 2 Hz SSE loop.
+    # Soft: never run Kite year rebuilds on the live SSE loop.
     full = await ParamChartService(session, context).month_state(
         build_missing=False
     )
-    return _slim_stream_frame(full)
+    slim = _slim_stream_frame(full)
+    await pc_cache.set_overlay(_tenant_key(context), slim)
+    return slim
+
+
+def param_chart_watch_symbols(cfg: ParamChartConfig) -> list[str]:
+    """Under / FUT / CE / PE for the shared Kite hub (Param Chart source)."""
+    return list(
+        dict.fromkeys(
+            s
+            for s in (
+                cfg.underlying_symbol,
+                cfg.fut_symbol,
+                cfg.ce_symbol,
+                cfg.pe_symbol,
+            )
+            if s
+        )
+    )

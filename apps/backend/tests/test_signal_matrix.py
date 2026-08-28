@@ -143,6 +143,25 @@ def test_split_and_merge_snapshot() -> None:
     assert merged["evaluable"] == 3
 
 
+def test_split_snapshot_keeps_quote_stale() -> None:
+    payload = {
+        "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+        "quote_stale": True,
+        "quote_reference": "previous_close",
+        "ce_stale": True,
+        "feed_source": "live",
+        "metrics": [],
+    }
+    _globals_doc, row_doc = split_snapshot(payload)
+    assert row_doc["quote_stale"] is True
+    assert row_doc["quote_reference"] == "previous_close"
+    merged = merge_globals_row({"metrics": []}, row_doc)
+    assert merged is not None
+    assert merged["quote_stale"] is True
+    assert merged["quote_reference"] == "previous_close"
+    assert merged.get("ce_stale") is True
+
+
 @pytest.mark.asyncio
 async def test_merged_frame_falls_back_when_row_missing() -> None:
     """Globals-only dual-write must not hide a full snapshot's passed/entry."""

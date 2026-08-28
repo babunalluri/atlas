@@ -13,8 +13,8 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Literal, NamedTuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,8 @@ from app.domains.signal_engine_constants import (
     ENGINE_STARTING_SNAPSHOT_MS,
     ENTRY_GATE_COVERAGE_RATIO,
     LEVELS_TTL_MS,
+    NSE_SLOW_FETCH_TIMEOUT_S,
+    NSE_SLOW_INFLIGHT_TTL_MS,
     OPTION_CHAIN_TTL_MS,
     SNAPSHOT_FRESH_MS,
     SNAPSHOT_TTL_MS,
@@ -664,6 +666,237 @@ def _ist_now() -> datetime:
     return datetime.now(IST)
 
 
+NSE_SESSION_OPEN_HM = (9, 15)
+NSE_SESSION_CLOSE_HM = (15, 30)
+_NSE_SLOW_INFLIGHT_METRIC = "nse_slow_inflight"
+_LTP_KEYS = ("last_price", "ltp", "last")
+_QUOTE_PACKET_TIME_KEYS = ("exchange_timestamp", "timestamp")
+
+
+class _LtpPrint(NamedTuple):
+    price: float | None
+    stale: bool
+    reference: str | None = None
+
+
+def _as_ist(now: datetime | None = None) -> datetime:
+    now = now or _ist_now()
+    if now.tzinfo is None:
+        return now.replace(tzinfo=IST)
+    return now.astimezone(IST)
+
+
+def _positive_price(val: Any) -> float | None:
+    if val is None or val == "":
+        return None
+    try:
+        parsed = float(val)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0 or math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
+
+
+def _quote_positive_ltp(row: dict[str, Any] | None) -> float | None:
+    """Live print keys only — does not fall back to OHLC (unlike ``_pick_float``)."""
+    if not row:
+        return None
+    for key in _LTP_KEYS:
+        parsed = _positive_price(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _is_nse_holiday(day: date) -> bool:
+    """True when the process holiday cache already lists ``day`` (no HTTP)."""
+    try:
+        from app.domains.signal_engine_nse import peek_nse_holiday_dates
+
+        return day in peek_nse_holiday_dates()
+    except Exception:
+        return False
+
+
+def _nse_holiday_flag(
+    feed: dict[str, Any] | None = None,
+    now: datetime | None = None,
+    *,
+    nse_holiday: bool | None = None,
+) -> bool:
+    """Redis ``nse_holiday_today`` (shared) or the process holiday peek."""
+    if nse_holiday is True:
+        return True
+    now = _as_ist(now)
+    if feed is not None:
+        raw = feed.get("nse_holiday_today")
+        try:
+            if raw is not None and float(raw) != 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return _is_nse_holiday(now.date())
+
+
+def _nse_session_is_open(
+    now: datetime | None = None,
+    *,
+    nse_holiday: bool | None = None,
+) -> bool:
+    """True during the regular NSE cash session (09:15–15:30 IST, weekdays)."""
+    now = _as_ist(now)
+    if now.weekday() >= 5 or _nse_holiday_flag(now=now, nse_holiday=nse_holiday):
+        return False
+    hm = (now.hour, now.minute)
+    return NSE_SESSION_OPEN_HM <= hm < NSE_SESSION_CLOSE_HM
+
+
+def _is_nse_pre_open(
+    now: datetime | None = None,
+    *,
+    nse_holiday: bool | None = None,
+) -> bool:
+    """True on a weekday session day before regular NSE cash open (09:15 IST)."""
+    now = _as_ist(now)
+    if now.weekday() >= 5 or _nse_holiday_flag(now=now, nse_holiday=nse_holiday):
+        return False
+    return (now.hour, now.minute) < NSE_SESSION_OPEN_HM
+
+
+def _parse_quote_time(raw: Any, *, now: datetime) -> datetime | None:
+    dt: datetime | None
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, (int, float)):
+        ts = float(raw)
+        if ts > 1e12:
+            ts /= 1000.0
+        try:
+            dt = datetime.fromtimestamp(ts, tz=IST)
+        except (OSError, OverflowError, ValueError):
+            return None
+    elif isinstance(raw, str):
+        text = raw.strip()
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(text[:19], fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IST)
+    return dt.astimezone(now.tzinfo or IST)
+
+
+def _quote_trade_time(row: dict[str, Any], *, now: datetime) -> datetime | None:
+    """Actual last trade only — quote packet times must not confirm liveness."""
+    raw = row.get("last_trade_time")
+    if raw is None or raw == "":
+        return None
+    return _parse_quote_time(raw, now=now)
+
+
+def _quote_packet_time(row: dict[str, Any], *, now: datetime) -> datetime | None:
+    for key in _QUOTE_PACKET_TIME_KEYS:
+        val = row.get(key)
+        if val is not None and val != "":
+            return _parse_quote_time(val, now=now)
+    return None
+
+
+def _closed_session_reference(
+    now: datetime,
+    *,
+    nse_holiday: bool | None = None,
+) -> str:
+    """Today's own close vs last session (pre-open / weekend / holiday)."""
+    holiday = _nse_holiday_flag(now=now, nse_holiday=nse_holiday)
+    if _is_nse_pre_open(now, nse_holiday=holiday) or now.weekday() >= 5 or holiday:
+        return "previous_close"
+    return "session_close"
+
+
+def _row_ltp(
+    row: dict[str, Any] | None,
+    *,
+    allow_previous_close: bool | None = None,
+    now: datetime | None = None,
+    nse_holiday: bool | None = None,
+) -> _LtpPrint:
+    """Return last print plus live vs stale reference.
+
+    Live vs stale is driven by the NSE session clock and ``last_trade_time``.
+    Quote ``timestamp`` / ``exchange_timestamp`` may invalidate a print but
+    never confirm it as live. After 15:30 on a trading day the print is
+    today's close (``session_close``) — derived % stay valid. Pre-open,
+    weekends, and holidays use ``previous_close``.
+    """
+    if not row:
+        return _LtpPrint(None, False, None)
+    now = _as_ist(now)
+    holiday = _nse_holiday_flag(now=now, nse_holiday=nse_holiday)
+    session_open = _nse_session_is_open(now, nse_holiday=holiday)
+    allow_close = (not session_open) if allow_previous_close is None else allow_previous_close
+    live = _quote_positive_ltp(row)
+    trade_t = _quote_trade_time(row, now=now)
+    quote_t = _quote_packet_time(row, now=now)
+    session_open_dt = now.replace(
+        hour=NSE_SESSION_OPEN_HM[0],
+        minute=NSE_SESSION_OPEN_HM[1],
+        second=0,
+        microsecond=0,
+    )
+    session_close_dt = now.replace(
+        hour=NSE_SESSION_CLOSE_HM[0],
+        minute=NSE_SESSION_CLOSE_HM[1],
+        second=0,
+        microsecond=0,
+    )
+
+    def _in_session(stamp: datetime | None) -> bool:
+        return (
+            stamp is not None
+            and stamp.date() == now.date()
+            and session_open_dt <= stamp < session_close_dt
+        )
+
+    if live is not None:
+        if not session_open:
+            return _LtpPrint(live, True, _closed_session_reference(now, nse_holiday=holiday))
+        if trade_t is not None:
+            if _in_session(trade_t):
+                return _LtpPrint(live, False, None)
+            return _LtpPrint(live, True, "previous_close")
+        if quote_t is not None and quote_t < session_open_dt:
+            return _LtpPrint(live, True, "previous_close")
+        return _LtpPrint(live, False, None)
+    if not allow_close:
+        return _LtpPrint(None, False, None)
+    raw_ohlc = row.get("ohlc")
+    ohlc = raw_ohlc if isinstance(raw_ohlc, dict) else {}
+    close = _positive_price(ohlc.get("close"))
+    if close is not None:
+        return _LtpPrint(close, True, _closed_session_reference(now, nse_holiday=holiday))
+    return _LtpPrint(None, False, None)
+
+
+def _mark_quote_stale(feed: dict[str, Any], *, reference: str = "previous_close") -> None:
+    feed["quote_stale"] = True
+    # previous_close is the stronger claim — do not overwrite it with session_close.
+    if feed.get("quote_reference") == "previous_close":
+        return
+    feed["quote_reference"] = reference or "previous_close"
+
+
 def _ist_session_date() -> str:
     return _ist_now().strftime("%Y-%m-%d")
 
@@ -1027,8 +1260,8 @@ async def _merge_secondary_ce_pe_quotes(
 def _estimate_pcr(ce_row: dict[str, Any] | None, pe_row: dict[str, Any] | None) -> float | None:
     if not ce_row or not pe_row:
         return None
-    ce_oi = _pick_float(ce_row, "oi", "open_interest")
-    pe_oi = _pick_float(pe_row, "oi", "open_interest")
+    ce_oi = _pick_float(ce_row, "oi", "open_interest", ohlc_fallback=False)
+    pe_oi = _pick_float(pe_row, "oi", "open_interest", ohlc_fallback=False)
     if ce_oi is None or pe_oi is None or ce_oi <= 0:
         return None
     return round(pe_oi / ce_oi, 4)
@@ -1039,7 +1272,7 @@ def _merge_option_iv(ce_row: dict[str, Any] | None, pe_row: dict[str, Any] | Non
     for row in (ce_row, pe_row):
         if not row:
             continue
-        iv_val = _pick_float(row, "implied_volatility", "iv")
+        iv_val = _pick_float(row, "implied_volatility", "iv", ohlc_fallback=False)
         if iv_val is not None:
             values.append(iv_val)
     if not values:
@@ -1095,12 +1328,15 @@ def _quote_change_pcts(row: dict[str, Any] | None) -> tuple[float | None, float 
     if not row:
         return None, None
     ltp = _pick_float(row, "last_price", "ltp", "last")
-    ohlc = row.get("ohlc") if isinstance(row.get("ohlc"), dict) else {}
+    raw_ohlc = row.get("ohlc")
+    ohlc = raw_ohlc if isinstance(raw_ohlc, dict) else {}
     prev = _pick_float(ohlc, "close")
     open_ = _pick_float(ohlc, "open")
     # Kite / LTP-shaped rows often expose net_change without a nested ohlc block.
     if prev is None and ltp is not None:
-        net = _pick_float(row, "net_change", "change", "change_value")
+        net = _pick_float(
+            row, "net_change", "change", "change_value", ohlc_fallback=False
+        )
         if net is not None:
             prev = ltp - net
     # Some brokers return day change already as a percent.
@@ -1110,6 +1346,7 @@ def _quote_change_pcts(row: dict[str, Any] | None) -> tuple[float | None, float 
         "change_pct",
         "percentage_change",
         "pChange",
+        ohlc_fallback=False,
     )
     vs_prev: float | None = None
     vs_open: float | None = None
@@ -1248,6 +1485,7 @@ async def _merge_nse_slow_tier(
     _config: SignalEngineConfig,
     *,
     mock: bool,
+    cache_only: bool = False,
 ) -> None:
     if mock:
         feed.update(mock_nse_fields())
@@ -1259,11 +1497,67 @@ async def _merge_nse_slow_tier(
         if isinstance(cached, dict):
             feed.update(cached)
         return
-    payload = await asyncio.to_thread(fetch_nse_slow_fields)
+    if cache_only:
+        return
+    try:
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(fetch_nse_slow_fields),
+            timeout=NSE_SLOW_FETCH_TIMEOUT_S,
+        )
+    except TimeoutError:
+        logger.warning(
+            "signal_nse_slow_fetch_timeout",
+            tenant_id=tenant_id,
+            timeout_s=NSE_SLOW_FETCH_TIMEOUT_S,
+        )
+        return
     if not payload:
         return
     feed.update(payload)
     await _cache_set(tenant_id, "nse_slow", "slow", payload)
+
+
+async def prefetch_nse_slow(tenant_id: str) -> None:
+    """Fetch NSE slow fields outside any DB transaction.
+
+    Caps wait at ``NSE_SLOW_FETCH_TIMEOUT_S`` and uses an in-flight marker so
+    the 12s Tier-B gate cannot stampede a second HTTP run.
+    """
+    acquired = False
+    try:
+        if await _cache_get(tenant_id, "nse_slow") is not None:
+            return
+        acquired = await cache.try_set_metric(
+            tenant_id,
+            _NSE_SLOW_INFLIGHT_METRIC,
+            "slow",
+            True,
+            ttl_ms=NSE_SLOW_INFLIGHT_TTL_MS,
+        )
+        if not acquired:
+            return
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(fetch_nse_slow_fields),
+            timeout=NSE_SLOW_FETCH_TIMEOUT_S,
+        )
+        if payload:
+            await _cache_set(tenant_id, "nse_slow", "slow", payload)
+    except TimeoutError:
+        logger.warning(
+            "signal_nse_slow_prefetch_timeout",
+            tenant_id=tenant_id,
+            timeout_s=NSE_SLOW_FETCH_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning(
+            "signal_nse_slow_prefetch_failed",
+            tenant_id=tenant_id,
+            error=str(exc)[:160],
+        )
+    finally:
+        if acquired:
+            with contextlib.suppress(Exception):
+                await cache.delete_metric(tenant_id, _NSE_SLOW_INFLIGHT_METRIC)
 
 
 async def _merge_levels_tier(
@@ -1392,7 +1686,8 @@ def _refresh_level_spot_fields(
 ) -> None:
     """Live day range + spot comparisons — must run each feed tick."""
     if spot_row:
-        ohlc = spot_row.get("ohlc") if isinstance(spot_row.get("ohlc"), dict) else {}
+        raw_ohlc = spot_row.get("ohlc")
+        ohlc = raw_ohlc if isinstance(raw_ohlc, dict) else {}
         day_high = _pick_float(ohlc, "high")
         day_low = _pick_float(ohlc, "low")
         if day_high is not None:
@@ -1414,6 +1709,8 @@ async def _apply_straddle_decay(tenant_id: str, feed: dict[str, Any]) -> None:
     )
     session_open = await cache.get_session_value(tenant_id, session_key)
     if session_open is None:
+        if feed.get("quote_stale") or feed.get("ce_stale") or feed.get("pe_stale"):
+            return
         await cache.set_session_value(tenant_id, session_key, float(straddle))
         feed["_straddle_session_open"] = float(straddle)
         return
@@ -1715,6 +2012,16 @@ def _live_setup_warnings(
     if config.mock:
         return []
     warnings: list[str] = []
+    if feed.get("quote_stale"):
+        ref = str(feed.get("quote_reference") or "")
+        if ref == "session_close":
+            warnings.append("Session closed — showing today's close (not a live print).")
+        elif _is_nse_pre_open(nse_holiday=_nse_holiday_flag(feed)):
+            warnings.append(
+                "Pre-market — showing previous close until 09:15 IST (not a live print)."
+            )
+        else:
+            warnings.append("Showing last session close (not a live print).")
     if not team_ready:
         warnings.append("Publish the Signals ops team and bind tools.")
     if not has_broker:
@@ -1724,7 +2031,7 @@ def _live_setup_warnings(
         warnings.append(auth_hint)
     if not config.underlying_symbol:
         warnings.append("Select an underlying symbol (Admin → Signal config).")
-    elif feed.get("nifty_ltp") is None and not auth_hint:
+    elif feed.get("nifty_ltp") is None and not auth_hint and not feed.get("quote_stale"):
         warnings.append(
             f"No live print for {config.underlying_symbol}. Check broker token and symbol."
         )
@@ -1783,7 +2090,7 @@ def _live_setup_warnings(
     return warnings
 
 
-def _pick_float(payload: Any, *keys: str) -> float | None:
+def _pick_float(payload: Any, *keys: str, ohlc_fallback: bool = True) -> float | None:
     if not isinstance(payload, dict):
         return None
     for key in keys:
@@ -1791,18 +2098,26 @@ def _pick_float(payload: Any, *keys: str) -> float | None:
         if val is None or val == "":
             continue
         try:
-            return float(val)
+            parsed = float(val)
         except (TypeError, ValueError):
             continue
+        if math.isnan(parsed) or math.isinf(parsed):
+            continue
+        return parsed
+    if not ohlc_fallback:
+        return None
     ohlc = payload.get("ohlc")
     if isinstance(ohlc, dict):
         for key in ("close", "open", "high", "low"):
             val = ohlc.get(key)
             if val is not None:
                 try:
-                    return float(val)
+                    parsed = float(val)
                 except (TypeError, ValueError):
                     continue
+                if math.isnan(parsed) or math.isinf(parsed):
+                    continue
+                return parsed
     return None
 
 
@@ -2511,7 +2826,7 @@ class SignalEngineService:
         def _row_reusable(symbol: str) -> bool:
             """Reuse book rows; get_quote needs REST-shaped rows (ohlc/depth)."""
             row = _find_quote_row(book_partial, symbol) or {}
-            if _pick_float(row, "last_price", "ltp", "last") is None:
+            if _quote_positive_ltp(row) is None:
                 return False
             if prefer != "get_quote":
                 return True
@@ -2772,13 +3087,7 @@ class SignalEngineService:
         missing = [
             sym
             for sym in symbols
-            if _pick_float(
-                _find_quote_row(out, sym) or {},
-                "last_price",
-                "ltp",
-                "last",
-            )
-            is None
+            if _quote_positive_ltp(_find_quote_row(out, sym)) is None
         ]
         if missing and assemble_quotes_from_book is not None:
             # Reuse REST-seeded / recently written rows without the alive gate.
@@ -2796,21 +3105,12 @@ class SignalEngineService:
                 soft_book = {}
             for sym in list(missing):
                 row = _find_quote_row(soft_book, sym)
-                if (
-                    row is not None
-                    and _pick_float(row, "last_price", "ltp", "last") is not None
-                ):
+                if row is not None and _quote_positive_ltp(row) is not None:
                     out[sym] = row
             missing = [
                 sym
                 for sym in missing
-                if _pick_float(
-                    _find_quote_row(out, sym) or {},
-                    "last_price",
-                    "ltp",
-                    "last",
-                )
-                is None
+                if _quote_positive_ltp(_find_quote_row(out, sym)) is None
             ]
 
         if not missing:
@@ -3154,6 +3454,12 @@ class SignalEngineService:
 
         feed: dict[str, Any] = {"source": "live"}
 
+        # Shared NSE calendar (holiday / FII) from Redis — before session-clock LTP.
+        await _merge_nse_slow_tier(
+            tenant_id, feed, config, mock=False, cache_only=True
+        )
+        nse_holiday = _nse_holiday_flag(feed)
+
         # Apply Tier B caches first so VIX / stock big-move survive even when
         # later REST fan-out is truncated by the budget.
         vix_cached = await _cache_get(tenant_id, "india_vix")
@@ -3181,11 +3487,8 @@ class SignalEngineService:
             feed["dow_change_pct"] = config.dow_change_pct
             await _cache_set(tenant_id, "dow_jones", "slow", config.dow_change_pct)
 
-        await _merge_nse_slow_tier(tenant_id, feed, config, mock=False)
-        if config.fii_net is not None:
-            feed["fii_net"] = config.fii_net
-
         # Fast — Tier A from live ticker book; REST only for missing LTP rows / IV.
+        # Must run before slow NSE calendar fetch so spot/FUT/CE/PE paint first.
         atm_strike: int | None = None
         spot_row: dict[str, Any] | None = None
         fast_symbols: list[str] = []
@@ -3224,35 +3527,44 @@ class SignalEngineService:
                     await _cache_set(tenant_id, "india_vix", "medium", vix_ltp)
                     break
 
-        # Underlying LTP → ATM
+        # Underlying LTP → ATM (clock + recency decide live vs previous close)
         if not config.underlying_symbol:
             feed["underlying_missing"] = True
         else:
             spot_row = _find_quote_row(fast_quotes, config.underlying_symbol)
-            spot_ltp = _pick_float(spot_row or {}, "last_price", "ltp", "last")
+            spot_print = _row_ltp(spot_row, nse_holiday=nse_holiday)
+            spot_ltp = spot_print.price
             if spot_ltp is not None:
                 feed["nifty_ltp"] = spot_ltp
+                if spot_print.stale:
+                    _mark_quote_stale(
+                        feed, reference=spot_print.reference or "previous_close"
+                    )
                 feed["underlying_symbol"] = config.underlying_symbol
                 feed["underlying_label"] = config.underlying_label or config.underlying_symbol
                 atm_strike = _round_strike(spot_ltp, config.strike_step)
                 feed["atm"] = atm_strike
-                vs_prev, vs_open = _quote_change_pcts(spot_row)
-                if vs_prev is not None:
-                    feed["spot_chg"] = vs_prev
-                if vs_open is not None:
-                    feed["spot_vs_open"] = vs_open
-                ohlc = spot_row.get("ohlc") if isinstance(spot_row.get("ohlc"), dict) else {}
-                open_ltp = _pick_float(ohlc, "open") if ohlc else None
-                if open_ltp is not None:
-                    session_key = _session_symbol_key(
-                        "underlying_open", config.underlying_symbol
-                    )
-                    cached_open = await cache.get_session_value(tenant_id, session_key)
-                    if cached_open is None:
-                        await cache.set_session_value(tenant_id, session_key, open_ltp)
-                        cached_open = open_ltp
-                    feed["_session_open_ltp"] = cached_open
-                    feed["nifty_points_move"] = round(spot_ltp - float(cached_open), 2)
+                # Today's close after 15:30 still has valid vs-prev / vs-open %.
+                # Pre-open / weekend / holiday previous_close must not paint those.
+                if spot_print.reference != "previous_close":
+                    vs_prev, vs_open = _quote_change_pcts(spot_row)
+                    if vs_prev is not None:
+                        feed["spot_chg"] = vs_prev
+                    if vs_open is not None:
+                        feed["spot_vs_open"] = vs_open
+                    raw_ohlc = spot_row.get("ohlc") if spot_row else None
+                    ohlc = raw_ohlc if isinstance(raw_ohlc, dict) else {}
+                    open_ltp = _pick_float(ohlc, "open") if ohlc else None
+                    if open_ltp is not None:
+                        session_key = _session_symbol_key(
+                            "underlying_open", config.underlying_symbol
+                        )
+                        cached_open = await cache.get_session_value(tenant_id, session_key)
+                        if cached_open is None:
+                            await cache.set_session_value(tenant_id, session_key, open_ltp)
+                            cached_open = open_ltp
+                        feed["_session_open_ltp"] = cached_open
+                        feed["nifty_points_move"] = round(spot_ltp - float(cached_open), 2)
 
         ce_symbol, pe_symbol = _resolve_option_symbols(config, atm_strike)
         if ce_symbol:
@@ -3285,15 +3597,27 @@ class SignalEngineService:
         if ce_symbol:
             ce_row = _find_quote_row(fast_quotes, ce_symbol)
             if ce_row:
-                feed["ce"] = _pick_float(ce_row, "last_price", "ltp", "last")
-                ce_oi = _pick_float(ce_row, "oi", "open_interest")
+                ce_print = _row_ltp(ce_row, nse_holiday=nse_holiday)
+                if ce_print.price is not None:
+                    feed["ce"] = ce_print.price
+                    if ce_print.stale:
+                        feed["ce_stale"] = True
+                ce_oi = _pick_float(
+                    ce_row, "oi", "open_interest", ohlc_fallback=False
+                )
                 if ce_oi is not None:
                     feed["ce_oi"] = ce_oi
         if pe_symbol:
             pe_row = _find_quote_row(fast_quotes, pe_symbol)
             if pe_row:
-                feed["pe"] = _pick_float(pe_row, "last_price", "ltp", "last")
-                pe_oi = _pick_float(pe_row, "oi", "open_interest")
+                pe_print = _row_ltp(pe_row, nse_holiday=nse_holiday)
+                if pe_print.price is not None:
+                    feed["pe"] = pe_print.price
+                    if pe_print.stale:
+                        feed["pe_stale"] = True
+                pe_oi = _pick_float(
+                    pe_row, "oi", "open_interest", ohlc_fallback=False
+                )
                 if pe_oi is not None:
                     feed["pe_oi"] = pe_oi
 
@@ -3322,11 +3646,19 @@ class SignalEngineService:
                 if ce_symbol and feed.get("ce") is None:
                     ce_row = _find_quote_row(fast_quotes, ce_symbol) or ce_row
                     if ce_row:
-                        feed["ce"] = _pick_float(ce_row, "last_price", "ltp", "last")
+                        ce_print = _row_ltp(ce_row, nse_holiday=nse_holiday)
+                        if ce_print.price is not None:
+                            feed["ce"] = ce_print.price
+                            if ce_print.stale:
+                                feed["ce_stale"] = True
                 if pe_symbol and feed.get("pe") is None:
                     pe_row = _find_quote_row(fast_quotes, pe_symbol) or pe_row
                     if pe_row:
-                        feed["pe"] = _pick_float(pe_row, "last_price", "ltp", "last")
+                        pe_print = _row_ltp(pe_row, nse_holiday=nse_holiday)
+                        if pe_print.price is not None:
+                            feed["pe"] = pe_print.price
+                            if pe_print.stale:
+                                feed["pe_stale"] = True
 
         # FUT OI early — WS/LTP often lacks OI; do not wait behind secondary CE/PE.
         fut_row: dict[str, Any] | None = None
@@ -3334,7 +3666,11 @@ class SignalEngineService:
         if config.nifty_fut_symbol:
             fut_row = _find_quote_row(fast_quotes, config.nifty_fut_symbol)
             oi_val = (
-                _pick_float(fut_row or {}, "oi", "open_interest") if fut_row else None
+                _pick_float(
+                    fut_row or {}, "oi", "open_interest", ohlc_fallback=False
+                )
+                if fut_row
+                else None
             )
             if oi_val is None and _budget(3.0):
                 fut_quotes = await self._fetch_quote(
@@ -3349,7 +3685,9 @@ class SignalEngineService:
                 if fut_row and isinstance(fut_row, dict):
                     fast_quotes[config.nifty_fut_symbol] = fut_row
                 oi_val = (
-                    _pick_float(fut_row or {}, "oi", "open_interest")
+                    _pick_float(
+                        fut_row or {}, "oi", "open_interest", ohlc_fallback=False
+                    )
                     if fut_row
                     else None
                 )
@@ -3359,8 +3697,12 @@ class SignalEngineService:
         # Secondary CE/PE already applied from Tier-B cache at top of _build_feed.
         # Never REST-fan-out here (was the main secondary_ce_pe truncation source).
 
-        ce_vol = _pick_float(ce_row or {}, "volume") if ce_row else None
-        pe_vol = _pick_float(pe_row or {}, "volume") if pe_row else None
+        ce_vol = (
+            _pick_float(ce_row or {}, "volume", ohlc_fallback=False) if ce_row else None
+        )
+        pe_vol = (
+            _pick_float(pe_row or {}, "volume", ohlc_fallback=False) if pe_row else None
+        )
         if ce_vol is not None or pe_vol is not None:
             feed["atm_volume"] = (ce_vol or 0) + (pe_vol or 0)
 
@@ -3368,7 +3710,9 @@ class SignalEngineService:
         if iv_val is not None:
             feed["iv"] = iv_val
         elif ce_row:
-            iv_from_ce = _pick_float(ce_row, "implied_volatility", "iv")
+            iv_from_ce = _pick_float(
+                ce_row, "implied_volatility", "iv", ohlc_fallback=False
+            )
             if iv_from_ce is not None:
                 feed["iv"] = iv_from_ce
         # Ticker packets usually lack IV — REST only in Tier-B background.
@@ -3391,8 +3735,10 @@ class SignalEngineService:
                     ) * 100
                 if prev_oi is None:
                     await cache.set_session_value(tenant_id, baseline_key, oi_val)
-            fut_ltp = _pick_float(fut_row or {}, "last_price", "ltp", "last")
-            basis = _fut_basis_pct(feed.get("nifty_ltp"), fut_ltp)
+            fut_print = _row_ltp(fut_row, nse_holiday=nse_holiday)
+            if fut_print.stale:
+                feed["fut_stale"] = True
+            basis = _fut_basis_pct(feed.get("nifty_ltp"), fut_print.price)
             if basis is not None:
                 feed["fut_basis"] = basis
 
@@ -3493,6 +3839,8 @@ class SignalEngineService:
         if feed.get("ce") is not None and feed.get("pe") is not None:
             feed["straddle"] = round(float(feed["ce"]) + float(feed["pe"]), 2)
         await _apply_straddle_decay(tenant_id, feed)
+        if config.fii_net is not None:
+            feed["fii_net"] = config.fii_net
         _enrich_derived_feed_fields(feed)
 
         if tiers_truncated:
@@ -3560,6 +3908,12 @@ class SignalEngineService:
             ]
         # Explicit flag so the desk badge does not regex-match warning prose.
         payload["live_quote_missing"] = (not config.mock) and feed.get("nifty_ltp") is None
+        if feed.get("quote_stale"):
+            payload["quote_stale"] = True
+            payload["quote_reference"] = feed.get("quote_reference") or "previous_close"
+        for leg_flag in ("ce_stale", "pe_stale", "fut_stale"):
+            if feed.get(leg_flag):
+                payload[leg_flag] = True
         payload["underlying"] = {
             "symbol": config.underlying_symbol,
             "label": config.underlying_label or config.underlying_symbol or "—",

@@ -3680,6 +3680,10 @@ export interface SignalEngineState {
    * on live_warnings for the Running / No quote badge.
    */
   live_quote_missing?: boolean;
+  /** True when the painted LTP is last close / previous session, not a live print. */
+  quote_stale?: boolean;
+  /** previous_close | session_close when quote_stale. */
+  quote_reference?: string | null;
   team_slug: string;
   underlying?: { symbol: string; label: string };
   /** Resolved ATM options from the live feed (may auto-persist into config). */

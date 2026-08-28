@@ -26,6 +26,7 @@ from app.domains.signal_engine import (
     SignalEngineConfig,
     SignalEngineService,
     _compute_state_payload,
+    prefetch_nse_slow,
     seed_engine_enabled_metric,
 )
 from app.domains.signal_engine_constants import (
@@ -46,7 +47,19 @@ _MATRIX_BG_BY_TENANT: dict[str, asyncio.Task[Any]] = {}
 
 def _track_bg_worker(task: asyncio.Task[Any]) -> None:
     _BG_WORKER_TASKS.add(task)
-    task.add_done_callback(_BG_WORKER_TASKS.discard)
+
+    def _done(t: asyncio.Task[Any]) -> None:
+        _BG_WORKER_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.warning(
+                "signal_bg_worker_failed",
+                error=str(exc)[:160],
+            )
+
+    task.add_done_callback(_done)
 
 
 def reset_matrix_bg_for_tests() -> None:
@@ -279,6 +292,13 @@ async def refresh_tier_b_for_tenant(tenant_id: uuid.UUID, *, auth_org_id: str) -
         "medium",
         True,
         ttl_ms=TIER_B_REFRESH_GATE_MS,
+    )
+    # NSE HTTP must not run inside session.begin() (pooled connection + GUC).
+    _track_bg_worker(
+        asyncio.create_task(
+            prefetch_nse_slow(tenant_key),
+            name=f"nse-slow:{tenant_key}",
+        )
     )
     context = TenantContext(
         tenant_id=tenant_id,
