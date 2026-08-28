@@ -50,8 +50,8 @@ export function SignalSetupBar({
   );
 
   const futOptions = useMemo(
-    () => buildFutOptions(config?.fut_symbol),
-    [config?.fut_symbol],
+    () => buildFutOptions(config?.fut_symbol, config?.underlying_symbol),
+    [config?.fut_symbol, config?.underlying_symbol],
   );
 
   const ceValue = sanitizeOptionSymbol(config?.ce_symbol);
