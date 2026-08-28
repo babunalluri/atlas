@@ -1049,8 +1049,8 @@ class OptionsLabService:
         nested = settings.get(OPTIONS_LAB_SETTINGS_KEY)
         lab_dict: dict[str, Any] = dict(nested) if isinstance(nested, dict) else {}
         board = read_desk_board(settings)
-        if board and not str(lab_dict.get("underlying_symbol") or "").strip():
-            lab_dict = merge_board_into_mapping(lab_dict, board, fill_only=True)
+        if board:
+            lab_dict = merge_board_into_mapping(lab_dict, board, fill_only=False)
         if lab_dict:
             return OptionsLabConfig.from_dict(lab_dict)
         return OptionsLabConfig()

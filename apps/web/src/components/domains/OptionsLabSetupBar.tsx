@@ -11,6 +11,7 @@ import {
 } from "@/components/domains/signal-setup-options";
 import { CommonInstrumentSetupBar } from "@/components/domains/CommonInstrumentSetupBar";
 import { publishDeskInstrument } from "@/components/domains/desk-instrument";
+import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
 import type { OptionsLabAdminConfig } from "@/lib/api/admin";
 
 export function OptionsLabSetupBar({
@@ -71,7 +72,21 @@ export function OptionsLabSetupBar({
       config={config}
       presetKey={presetKey}
       presetLocked={presetLocked}
-      onPresetChange={onPresetChange}
+      onPresetChange={(value) => {
+        onPresetChange(value);
+        if (value === CUSTOM_PRESET || readOnly) return;
+        const preset = presets.find((p) => p.symbol === value);
+        if (!preset) return;
+        const fut =
+          preset.fut_symbol?.trim() || suggestFutSymbol(preset.symbol) || "";
+        publishDeskInstrument({
+          underlying_symbol: preset.symbol,
+          underlying_label: preset.label,
+          fut_symbol: fut || undefined,
+          strike_step: preset.strike_step,
+          source: "options-lab",
+        });
+      }}
       onUnderlyingChange={(symbol) => {
         const preset = presets.find((p) => p.symbol === symbol);
         const fut =

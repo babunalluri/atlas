@@ -131,6 +131,17 @@ export function deskInstrumentIdentityKey(
   ].join("|");
 }
 
+/** True when another desk owns a newer/different identity in this tab session. */
+export function deskHandoffOverridesLocal(
+  local: DeskInstrumentIdentity,
+  stored: DeskInstrumentSelection | null = readDeskInstrument(),
+  ownSource?: DeskInstrumentSource,
+): boolean {
+  if (!stored) return false;
+  if (ownSource && stored.source === ownSource) return false;
+  return deskInstrumentIdentityKey(stored) !== deskInstrumentIdentityKey(local);
+}
+
 /** Test helper. */
 export function resetDeskInstrumentForTests(): void {
   try {

@@ -1159,6 +1159,7 @@ export function SignalMetricsPanel({
         return;
       }
       lastDeskInstrumentKey.current = key;
+      setViewInstrument(selection.underlying_symbol);
       applyInstrumentSelection({
         underlying_symbol: selection.underlying_symbol,
         underlying_label: selection.underlying_label,

@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
+import {
+  deskHandoffOverridesLocal,
+  readDeskInstrument,
+} from "@/components/domains/desk-instrument";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import {
   getOptionsLabConfig,
@@ -26,6 +30,32 @@ function withSuggestedFut(config: OptionsLabAdminConfig): OptionsLabAdminConfig 
   const suggested = suggestFutSymbol(config.underlying_symbol);
   if (!suggested) return config;
   return { ...config, fut_symbol: suggested };
+}
+
+/** Prefer Signal / Param Chart handoff over stale ``options_lab`` nest on tab open. */
+function mergeDeskHandoff(config: OptionsLabAdminConfig): OptionsLabAdminConfig {
+  const handoff = readDeskInstrument();
+  if (
+    !deskHandoffOverridesLocal(
+      {
+        underlying_symbol: config.underlying_symbol ?? "",
+        fut_symbol: config.fut_symbol,
+        strike_step: config.strike_step,
+      },
+      handoff,
+      "options-lab",
+    )
+  ) {
+    return config;
+  }
+  if (!handoff) return config;
+  return withSuggestedFut({
+    ...config,
+    underlying_symbol: handoff.underlying_symbol,
+    underlying_label: handoff.underlying_label,
+    fut_symbol: handoff.fut_symbol ?? config.fut_symbol,
+    strike_step: handoff.strike_step ?? config.strike_step,
+  });
 }
 
 export function useOptionsLabConfigAutosave(
@@ -93,7 +123,7 @@ export function useOptionsLabConfigAutosave(
         setError(data.error ?? "Failed to load Options Lab config");
         return;
       }
-      const bootstrapped = withSuggestedFut(data.config);
+      const bootstrapped = mergeDeskHandoff(withSuggestedFut(data.config));
       setPresets(data.presets);
       setConfig(bootstrapped);
       const match = data.presets.find(

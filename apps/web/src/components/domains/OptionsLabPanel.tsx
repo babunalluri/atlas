@@ -409,6 +409,7 @@ export function OptionsLabPanel({
         underlying_label: row.underlying_label,
         fut_symbol: row.fut_symbol || suggestFutSymbol(row.underlying_symbol) || undefined,
         strike_step: strike,
+        source: "options-lab",
       });
       if (opts?.closeOverlay !== false) {
         setOverlay(null);
@@ -482,7 +483,6 @@ export function OptionsLabPanel({
   }, [overlay]);
 
   const streamGeneration = useRef(0);
-  const lastDeskPublishKey = useRef("");
   const lastDeskApplyKey = useRef("");
 
   // Apply Signal / Param Chart picks while Lab is open (same browser session).
@@ -517,43 +517,6 @@ export function OptionsLabPanel({
     if (existing && existing.source !== "options-lab") apply(existing);
     return subscribeDeskInstrument(apply);
   }, [active, configReady, patchConfig, readOnly]);
-
-  // Push Options Lab instrument identity to other desks (not live chain CE/PE).
-  useEffect(() => {
-    if (!active) return;
-    const underlying =
-      snapshot?.underlying_symbol?.trim() ||
-      config?.underlying_symbol?.trim() ||
-      "";
-    if (!underlying) return;
-    const selection = {
-      underlying_symbol: underlying,
-      underlying_label:
-        snapshot?.underlying_label?.trim() ||
-        config?.underlying_label?.trim() ||
-        underlying,
-      fut_symbol:
-        snapshot?.fut_symbol?.trim() ||
-        config?.fut_symbol?.trim() ||
-        undefined,
-      strike_step: snapshot?.strike_step ?? config?.strike_step,
-      source: "options-lab" as const,
-    };
-    const key = deskInstrumentIdentityKey(selection);
-    if (key === lastDeskPublishKey.current) return;
-    lastDeskPublishKey.current = key;
-    publishDeskInstrument(selection);
-  }, [
-    active,
-    config?.fut_symbol,
-    config?.strike_step,
-    config?.underlying_label,
-    config?.underlying_symbol,
-    snapshot?.fut_symbol,
-    snapshot?.strike_step,
-    snapshot?.underlying_label,
-    snapshot?.underlying_symbol,
-  ]);
 
   useEffect(() => {
     if (!active || !isLoaded || !isSignedIn || !configReady) return;

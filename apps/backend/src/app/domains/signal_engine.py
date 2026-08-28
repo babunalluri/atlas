@@ -2394,8 +2394,14 @@ class SignalEngineService:
                 settings_raw = await self._tool_settings(tool)
             except Exception:  # noqa: BLE001
                 settings_raw = {}
+        from app.domains.desk_instrument import merge_desk_instrument_into_signal
+
+        config_dict = merge_desk_instrument_into_signal(
+            config.to_admin_dict(),
+            settings_raw,
+        )
         return {
-            "config": config.to_admin_dict(),
+            "config": config_dict,
             "presets": presets,
             "pinned_instruments": pinned_instruments(settings_raw),
             "equity_source": equity_meta.get("source"),

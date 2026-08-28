@@ -60,7 +60,7 @@ Empty `underlying_symbol` is **not** written (guard in `desk_instrument_tool_pat
 |------|----------|
 | **Options Lab** | If `options_lab.underlying_symbol` is **empty**, fill from board (`fill_only=True`). Existing Lab underlying is kept (Signal NIFTY + Lab SENSEX can coexist). |
 | **Param Chart** | Board **wins** over nested `param_chart` instrument fields when board has an underlying. |
-| **Signal** | Uses its own saved config; does **not** read the board on cold start (Signal remains the primary owner). |
+| **Signal** | Board **wins** over stale signal nest on GET (one instrument per desk). Same-tab handoff via `sessionStorage`. |
 
 ### Lab chain seed from Signal (Live only)
 
@@ -81,7 +81,7 @@ Each desk **publishes** on instrument picks and **subscribes** to others (skips 
 |-------|----------------|--------------|
 | Signal | Always (desk tab hidden OK) | Preset/screener, custom underlying, setup bar |
 | Param Chart | Always (hidden OK) | Underlying `<select>` |
-| Options Lab | **Only when Lab tab open** | Setup bar underlying (identity only) |
+| Options Lab | **Only when Lab tab open** | Setup bar / screener underlying pick (not on passive tab open) |
 
 **Note:** Lab does **not** publish live chain CE/PE — ATM rolls must not rewrite Param Chart month packs.
 

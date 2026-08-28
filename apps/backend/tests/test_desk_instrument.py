@@ -9,6 +9,7 @@ from app.domains.desk_instrument import (
     desk_instrument_tool_patch,
     merge_board_into_mapping,
     merge_desk_instrument_into_chart,
+    merge_desk_instrument_into_signal,
     read_desk_board,
 )
 from app.domains.param_chart_constants import PARAM_CHART_SETTINGS_KEY
@@ -80,6 +81,31 @@ def test_merge_desk_instrument_into_chart_prefers_board() -> None:
     assert merged["underlying_symbol"] == "NSE:NIFTY 50"
     assert merged["ce_symbol"] == "NFO:NIFTY26AUG24000CE"
     assert merged["year"] == 2026
+
+
+def test_merge_desk_instrument_into_signal_prefers_board() -> None:
+    merged = merge_desk_instrument_into_signal(
+        {
+            "underlying_symbol": "NSE:NIFTY 50",
+            "underlying_label": "NIFTY",
+            "fut_symbol": "NFO:NIFTY26SEPFUT",
+            "strike_step": 50,
+            "ce_symbol": "NFO:NIFTY26SEP24500CE",
+            "pe_symbol": "NFO:NIFTY26SEP24500PE",
+        },
+        {
+            DESK_INSTRUMENT_SETTINGS_KEY: {
+                "underlying_symbol": "BSE:SENSEX",
+                "underlying_label": "SENSEX",
+                "fut_symbol": "BFO:SENSEX26SEPFUT",
+                "strike_step": 100,
+            }
+        },
+    )
+    assert merged["underlying_symbol"] == "BSE:SENSEX"
+    assert merged["fut_symbol"] == "BFO:SENSEX26SEPFUT"
+    assert merged["ce_symbol"] == ""
+    assert merged["pe_symbol"] == ""
 
 
 def test_board_changed_detects_strike_step() -> None:

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  deskHandoffOverridesLocal,
   deskInstrumentIdentityKey,
   deskInstrumentKey,
   publishDeskInstrument,
@@ -71,5 +72,48 @@ describe("desk-instrument", () => {
     expect(deskInstrumentKey({ ...base, ce_symbol: "NFO:X", pe_symbol: "NFO:Y" })).not.toBe(
       deskInstrumentKey(base),
     );
+  });
+
+  it("detects when session handoff overrides local Lab config", () => {
+    publishDeskInstrument({
+      underlying_symbol: "BSE:SENSEX",
+      underlying_label: "SENSEX",
+      fut_symbol: "BFO:SENSEX26SEPFUT",
+      strike_step: 100,
+      source: "signal",
+    });
+    expect(
+      deskHandoffOverridesLocal(
+        {
+          underlying_symbol: "NSE:NIFTY 50",
+          fut_symbol: "NFO:NIFTY26SEPFUT",
+          strike_step: 50,
+        },
+        undefined,
+        "options-lab",
+      ),
+    ).toBe(true);
+    expect(
+      deskHandoffOverridesLocal(
+        {
+          underlying_symbol: "BSE:SENSEX",
+          fut_symbol: "BFO:SENSEX26SEPFUT",
+          strike_step: 100,
+        },
+        undefined,
+        "options-lab",
+      ),
+    ).toBe(false);
+    expect(
+      deskHandoffOverridesLocal(
+        {
+          underlying_symbol: "NSE:NIFTY 50",
+          fut_symbol: "NFO:NIFTY26SEPFUT",
+          strike_step: 50,
+        },
+        undefined,
+        "signal",
+      ),
+    ).toBe(false);
   });
 });

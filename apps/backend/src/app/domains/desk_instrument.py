@@ -170,6 +170,25 @@ def merge_desk_instrument_into_chart(settings: dict[str, Any] | None) -> dict[st
     return merged
 
 
+def merge_desk_instrument_into_signal(
+    config: dict[str, Any],
+    settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Board wins over stale signal nest — one instrument per desk session."""
+    desk = read_desk_board(settings)
+    if not desk:
+        return config
+    prev_under = str(config.get("underlying_symbol") or "").strip()
+    merged = merge_board_into_mapping(config, desk, fill_only=False)
+    new_under = str(merged.get("underlying_symbol") or "").strip()
+    if new_under and new_under != prev_under:
+        if not str(desk.get("ce_symbol") or "").strip():
+            merged["ce_symbol"] = ""
+        if not str(desk.get("pe_symbol") or "").strip():
+            merged["pe_symbol"] = ""
+    return merged
+
+
 def patch_touches_identity(patch: dict[str, Any]) -> bool:
     """True when a desk config PATCH may update the shared board."""
     identity_patch_keys = set(IDENTITY_FIELDS) - {"atm"}

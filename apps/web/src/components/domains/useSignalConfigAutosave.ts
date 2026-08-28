@@ -4,6 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { CUSTOM_PRESET } from "@/components/domains/signal-config-constants";
 import {
+  deskHandoffOverridesLocal,
+  readDeskInstrument,
+} from "@/components/domains/desk-instrument";
+import {
   mergeResolvedOptionSymbols,
   signalConfigSnapshot,
 } from "@/components/domains/signal-resolved-options";
@@ -18,6 +22,48 @@ import {
 const SAVE_DEBOUNCE_MS = 650;
 
 export type SignalConfigSaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
+
+function withSuggestedFut(config: SignalEngineAdminConfig): SignalEngineAdminConfig {
+  if (config.fut_symbol?.trim() || !config.underlying_symbol?.trim()) {
+    return config;
+  }
+  const suggested = suggestFutSymbol(config.underlying_symbol);
+  if (!suggested) return config;
+  return { ...config, fut_symbol: suggested };
+}
+
+/** Prefer same-tab handoff from Lab / Param Chart over stale signal nest on load. */
+function mergeDeskHandoff(config: SignalEngineAdminConfig): SignalEngineAdminConfig {
+  const handoff = readDeskInstrument();
+  if (
+    !deskHandoffOverridesLocal(
+      {
+        underlying_symbol: config.underlying_symbol ?? "",
+        fut_symbol: config.fut_symbol,
+        strike_step: config.strike_step,
+      },
+      handoff,
+      "signal",
+    )
+  ) {
+    return config;
+  }
+  if (!handoff) return config;
+  const clearOptions = !handoff.ce_symbol && !handoff.pe_symbol;
+  return withSuggestedFut({
+    ...config,
+    underlying_symbol: handoff.underlying_symbol,
+    underlying_label: handoff.underlying_label,
+    fut_symbol: handoff.fut_symbol ?? config.fut_symbol,
+    strike_step: handoff.strike_step ?? config.strike_step,
+    ...(clearOptions
+      ? { ce_symbol: "", pe_symbol: "" }
+      : {
+          ...(handoff.ce_symbol ? { ce_symbol: handoff.ce_symbol } : {}),
+          ...(handoff.pe_symbol ? { pe_symbol: handoff.pe_symbol } : {}),
+        }),
+  });
+}
 
 /** Fields autosave may PATCH. Never include engine_enabled — Start/Stop only. */
 function diffConfigPatch(
@@ -129,20 +175,30 @@ export function useSignalConfigAutosave(
       const data = await getSignalConfig(token);
       setPresets(data.presets);
       setPinnedInstruments(data.pinned_instruments ?? []);
-      setConfig(data.config);
-      lastSavedRef.current = signalConfigSnapshot(data.config);
+      const bootstrapped = mergeDeskHandoff(withSuggestedFut(data.config));
+      const bootSnapshot = signalConfigSnapshot(bootstrapped);
+      const serverSnapshot = signalConfigSnapshot(data.config);
+      const needsPersist = bootSnapshot !== serverSnapshot;
+      if (needsPersist) {
+        // Block scheduleSave from duplicating the bootstrap PATCH.
+        lastSavedRef.current = bootSnapshot;
+        void persist(bootstrapped, immediateEpochRef.current);
+      } else {
+        lastSavedRef.current = serverSnapshot;
+        setSaveStatus("idle");
+      }
+      setConfig(bootstrapped);
       const match = data.presets.find(
-        (p) => p.symbol === data.config.underlying_symbol,
+        (p) => p.symbol === bootstrapped.underlying_symbol,
       );
       setPresetKey(match ? match.symbol : CUSTOM_PRESET);
-      setSaveStatus("idle");
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load config");
     } finally {
       setLoading(false);
     }
-  }, [getAccessToken]);
+  }, [getAccessToken, persist]);
 
   useEffect(() => {
     if (!enabled) return;
