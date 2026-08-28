@@ -152,7 +152,20 @@ async def test_self_serve_provisions_stock_broker_domain(domains_db):
                 )
             )
         ).all()
-        assert len(assignments) == 4
+        assert len(assignments) == 5
+        assigned_ids = [row.team_config_id for row in assignments]
+        assigned_teams = (
+            await session.scalars(
+                select(TeamConfig).where(TeamConfig.id.in_(assigned_ids))
+            )
+        ).all()
+        assert {row.slug for row in assigned_teams} == {
+            "signals-ops",
+            "learning",
+            "paper-trading",
+            "live-trading",
+            "research",
+        }
 
 
 @pytest.mark.asyncio
@@ -228,6 +241,7 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
         assert admin_desk.status_code == 200, admin_desk.text
         desk_body = admin_desk.json()
         assert [row["slug"] for row in desk_body["chat_targets"]] == [
+            "signals-ops",
             "learning",
             "paper-trading",
             "live-trading",
@@ -683,6 +697,7 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
         admin_desk = await client.get("/admin/domains/desk", headers=admin_headers)
         assert admin_desk.status_code == 200, admin_desk.text
         assert [row["slug"] for row in admin_desk.json()["chat_targets"]] == [
+            "signals-ops",
             "learning",
             "paper-trading",
             "live-trading",
@@ -744,6 +759,7 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
         desk = await client.get("/admin/domains/desk", headers=admin_headers)
         assert desk.status_code == 200, desk.text
         assert [row["slug"] for row in desk.json()["chat_targets"]] == [
+            "signals-ops",
             "learning",
             "paper-trading",
             "research",

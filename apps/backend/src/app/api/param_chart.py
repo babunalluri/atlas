@@ -76,12 +76,16 @@ async def get_param_chart_month(
     session: TenantSession,
     year: int | None = Query(None, ge=2000, le=2100),
     month: int | None = Query(None, ge=1, le=12),
+    interval: str | None = Query(None),
     refresh: bool = Query(False),
+    build_missing: bool = Query(True),
 ) -> dict[str, Any]:
     return await ParamChartService(session, context).month_state(
         year=year,
         month=month,
+        interval=interval,
         force_refresh=refresh,
+        build_missing=build_missing,
     )
 
 

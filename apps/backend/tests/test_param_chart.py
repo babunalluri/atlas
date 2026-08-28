@@ -429,6 +429,76 @@ async def test_param_chart_clears_strike_on_underlying_change(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_interval_only_patch_keeps_cached_month_pack(monkeypatch) -> None:
+    """5m ↔ 15m must reuse the destination Redis pack, not rebuild it."""
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.db.models import Role
+    from app.domains.param_chart import ParamChartService
+    from app.domains.param_chart_constants import PARAM_CHART_SETTINGS_KEY
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    svc = ParamChartService(session, context)
+    deleted: list[str] = []
+
+    async def _settings(_tool):
+        return {
+            PARAM_CHART_SETTINGS_KEY: {
+                "underlying_symbol": "NSE:NIFTY 50",
+                "underlying_label": "NIFTY",
+                "fut_symbol": "NFO:NIFTY26SEPFUT",
+                "strike_step": 50,
+                "strike": 24100,
+                "ce_symbol": "NFO:NIFTY26SEP24100CE",
+                "pe_symbol": "NFO:NIFTY26SEP24100PE",
+                "year": 2026,
+                "month": 8,
+                "interval": "5m",
+            }
+        }
+
+    async def _patch(_tool, patch):
+        return patch
+
+    async def _delete_period(_tenant_id, *, year, month):
+        del _tenant_id
+        deleted.append(f"{year}-{month:02d}")
+
+    tool = MagicMock()
+    monkeypatch.setattr(svc.engine, "_signal_engine_tool", AsyncMock(return_value=tool))
+    monkeypatch.setattr(svc.engine, "_tool_settings", _settings)
+    monkeypatch.setattr(svc.engine, "_patch_tool_settings", _patch)
+    monkeypatch.setattr(svc.engine, "_load_setup", AsyncMock(return_value=(None, True, True)))
+    monkeypatch.setattr(
+        svc,
+        "get_admin_config",
+        AsyncMock(return_value={"ok": True, "config": {}}),
+    )
+    monkeypatch.setattr(
+        "app.domains.param_chart.pc_cache.delete_month_packs_for_period",
+        _delete_period,
+    )
+
+    result = await svc.update_admin_config({"interval": "15m"})
+    assert result["ok"] is True
+    assert deleted == []
+
+    result = await svc.update_admin_config({"strike": 24150})
+    assert result["ok"] is True
+    assert deleted == ["2026-08"]
+
+
+@pytest.mark.asyncio
 async def test_candle_dump_local_roundtrip(tmp_path, monkeypatch) -> None:
     from app.domains import param_chart_candle_store as store
 

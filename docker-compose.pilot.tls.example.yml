@@ -1,0 +1,52 @@
+# Optional TLS overlay for the OCI pilot VM (requires DNS + ports 80/443).
+#
+# Usage (on the VM, after editing Caddyfile + URLs):
+#   docker compose -f docker-compose.yml -f docker-compose.pilot.yml \
+#     -f docker-compose.pilot.tls.yml up -d --build caddy web backend keycloak
+#
+# See docs/oci-pilot-tls.md
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/pilot/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+
+  backend:
+    environment:
+      CORS_ORIGINS: https://pilot.example.com
+      APP_PUBLIC_URL: https://pilot.example.com
+
+  keycloak:
+    environment:
+      KC_HOSTNAME: https://auth.pilot.example.com
+      KC_HOSTNAME_STRICT: "true"
+      KC_PROXY_HEADERS: xforwarded
+
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_AGENTOS_URL: https://pilot.example.com
+        NEXT_PUBLIC_APP_URL: https://pilot.example.com
+        NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: https://auth.pilot.example.com/realms/atlas
+    environment:
+      NEXT_PUBLIC_AGENTOS_URL: https://pilot.example.com
+      NEXT_PUBLIC_APP_URL: https://pilot.example.com
+      NEXT_PUBLIC_AUTH_KEYCLOAK_ISSUER: https://auth.pilot.example.com/realms/atlas
+      AUTH_URL: https://pilot.example.com
+      AUTH_KEYCLOAK_ISSUER: https://auth.pilot.example.com/realms/atlas
+
+volumes:
+  caddy_data:
+  caddy_config:

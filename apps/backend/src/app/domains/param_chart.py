@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import calendar
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -974,27 +974,25 @@ class ParamChartService:
         # Nested param_chart lives inside the signal setup memo — drop it so the
         # next _read_config / _load_setup sees the patch (Fix 4 / memo path).
         await signal_cache.delete_metric(_tenant_key(self.context), "setup")
-        # Only invalidate Redis month pack when candle-affecting fields change.
-        # Candle OHLC itself stays on disk (OCI/S3 dump) and is reused — we do
-        # NOT re-fetch Kite for past months, and current month at most hourly.
-        candle_affecting = (
+        # Interval packs are keyed separately. Switching 5m ↔ 15m must not
+        # drop the destination Redis pack or the UI waits on a rebuild.
+        # Strike / month / underlying still invalidate the pack we are about
+        # to load (dump on disk is reused; Redis is the hot path).
+        candle_identity = (
             "year",
             "month",
-            "interval",
             "strike",
             "underlying_symbol",
             "fut_symbol",
             "ce_symbol",
             "pe_symbol",
         )
-        if any(k in patch for k in candle_affecting):
+        if any(k in patch for k in candle_identity):
             tenant_id = _tenant_key(self.context)
-            # Delete — do NOT write an empty stale pack (SSE would rebuild every 500ms).
-            await pc_cache.delete_month_pack(
-                tenant_id,
-                year=year,
-                month=month,
-                interval=interval,
+            # Strike / month / underlying invalidate every interval pack for
+            # this period — interval is keyed separately but shares OHLC body.
+            await pc_cache.delete_month_packs_for_period(
+                tenant_id, year=year, month=month
             )
         return {"ok": True, **await self.get_admin_config()}
 
@@ -1632,16 +1630,20 @@ class ParamChartService:
         *,
         year: int | None = None,
         month: int | None = None,
+        interval: str | None = None,
         force_refresh: bool = False,
         build_missing: bool = True,
         persist_metrics: bool = True,
     ) -> dict[str, Any]:
         cfg = await self._read_config()
+        saved_cfg = cfg
         y, m = cfg.resolved_year_month()
         if year:
             y = year
         if month:
             m = month
+        if interval:
+            cfg = replace(cfg, interval=_normalize_interval(interval))
         cfg = await self._heal_option_symbols_for_month(cfg, year=y, month=m)
         pack = await self._ensure_month_skeleton(
             cfg,
@@ -1649,6 +1651,9 @@ class ParamChartService:
             month=m,
             force_refresh=force_refresh,
             build_missing=build_missing,
+        )
+        admin_cfg = (
+            saved_cfg.to_admin_dict() if interval else cfg.to_admin_dict()
         )
         # Soft/building stubs must not fabricate a lone "today" bar — SSE would
         # otherwise replace a full intraday hist with one empty row.
@@ -1681,7 +1686,7 @@ class ParamChartService:
                 "kite_live": live.get("kite_live") or {"source": "book", "error": None},
                 "fetched_at": int(time.time()),
                 "stream_interval_ms": STREAM_INTERVAL_MS,
-                "config": cfg.to_admin_dict(),
+                "config": admin_cfg,
                 "shared_metrics": shared_metric_defs(),
                 "shared_categories": shared_categories(),
             }
@@ -1702,7 +1707,7 @@ class ParamChartService:
         return {
             **merged,
             "ok": True,
-            "config": cfg.to_admin_dict(),
+            "config": admin_cfg,
             "shared_metrics": shared_metric_defs(),
             "shared_categories": shared_categories(),
             "data_source": "kite",

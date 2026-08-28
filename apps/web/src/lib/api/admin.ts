@@ -3884,12 +3884,20 @@ export async function patchParamChartConfig(
 
 export async function getParamChartMonth(
   accessToken: string,
-  opts?: { year?: number; month?: number; refresh?: boolean },
+  opts?: {
+    year?: number;
+    month?: number;
+    interval?: string;
+    refresh?: boolean;
+    buildMissing?: boolean;
+  },
 ): Promise<ParamChartMonthSnapshot> {
   const params = new URLSearchParams();
   if (opts?.year != null) params.set("year", String(opts.year));
   if (opts?.month != null) params.set("month", String(opts.month));
+  if (opts?.interval) params.set("interval", opts.interval);
   if (opts?.refresh) params.set("refresh", "true");
+  if (opts?.buildMissing === false) params.set("build_missing", "false");
   const qs = params.toString();
   return apiFetch<ParamChartMonthSnapshot>(
     `/admin/param-chart/month${qs ? `?${qs}` : ""}`,

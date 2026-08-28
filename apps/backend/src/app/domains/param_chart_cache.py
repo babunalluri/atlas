@@ -91,6 +91,18 @@ async def delete_month_pack(
             logger.warning("param_chart_pack_delete_failed", tenant_id=tenant_id)
 
 
+async def delete_month_packs_for_period(
+    tenant_id: str, *, year: int, month: int
+) -> None:
+    """Drop every interval pack for a calendar month (strike/symbol changes)."""
+    from app.domains.param_chart_constants import PARAM_CHART_INTERVAL_IDS
+
+    for interval in PARAM_CHART_INTERVAL_IDS:
+        await delete_month_pack(
+            tenant_id, year=year, month=month, interval=interval
+        )
+
+
 async def try_rebuild_lock(
     tenant_id: str,
     *,

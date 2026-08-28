@@ -1646,6 +1646,10 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   const streamAbort = useRef<AbortController | null>(null);
   /** Ignore SSE frames until month pack matches this interval. */
   const pendingIntervalRef = useRef<string | null>(null);
+  const [packTargetInterval, setPackTargetInterval] = useState<string | null>(
+    null,
+  );
+  const prefetchedIntervals = useRef(new Set<string>());
 
   useEffect(() => {
     setCustomPresets(loadCustomPresets());
@@ -1670,6 +1674,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     }
     if (pending && snapIv === pending) {
       pendingIntervalRef.current = null;
+      setPackTargetInterval(null);
     }
 
     if (snap.stream_patch) {
@@ -1739,6 +1744,29 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     [],
   );
 
+  const prefetchIntervalPack = useCallback(
+    async (interval: string) => {
+      if (!config || !isLoaded || !isSignedIn || !active) return;
+      if ((config.interval || "1D") === interval) return;
+      if (!["1m", "5m", "15m", "1H"].includes(interval)) return;
+      if (prefetchedIntervals.current.has(interval)) return;
+      prefetchedIntervals.current.add(interval);
+      try {
+        const token = await getAccessToken();
+        await getParamChartMonth(token, {
+          year: config.year,
+          month: config.month,
+          interval,
+          refresh: false,
+          buildMissing: false,
+        });
+      } catch {
+        prefetchedIntervals.current.delete(interval);
+      }
+    },
+    [active, config, getAccessToken, isLoaded, isSignedIn],
+  );
+
   const refresh = useCallback(
     async (opts?: { force?: boolean }) => {
       if (!isLoaded || !isSignedIn || !active) return;
@@ -1780,6 +1808,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       // Optimistic — interval buttons must flip immediately (1W/1M hist is slow).
       if (patch.interval) {
         pendingIntervalRef.current = String(patch.interval);
+        setPackTargetInterval(String(patch.interval));
       }
       setConfig((prev) => (prev ? { ...prev, ...patch } : prev));
       setSaving(true);
@@ -1789,6 +1818,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         const res = await patchParamChartConfig(token, patch);
         if (!res.ok) {
           pendingIntervalRef.current = null;
+          setPackTargetInterval(null);
           setError(res.error || "Config save failed");
           return;
         }
@@ -1816,6 +1846,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         }
       } catch (err) {
         pendingIntervalRef.current = null;
+        setPackTargetInterval(null);
         setError(err instanceof Error ? err.message : "Config save failed");
       } finally {
         setSaving(false);
@@ -1892,6 +1923,24 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       null
     );
   }, [month, selectedDate]);
+
+  const packBuilding =
+    loading ||
+    Boolean(month?.building) ||
+    packTargetInterval != null;
+
+  const chartInterval = useMemo(() => {
+    const target = config?.interval || month?.interval || "1D";
+    if (
+      packBuilding &&
+      month?.days?.length &&
+      month.interval &&
+      month.interval !== target
+    ) {
+      return month.interval;
+    }
+    return target;
+  }, [config?.interval, month?.days?.length, month?.interval, packBuilding]);
 
   const overlayLabels = useMemo(
     () => overlaySeries.map((id) => seriesLabel(id, sharedMetrics)),
@@ -2101,6 +2150,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
                   if ((config?.interval || "1D") === opt.id) return;
                   void patchConfig({ interval: opt.id });
                 }}
+                onMouseEnter={() => void prefetchIntervalPack(opt.id)}
                 className={cn(
                   "rounded px-2.5 py-1 font-mono text-xs font-semibold transition",
                   active
@@ -2215,12 +2265,18 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
                     ? `${config.year} · ${config.interval || "1D"}`
                     : `${MONTH_LABELS[(config.month || 1) - 1]} ${config.year} · ${config.interval || "1D"}`
                   : ""}
-                {loading || month?.building ? (
+                {packBuilding ? (
                   <span className="ml-2 text-xs font-normal text-slate-muted">
-                    {(config?.interval === "1m" || config?.interval === "5m") &&
-                    (loading || month?.building)
-                      ? "(first intraday dump can take ~15–45s — then reused)"
-                      : "(building chart…)"}
+                    {packTargetInterval &&
+                    month?.interval &&
+                    packTargetInterval !== month.interval
+                      ? `(building ${packTargetInterval} — showing ${month.interval} until ready)`
+                      : packTargetInterval === "1m" ||
+                          packTargetInterval === "5m" ||
+                          config?.interval === "1m" ||
+                          config?.interval === "5m"
+                        ? "(first intraday dump can take ~15–45s — then reused)"
+                        : "(building chart…)"}
                   </span>
                 ) : null}
               </h2>
@@ -2349,25 +2405,34 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
                 })}
               </div>
             ) : null}
-            <DualAxisMonthChart
-              days={month?.days ?? []}
-              selectedDate={selectedDate}
-              onSelect={setSelectedDate}
-              primaryId="close"
-              overlayIds={overlaySeries}
-              overlayLabels={overlayLabels}
-              interval={config?.interval || month?.interval || "1D"}
-              kiteErrors={month?.kite?.errors}
-              kiteLiveError={month?.kite_live?.error}
-              chartStyle={chartStyle}
-              histPreference={histPreference}
-              showSpotPct={showSpotPct}
-              metricsByDay={month?.metrics_by_day}
-              liveMetrics={month?.live_metrics}
-              today={month?.today}
-              year={config?.year ?? month?.year}
-              month={config?.month ?? month?.month}
-            />
+            <div className="relative flex min-h-0 flex-1 flex-col">
+              <DualAxisMonthChart
+                days={month?.days ?? []}
+                selectedDate={selectedDate}
+                onSelect={setSelectedDate}
+                primaryId="close"
+                overlayIds={overlaySeries}
+                overlayLabels={overlayLabels}
+                interval={chartInterval}
+                kiteErrors={month?.kite?.errors}
+                kiteLiveError={month?.kite_live?.error}
+                chartStyle={chartStyle}
+                histPreference={histPreference}
+                showSpotPct={showSpotPct}
+                metricsByDay={month?.metrics_by_day}
+                liveMetrics={month?.live_metrics}
+                today={month?.today}
+                year={config?.year ?? month?.year}
+                month={config?.month ?? month?.month}
+              />
+              {packBuilding && packTargetInterval ? (
+                <div className="pointer-events-none absolute inset-0 flex items-start justify-end p-2">
+                  <span className="rounded-md border border-line/80 bg-canvas/90 px-2 py-1 text-[10px] font-semibold text-slate-muted shadow-sm backdrop-blur-sm">
+                    Building {packTargetInterval}…
+                  </span>
+                </div>
+              ) : null}
+            </div>
             {(() => {
               const days = month?.days ?? [];
               const wantsPremium = overlaySeries.some(

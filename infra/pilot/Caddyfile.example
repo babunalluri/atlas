@@ -1,0 +1,12 @@
+# Replace pilot.example.com / auth.pilot.example.com with your DNS names.
+{
+	email you@example.com
+}
+
+pilot.example.com {
+	reverse_proxy web:3000
+}
+
+auth.pilot.example.com {
+	reverse_proxy keycloak:8080
+}
