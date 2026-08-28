@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 
 import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
@@ -15,7 +16,22 @@ import { cn } from "@/lib/utils";
 const CHAT_COLLAPSED_KEY = "atlas-desk-chat-collapsed";
 const DESK_MAIN_TAB_KEY = "atlas-desk-main-tab";
 
-type DeskMainTab = "signals" | "param-chart";
+const OptionsLabPanel = dynamic(
+  () =>
+    import("@/components/domains/OptionsLabPanel").then(
+      (module) => module.OptionsLabPanel,
+    ),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex flex-1 items-center justify-center rounded-lg border border-line bg-canvas/40 px-6 py-12 text-sm text-slate-muted">
+        Loading Options Lab…
+      </div>
+    ),
+  },
+);
+
+type DeskMainTab = "signals" | "param-chart" | "options-lab";
 
 function useDeskMainTab() {
   const [tab, setTabState] = useState<DeskMainTab>("signals");
@@ -23,12 +39,16 @@ function useDeskMainTab() {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(DESK_MAIN_TAB_KEY);
-      if (stored === "signals" || stored === "param-chart") {
+      if (
+        stored === "signals" ||
+        stored === "param-chart" ||
+        stored === "options-lab"
+      ) {
         setTabState(stored);
-      } else if (stored === "options-lab" || stored === "automations") {
-        // Options Lab removed from the pilot desk (sandbox load on 2 OCPU).
-        setTabState("signals");
-        window.localStorage.setItem(DESK_MAIN_TAB_KEY, "signals");
+      } else if (stored === "automations") {
+        // Automations live inside Options Lab (overlay), not a top-level tab.
+        setTabState("options-lab");
+        window.localStorage.setItem(DESK_MAIN_TAB_KEY, "options-lab");
       }
     } catch {
       // private mode / blocked storage
@@ -165,7 +185,7 @@ export function StockBrokerWorkspace({
           <div
             role="tablist"
             aria-label="Trading desk views"
-            className="grid w-full shrink-0 grid-cols-2 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5"
+            className="grid w-full shrink-0 grid-cols-1 gap-0.5 rounded-lg border border-line bg-canvas/70 p-0.5 sm:grid-cols-3"
           >
             {(
               [
@@ -178,6 +198,13 @@ export function StockBrokerWorkspace({
                   id: "param-chart" as const,
                   label: "Param Chart",
                   hint: "Monthly OHLC & shared params",
+                },
+                {
+                  id: "options-lab" as const,
+                  label: "Options Lab",
+                  hint: readOnly
+                    ? "Chain & strategies (view)"
+                    : "Chain, builder & books",
                 },
               ] as const
             ).map(({ id, label, hint }) => {
@@ -236,6 +263,13 @@ export function StockBrokerWorkspace({
           >
             <ParamChartPanel active />
           </div>
+          {/* Mount Options Lab only on its tab (unmount stops SSE / sandbox).
+              Do not keep hidden with active=true — unlike Signal / Param Chart. */}
+          {deskTab === "options-lab" ? (
+            <div className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <OptionsLabPanel active readOnly={readOnly} />
+            </div>
+          ) : null}
         </div>
 
         {customer ? (
