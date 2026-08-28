@@ -154,7 +154,7 @@ function SignedOutLanding({
           )}
         >
           <div className="portal-rise portal-rise-delay-1">
-            <h1 className="max-w-xl font-display text-4xl font-semibold tracking-tight text-ink sm:text-5xl lg:text-[3.35rem] lg:leading-[1.08]">
+            <h1 className="max-w-xl font-display text-3xl font-semibold tracking-tight text-ink">
               {tHome("headline")}
             </h1>
             <p className="mt-5 max-w-lg text-lg leading-relaxed text-slate-muted">

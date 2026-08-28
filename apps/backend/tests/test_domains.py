@@ -21,7 +21,10 @@ from app.db.models import (
 from app.auth.identity_admin import ProvisionedIdentity
 from app.db.repositories import TeamRepository
 from app.domains.access import assign_domain_default_teams
-from app.domains.dashboard import order_desk_chat_targets
+from app.domains.dashboard import (
+    order_admin_desk_chat_targets,
+    order_desk_chat_targets,
+)
 from app.domains.templates import STOCK_BROKER
 from app.domains.types import DOMAIN_DEFAULT_TEAM_SLUGS, STOCK_BROKER_DESK_TEAMS
 from app.main import app
@@ -225,7 +228,6 @@ async def test_domain_dashboard_lists_stock_broker_widgets(domains_db):
         assert admin_desk.status_code == 200, admin_desk.text
         desk_body = admin_desk.json()
         assert [row["slug"] for row in desk_body["chat_targets"]] == [
-            "signals-ops",
             "learning",
             "paper-trading",
             "live-trading",
@@ -357,6 +359,22 @@ def test_desk_snapshot_targets_live_and_paper_teams() -> None:
     assert "get_user_margin" in READ_CAPABILITIES
     assert "list_orders" in READ_CAPABILITIES
     assert "get_holdings" in READ_CAPABILITIES
+
+
+def test_order_admin_desk_chat_targets_assigned_pack_then_extras() -> None:
+    rows = [
+        {"id": "4", "slug": "options-lab", "name": "Options lab", "published": True},
+        {"id": "s", "slug": "signals-ops", "name": "Signal", "published": True},
+        {"id": "6", "slug": "research", "name": "Research", "published": True},
+        {"id": "d", "slug": "draft-desk", "name": "Draft desk", "published": False},
+        {"id": "1", "slug": "learning", "name": "Learning", "published": True},
+    ]
+    assert [row["slug"] for row in order_admin_desk_chat_targets(rows)] == [
+        "signals-ops",
+        "learning",
+        "research",
+        "options-lab",
+    ]
 
 
 def test_order_desk_chat_targets_keeps_pack_order_then_named_extras() -> None:
@@ -662,6 +680,15 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
         assert chat_slugs.isdisjoint(draft_slugs)
         assert all(row["published"] for row in body["chat_targets"])
 
+        admin_desk = await client.get("/admin/domains/desk", headers=admin_headers)
+        assert admin_desk.status_code == 200, admin_desk.text
+        assert [row["slug"] for row in admin_desk.json()["chat_targets"]] == [
+            "learning",
+            "paper-trading",
+            "live-trading",
+            "research",
+        ]
+
         desk = await client.get("/api/desk", headers=admin_headers)
         assert desk.status_code == 200, desk.text
         assert [row["slug"] for row in desk.json()["chat_targets"]] == [
@@ -712,6 +739,18 @@ async def test_admin_desk_chat_only_assigned_published_teams(domains_db):
         ]
         assert "live-trading" not in [
             row["slug"] for row in dashboard.json()["chat_targets"]
+        ]
+
+        desk = await client.get("/admin/domains/desk", headers=admin_headers)
+        assert desk.status_code == 200, desk.text
+        assert [row["slug"] for row in desk.json()["chat_targets"]] == [
+            "learning",
+            "paper-trading",
+            "research",
+            extra_slug,
+        ]
+        assert "live-trading" not in [
+            row["slug"] for row in desk.json()["chat_targets"]
         ]
 
 

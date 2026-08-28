@@ -8,8 +8,7 @@ import { WorkspaceDeskChat } from "@/components/domains/WorkspaceDeskChat";
 import { ParamChartPanel } from "@/components/domains/ParamChartPanel";
 import { SignalMetricsPanel } from "@/components/domains/SignalMetricsPanel";
 import { TradingViewChartWidget } from "@/components/domains/TradingViewChartWidget";
-import { Button } from "@/components/ui/Button";
-import { ChevronLeftIcon, ChevronRightIcon } from "@/components/ui/icons";
+import { ChevronRightIcon } from "@/components/ui/icons";
 import type { DomainDashboard } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
@@ -99,14 +98,12 @@ export function StockBrokerWorkspace({
       {hasChat && chatCollapsed ? (
         <button
           type="button"
-          aria-label="Expand desk chat"
-          title="Expand desk chat"
+          aria-label="Show desk chat"
+          title="Show desk chat"
           onClick={() => setChatCollapsed(false)}
-          className={cn(
-            "flex shrink-0 items-center justify-center gap-2 border-b border-line bg-raised/60 px-3 py-2 text-xs font-medium text-slate-muted transition hover:bg-mist hover:text-ink lg:h-full lg:w-10 lg:flex-col lg:border-b-0 lg:border-r lg:px-0 lg:py-4",
-          )}
+          className="flex shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-canvas/40 px-3 py-2 text-xs font-medium text-slate-muted transition hover:bg-raised/70 hover:text-ink lg:h-full lg:w-9 lg:flex-col lg:border-0 lg:border-r lg:px-0 lg:py-4"
         >
-          <ChevronRightIcon />
+          <ChevronRightIcon className="h-3.5 w-3.5" />
           <span className="lg:[writing-mode:vertical-rl] lg:rotate-180 lg:text-[10px] lg:font-semibold lg:uppercase lg:tracking-[0.14em]">
             Desk chat
           </span>
@@ -115,21 +112,12 @@ export function StockBrokerWorkspace({
 
       {hasChat && !chatCollapsed ? (
         <section className="relative flex min-h-[38vh] min-w-0 flex-1 flex-col border-b border-line lg:h-full lg:min-h-0 lg:min-w-[20rem] lg:max-w-[24rem] lg:flex-none lg:basis-[34%] lg:border-b-0 lg:border-r">
-          <Button
-            type="button"
-            size="icon"
-            variant="secondary"
-            aria-label="Collapse desk chat"
-            title="Collapse desk chat"
-            icon={<ChevronLeftIcon />}
-            onClick={() => setChatCollapsed(true)}
-            className="absolute right-1.5 top-1.5 z-20 h-6 w-6 shadow-sm lg:top-1/2 lg:right-0 lg:h-7 lg:w-7 lg:translate-x-1/2 lg:-translate-y-1/2 lg:rounded-full lg:shadow-md"
-          />
-          <div className="flex min-h-0 flex-1 flex-col pt-8 lg:pt-0">
+          <div className="flex min-h-0 flex-1 flex-col">
             <WorkspaceDeskChat
               targets={data.chat_targets}
               brokerTools={data.broker_tools ?? []}
               allowPreview={!customer}
+              onCollapse={() => setChatCollapsed(true)}
             />
           </div>
         </section>
@@ -143,7 +131,7 @@ export function StockBrokerWorkspace({
 
       <section
         className={cn(
-          "min-h-0 min-w-0 flex-1 overflow-hidden px-5 lg:basis-[66%]",
+          "min-h-0 min-w-0 flex-1 overlay-y-auto px-5 lg:basis-[66%]",
           showPageHeader ? "py-5" : "py-2",
           "flex flex-col",
         )}

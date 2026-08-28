@@ -18,6 +18,7 @@ import {
 } from "@/lib/agentos/client";
 import { DeskChatPills, DeskChatStarters } from "@/components/domains/DeskChat";
 import { useDeskChatDraftOptional } from "@/components/domains/DeskChatDraftContext";
+import { ChevronLeftIcon } from "@/components/ui/icons";
 import type { DomainBrokerTool, DomainChatTarget } from "@/lib/api/admin";
 import type { ChatMessage } from "@/lib/api/types";
 import { useAgentOsToken } from "@/lib/auth/token";
@@ -89,10 +90,12 @@ export function WorkspaceDeskChat({
   targets,
   brokerTools = [],
   allowPreview = true,
+  onCollapse,
 }: {
   targets: DomainChatTarget[];
   brokerTools?: DomainBrokerTool[];
   allowPreview?: boolean;
+  onCollapse?: () => void;
 }) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const deskDraft = useDeskChatDraftOptional();
@@ -325,18 +328,31 @@ export function WorkspaceDeskChat({
 
   return (
     <div id="desk-chat" className="flex h-full min-h-0 flex-col">
-      <header className="shrink-0 border-b border-line px-3 py-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <DeskChatPills
-            targets={targets}
-            selectedId={team?.id}
-            onSelect={setTeamId}
-            compact
-          />
+      <header className="shrink-0 border-b border-line px-2 py-1.5">
+        <div className="flex items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <DeskChatPills
+              targets={targets}
+              selectedId={team?.id}
+              onSelect={setTeamId}
+              compact
+            />
+          </div>
           {team && !team.published ? (
             <span className="shrink-0 text-[10px] font-medium text-amber">
               Preview
             </span>
+          ) : null}
+          {onCollapse ? (
+            <button
+              type="button"
+              onClick={onCollapse}
+              title="Hide desk chat"
+              aria-label="Hide desk chat"
+              className="shrink-0 rounded p-1 text-slate-muted hover:bg-raised/70 hover:text-ink"
+            >
+              <ChevronLeftIcon className="h-3.5 w-3.5" />
+            </button>
           ) : null}
         </div>
       </header>

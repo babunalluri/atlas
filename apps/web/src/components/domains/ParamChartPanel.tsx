@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
-import { RefreshIcon, SaveIcon } from "@/components/ui/icons";
+import {
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  RefreshIcon,
+  SaveIcon,
+} from "@/components/ui/icons";
 import {
   getParamChartConfig,
   getParamChartMonth,
@@ -21,7 +27,6 @@ import { cn } from "@/lib/utils";
 
 import {
   MAX_OVERLAYS,
-  filterByCategory,
   partitionOverlays,
   toggleOverlay,
   type ChartSeriesId,
@@ -164,6 +169,21 @@ function seriesLabel(
 
 type SeriesPoint = { day: ParamChartDay; i: number; v: number };
 
+function isFutureCalendarMonth(
+  year: number | null | undefined,
+  month: number | null | undefined,
+  todayIso?: string | null,
+): boolean {
+  if (year == null || month == null) return false;
+  const raw = String(todayIso || "").slice(0, 10);
+  const now = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? raw
+    : new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+  const ty = Number(now.slice(0, 4));
+  const tm = Number(now.slice(5, 7));
+  return year > ty || (year === ty && month > tm);
+}
+
 function DualAxisMonthChart({
   days,
   selectedDate,
@@ -180,6 +200,8 @@ function DualAxisMonthChart({
   metricsByDay,
   liveMetrics,
   today = null,
+  year,
+  month,
 }: {
   days: ParamChartDay[];
   selectedDate: string | null;
@@ -198,6 +220,8 @@ function DualAxisMonthChart({
   metricsByDay?: Record<string, Record<string, ParamChartMetricValue>>;
   liveMetrics?: Record<string, ParamChartMetricValue>;
   today?: string | null;
+  year?: number | null;
+  month?: number | null;
 }) {
   const metricOpts = {
     metricsByDay,
@@ -306,25 +330,37 @@ function DualAxisMonthChart({
   }
 
   if (!days.length || !primaryPts.length) {
-    const detail = [
-      ...(kiteErrors || []),
+    const future = isFutureCalendarMonth(year, month, today);
+    const period =
+      year && month
+        ? `${MONTH_LABELS[month - 1]} ${year}`
+        : "this month";
+    const tokenish = (kiteErrors || []).filter((e) =>
+      /ce_token_missing|pe_token_missing|ce_symbol_empty|pe_symbol_empty/i.test(
+        String(e),
+      ),
+    );
+    const otherErrors = [
+      ...(kiteErrors || []).filter((e) => !tokenish.includes(e)),
       ...(kiteLiveError ? [kiteLiveError] : []),
-    ]
-      .filter(Boolean)
-      .join(" · ");
+    ].filter(Boolean);
+    const detail = future ? "" : otherErrors.join(" · ");
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-line px-4 text-center text-sm text-slate-muted">
-        <p className="font-medium text-ink">Chart has no series yet</p>
+        <p className="font-medium text-ink">
+          {future ? `${period} hasn’t started` : "Chart has no series yet"}
+        </p>
         <p>
-          No OHLC bars for this month/interval yet (dump miss or empty Kite
-          hist). Past months are stored once and reused.
+          {future
+            ? `No trading days yet in ${period}. Switch to the current month to see candles.`
+            : "No OHLC bars for this month/interval yet (dump miss or empty Kite hist). Past months are stored once and reused."}
         </p>
         {detail ? (
           <p className="max-w-xl font-mono text-[11px] text-rose-600">{detail}</p>
-        ) : (
+        ) : future ? null : (
           <p className="text-xs">
-            Pick a month with trading days (e.g. current month), then click
-            Refresh once to dump candles. After that we read from storage.
+            Pick a month with trading days, then wait for the first dump (or
+            click Refresh). After that we read from storage.
           </p>
         )}
       </div>
@@ -434,11 +470,12 @@ function DualAxisMonthChart({
   const axisH = 16;
   const gap = 6;
   const metricGap = showMetricPane ? 6 : 0;
-  const histH = Math.max(36, Math.min(72, Math.round(h * 0.14)));
-  const metricH = showMetricPane ? Math.max(48, Math.round(h * 0.2)) : 0;
-  const priceH = Math.max(96, h - gap - metricH - metricGap - histH - axisH);
-  const left = 36;
-  const right = hasPriceOverlays ? 36 : 7;
+  const usable = Math.max(1, h - gap - metricGap - axisH);
+  const histH = Math.round(usable * (showMetricPane ? 0.16 : 0.18));
+  const metricH = showMetricPane ? Math.round(usable * 0.22) : 0;
+  const priceH = Math.max(1, usable - histH - metricH);
+  const left = 42;
+  const right = hasPriceOverlays ? 42 : 7;
   const top = 10;
   const priceBottomPad = 6;
   const innerW = w - left - right;
@@ -801,8 +838,9 @@ function DualAxisMonthChart({
                   x={left - 4}
                   y={y + 3}
                   textAnchor="end"
-                  className="fill-rose-500/70"
-                  fontSize={7}
+                  className="fill-rose-500/90"
+                  fontSize={9}
+                  fontWeight={700}
                   fontFamily="ui-monospace, monospace"
                 >
                   {fmtAxis(pVal)}
@@ -812,8 +850,9 @@ function DualAxisMonthChart({
                     x={w - right + 4}
                     y={y + 3}
                     textAnchor="start"
-                    className="fill-sky-500/70"
-                    fontSize={7}
+                    className="fill-sky-500/90"
+                    fontSize={9}
+                    fontWeight={700}
                     fontFamily="ui-monospace, monospace"
                   >
                     {fmtAxis(oVal)}
@@ -890,8 +929,9 @@ function DualAxisMonthChart({
                       x={left - 4}
                       y={y + 3}
                       textAnchor="end"
-                      className="fill-violet-500/80"
-                      fontSize={7}
+                      className="fill-violet-500/90"
+                      fontSize={9}
+                      fontWeight={700}
                       fontFamily="ui-monospace, monospace"
                     >
                       {fmtAxis(mVal)}
@@ -989,7 +1029,7 @@ function DualAxisMonthChart({
                       : fmtAxis(pv);
                     const badgeW = Math.min(
                       left - 4,
-                      Math.max(28, label.length * 5.2 + 6),
+                      Math.max(32, label.length * 6.4 + 8),
                     );
                     const cy = yPrimary(pv);
                     // Nudge badge away from grid tick labels when they collide.
@@ -998,8 +1038,8 @@ function DualAxisMonthChart({
                     );
                     let yAdj = cy;
                     for (const ty of tickYs) {
-                      if (Math.abs(cy - ty) < 9) {
-                        yAdj = cy < ty ? ty - 10 : ty + 10;
+                      if (Math.abs(cy - ty) < 11) {
+                        yAdj = cy < ty ? ty - 12 : ty + 12;
                         break;
                       }
                     }
@@ -1008,9 +1048,9 @@ function DualAxisMonthChart({
                       <>
                         <rect
                           x={2}
-                          y={yAdj - 6}
+                          y={yAdj - 7}
                           width={badgeW}
-                          height={12}
+                          height={14}
                           rx={2}
                           fill="#f43f5e"
                           opacity={0.95}
@@ -1020,7 +1060,8 @@ function DualAxisMonthChart({
                           y={yAdj + 3}
                           textAnchor="end"
                           fill="#fff"
-                          fontSize={7}
+                          fontSize={9}
+                          fontWeight={700}
                           fontFamily="ui-monospace, monospace"
                         >
                           {label}
@@ -1321,35 +1362,79 @@ function DualAxisMonthChart({
 
 function ParamSidebar({
   sharedMetrics,
-  categories,
-  category,
-  onCategory,
   search,
   onSearch,
   selectedSeries,
   onSelectSeries,
   selectedDay,
-  maxOverlays,
   metricsByDay,
   liveMetrics,
   today,
 }: {
   sharedMetrics: ParamChartSharedMetric[];
-  categories: string[];
-  category: string;
-  onCategory: (c: string) => void;
   search: string;
   onSearch: (q: string) => void;
   selectedSeries: ChartSeriesId[];
   onSelectSeries: (id: ChartSeriesId) => void;
   selectedDay: ParamChartDay | null;
-  maxOverlays: number;
   metricsByDay?: Record<string, Record<string, ParamChartMetricValue>>;
   liveMetrics?: Record<string, ParamChartMetricValue>;
   today?: string | null;
 }) {
   const q = search.trim().toLowerCase();
-  const filteredMetrics = filterByCategory(sharedMetrics, category).filter(
+  const searching = Boolean(q);
+  const [paneCollapsed, setPaneCollapsed] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(
+    {},
+  );
+
+  useEffect(() => {
+    try {
+      setPaneCollapsed(
+        window.localStorage.getItem("atlas-param-chart-sidebar-collapsed") ===
+          "1",
+      );
+      const raw = window.localStorage.getItem(
+        "atlas-param-chart-collapsed-groups",
+      );
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        setCollapsedGroups(parsed as Record<string, boolean>);
+      }
+    } catch {
+      // private mode / blocked storage
+    }
+  }, []);
+
+  function setPaneOpen(open: boolean) {
+    setPaneCollapsed(!open);
+    try {
+      window.localStorage.setItem(
+        "atlas-param-chart-sidebar-collapsed",
+        open ? "0" : "1",
+      );
+    } catch {
+      // private mode / blocked storage
+    }
+  }
+
+  function toggleGroup(title: string) {
+    setCollapsedGroups((prev) => {
+      const next = { ...prev, [title]: !prev[title] };
+      try {
+        window.localStorage.setItem(
+          "atlas-param-chart-collapsed-groups",
+          JSON.stringify(next),
+        );
+      } catch {
+        // private mode / blocked storage
+      }
+      return next;
+    });
+  }
+
+  const filteredMetrics = sharedMetrics.filter(
     (m) => {
       if (!q) return true;
       return (
@@ -1381,55 +1466,83 @@ function ParamSidebar({
     for (const [title, items] of byCat) {
       out.push({
         title,
-        items: items.map((m) => {
-          const cat = (m.category || title).trim();
-          const shortCat = (cat.split("&")[0] || cat).trim().split(/\s+/)[0] || cat;
-          return {
-            id: `metric:${m.id}` as ChartSeriesId,
-            label: m.label,
-            meta: `${shortCat} #${m.check_no}`,
-          };
-        }),
+        items: items.map((m) => ({
+          id: `metric:${m.id}` as ChartSeriesId,
+          label: m.label,
+          meta: `#${m.check_no}`,
+        })),
       });
     }
     return out;
   }, [filteredMetrics, q]);
 
+  if (paneCollapsed) {
+    return (
+      <button
+        type="button"
+        onClick={() => setPaneOpen(true)}
+        title="Show parameters"
+        aria-label="Show parameters"
+        className="flex shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-canvas/40 px-3 py-2 text-xs font-medium text-slate-muted transition hover:bg-raised/70 hover:text-ink lg:h-full lg:w-9 lg:flex-col lg:px-0 lg:py-4"
+      >
+        <ChevronRightIcon className="h-3.5 w-3.5" />
+        <span className="lg:[writing-mode:vertical-rl] lg:rotate-180 lg:text-[10px] lg:font-semibold lg:uppercase lg:tracking-[0.14em]">
+          Params
+        </span>
+      </button>
+    );
+  }
+
   return (
     <aside className="flex h-full min-h-0 w-full shrink-0 flex-col rounded-md border border-line bg-canvas/40 lg:max-w-[16.5rem]">
-      <div className="space-y-2 border-b border-line p-2">
+      <div className="flex items-center gap-1 border-b border-line p-1.5">
         <input
           type="search"
           value={search}
           onChange={(e) => onSearch(e.target.value)}
           placeholder="Search parameters…"
-          className="w-full rounded border border-line bg-raised px-2 py-1.5 text-sm"
+          className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1.5 text-sm"
         />
-        <select
-          value={category}
-          onChange={(e) => onCategory(e.target.value)}
-          className="w-full rounded border border-line bg-raised px-2 py-1.5 text-sm"
+        <button
+          type="button"
+          onClick={() => setPaneOpen(false)}
+          title="Hide parameters"
+          aria-label="Hide parameters"
+          className="shrink-0 rounded p-1 text-slate-muted hover:bg-raised/70 hover:text-ink"
         >
-          <option value="">All categories</option>
-          {categories.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <p className="px-0.5 text-[10px] text-slate-muted">
-          Multi-select overlays ({selectedSeries.filter((s) => s !== "close").length}/
-          {maxOverlays}) — price/premium on main pane; checklist params in lower
-          Params pane
-        </p>
+          <ChevronLeftIcon className="h-3.5 w-3.5" />
+        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-1">
-        {groups.map((group) => (
+        {groups.map((group) => {
+          const open = searching || !collapsedGroups[group.title];
+          const selectedInGroup = group.items.filter((item) =>
+            item.id === "close"
+              ? selectedSeries.length === 0
+              : selectedSeries.includes(item.id),
+          ).length;
+          return (
           <div key={group.title} className="mb-2">
-            <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-muted">
-              {group.title}
-            </p>
-            <ul className="space-y-0.5">
+            <button
+              type="button"
+              onClick={() => toggleGroup(group.title)}
+              aria-expanded={open}
+              title={open ? `Collapse ${group.title}` : `Expand ${group.title}`}
+              className="flex w-full items-center gap-1 rounded-md border border-line/70 bg-fog/60 px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide text-ink hover:bg-fog"
+            >
+              {open ? (
+                <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-slate-muted" />
+              ) : (
+                <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 text-slate-muted" />
+              )}
+              <span className="min-w-0 flex-1 truncate">{group.title}</span>
+              <span className="shrink-0 font-mono text-[10px] font-normal tabular-nums text-slate-muted">
+                {selectedInGroup ? `${selectedInGroup}/` : ""}
+                {group.items.length}
+              </span>
+            </button>
+            {open ? (
+            <ul className="ml-3 mt-0.5 space-y-px pl-3">
               {group.items.map((item) => {
                 const selected =
                   item.id === "close"
@@ -1462,10 +1575,10 @@ function ParamSidebar({
                           : item.label
                       }
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition",
+                        "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] leading-snug transition",
                         selected
                           ? "bg-sky-500/15 text-ink ring-1 ring-sky-500/40"
-                          : "text-slate-muted hover:bg-raised/70 hover:text-ink",
+                          : "text-ink/80 hover:bg-raised/70 hover:text-ink",
                       )}
                     >
                       <span
@@ -1497,8 +1610,10 @@ function ParamSidebar({
                 );
               })}
             </ul>
+            ) : null}
           </div>
-        ))}
+          );
+        })}
       </div>
     </aside>
   );
@@ -1511,10 +1626,8 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   const [sharedMetrics, setSharedMetrics] = useState<ParamChartSharedMetric[]>(
     [],
   );
-  const [categories, setCategories] = useState<string[]>([]);
   const [month, setMonth] = useState<ParamChartMonthSnapshot | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [category, setCategory] = useState("");
   const [paramSearch, setParamSearch] = useState("");
   const [overlaySeries, setOverlaySeries] = useState<ChartSeriesId[]>(["total"]);
   const [chartStyle, setChartStyle] = useState<"candle" | "line">("candle");
@@ -1570,7 +1683,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         setDraftEntryCe(String(snap.config.entry_ce_premium ?? ""));
         setDraftEntryPe(String(snap.config.entry_pe_premium ?? ""));
       }
-      // shared_metrics / categories come from REST/config — not every SSE tick.
+      // shared_metrics come from REST/config — not every SSE tick.
       return;
     }
 
@@ -1585,7 +1698,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       setDraftEntryPe(String(snap.config.entry_pe_premium ?? ""));
     }
     if (snap.shared_metrics) setSharedMetrics(snap.shared_metrics);
-    if (snap.shared_categories) setCategories(snap.shared_categories);
     setSelectedDate((prev) => {
       if (prev && snap.days?.some((d) => d.date === prev)) return prev;
       const today = snap.days?.find((d) => d.is_today)?.date;
@@ -1598,22 +1710,31 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       token: string,
       opts: { year?: number; month?: number; refresh?: boolean },
     ) => {
-      const attempts = 45;
-      const delayMs = 1500;
-      let last: ParamChartMonthSnapshot | null = null;
-      for (let i = 0; i < attempts; i++) {
-        const snap = await getParamChartMonth(token, opts);
-        last = snap;
-        if (!snap.ok) return snap;
-        const building =
-          Boolean(snap.building) ||
-          (snap.kite?.errors || []).some((e) =>
-            /pack_building|pack_rebuild_in_progress/i.test(String(e)),
-          );
-        if (!building) return snap;
-        await new Promise((r) => setTimeout(r, delayMs));
+      const snap = await getParamChartMonth(token, opts);
+      if (!snap.ok) return snap;
+      const stillBuilding = (row: ParamChartMonthSnapshot) =>
+        Boolean(row.building) ||
+        (row.kite?.errors || []).some((e) =>
+          /pack_building|pack_rebuild_in_progress/i.test(String(e)),
+        );
+      if (!stillBuilding(snap)) return snap;
+      // Wait for an in-flight dump. Never pass refresh=true on retries —
+      // that would kick another Kite hist pull and trip the 60/min cap.
+      let last = snap;
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 2500));
+        try {
+          last = await getParamChartMonth(token, {
+            year: opts.year,
+            month: opts.month,
+            refresh: false,
+          });
+        } catch {
+          return last;
+        }
+        if (!last.ok || !stillBuilding(last)) return last;
       }
-      return last!;
+      return last;
     },
     [],
   );
@@ -1627,7 +1748,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         const token = await getAccessToken();
         const [cfg, snap] = await Promise.all([
           getParamChartConfig(token),
-          getParamChartMonth(token, { refresh: Boolean(opts?.force) }),
+          loadMonthUntilReady(token, { refresh: Boolean(opts?.force) }),
         ]);
         if (cfg.ok) {
           setConfig(cfg.config);
@@ -1638,7 +1759,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           setDraftEntryPe(String(cfg.config.entry_pe_premium ?? ""));
           setPresets(cfg.presets || []);
           setSharedMetrics(cfg.shared_metrics || []);
-          setCategories(cfg.shared_categories || []);
         } else if (cfg.error) {
           setError(cfg.error);
         }
@@ -1652,7 +1772,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         setLoading(false);
       }
     },
-    [active, applySnapshot, getAccessToken, isLoaded, isSignedIn],
+    [active, applySnapshot, getAccessToken, isLoaded, isSignedIn, loadMonthUntilReady],
   );
 
   const patchConfig = useCallback(
@@ -1680,7 +1800,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         setDraftEntryPe(String(res.config.entry_pe_premium ?? ""));
         setPresets(res.presets || []);
         setSharedMetrics(res.shared_metrics || []);
-        setCategories(res.shared_categories || []);
         // Unblock controls before the (possibly year-long) month rebuild.
         setSaving(false);
         setLoading(true);
@@ -2075,22 +2194,18 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       <div className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
         <ParamSidebar
           sharedMetrics={sharedMetrics}
-          categories={categories}
-          category={category}
-          onCategory={setCategory}
           search={paramSearch}
           onSearch={setParamSearch}
           selectedSeries={overlaySeries}
           onSelectSeries={selectSeries}
           selectedDay={selectedDay}
-          maxOverlays={MAX_OVERLAYS}
           metricsByDay={month?.metrics_by_day}
           liveMetrics={month?.live_metrics}
           today={month?.today}
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-raised/40 p-2">
+          <div className="flex min-h-[22rem] flex-1 flex-col overflow-hidden rounded-md border border-line bg-raised/40 p-2">
             <div className="mb-1.5 flex shrink-0 flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold tracking-tight">
                 {config?.underlying_label ?? "Param Chart"} ·{" "}
@@ -2250,6 +2365,8 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
               metricsByDay={month?.metrics_by_day}
               liveMetrics={month?.live_metrics}
               today={month?.today}
+              year={config?.year ?? month?.year}
+              month={config?.month ?? month?.month}
             />
             {(() => {
               const days = month?.days ?? [];
@@ -2262,7 +2379,20 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
               const tokenMiss = (month?.kite?.errors || []).some((e) =>
                 /ce_token_missing|pe_token_missing/i.test(String(e)),
               );
-              if (!wantsPremium || hasPremium || !tokenMiss) return null;
+              const future = isFutureCalendarMonth(
+                config?.year ?? month?.year,
+                config?.month ?? month?.month,
+                month?.today,
+              );
+              if (
+                !days.length ||
+                future ||
+                !wantsPremium ||
+                hasPremium ||
+                !tokenMiss
+              ) {
+                return null;
+              }
               return (
                 <p className="mt-2 shrink-0 rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-100">
                   CE/PE premiums missing for this month: the option contract is

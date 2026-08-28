@@ -31,15 +31,22 @@ STOCK_BROKER_CHAT_ORDER = STOCK_BROKER_DESK_TEAMS
 
 
 def order_admin_desk_chat_targets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Admin desk tabs: Signals ops (when published) + standard customer desk teams."""
+    """Admin desk tabs: assigned published teams, Signals ops first, then pack, then extras."""
     by_slug: dict[str, dict[str, Any]] = {}
+    extras: list[dict[str, Any]] = []
     for row in rows:
         if not row.get("published"):
             continue
         slug = str(row.get("slug") or "")
         if slug in STOCK_BROKER_ADMIN_DESK_TEAMS and slug not in by_slug:
             by_slug[slug] = row
-    return [by_slug[slug] for slug in STOCK_BROKER_ADMIN_DESK_TEAMS if slug in by_slug]
+        else:
+            extras.append(row)
+    ordered = [
+        by_slug[slug] for slug in STOCK_BROKER_ADMIN_DESK_TEAMS if slug in by_slug
+    ]
+    extras.sort(key=lambda row: str(row.get("name") or "").lower())
+    return ordered + extras
 
 
 def order_desk_chat_targets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -77,7 +84,13 @@ class DomainDashboardService:
         self.session = session
         self.context = context
 
-    async def dashboard(self, *, days: int = 30, desk_snapshot: bool = False) -> dict[str, Any]:
+    async def dashboard(
+        self,
+        *,
+        days: int = 30,
+        desk_snapshot: bool = False,
+        chat_mode: str = "metrics",
+    ) -> dict[str, Any]:
         tenant = await self.session.scalar(
             select(Tenant).where(Tenant.id == self.context.tenant_id)
         )
@@ -98,7 +111,9 @@ class DomainDashboardService:
                 widget for widget in widgets if widget.get("group") != "brokers"
             ] + list(snapshot["widgets"])
         quick_links = self._quick_links(tenant_domain, catalog)
-        chat_targets = await self._chat_targets(tenant_domain, catalog)
+        chat_targets = await self._chat_targets(
+            tenant_domain, catalog, chat_mode=chat_mode
+        )
 
         return {
             "domain": tenant_domain,
@@ -148,17 +163,16 @@ class DomainDashboardService:
         return payload
 
     async def admin_desk(self, *, desk_snapshot: bool = False) -> dict[str, Any]:
-        """Tenant-admin trading desk: Signals ops chat + live signal board."""
-        payload = await self.dashboard(days=30, desk_snapshot=desk_snapshot)
+        """Tenant-admin trading desk: assigned published chats (Signals ops first)."""
+        payload = await self.dashboard(
+            days=30, desk_snapshot=desk_snapshot, chat_mode="admin_desk"
+        )
         if payload["domain"] != "stock_broker":
             return {
                 **payload,
                 "chat_targets": [],
                 "desk_snapshot": None,
             }
-        catalog = payload.get("catalog") or {}
-        detail = list(catalog.get("teams_detail") or [])
-        payload["chat_targets"] = order_admin_desk_chat_targets(detail)
         return payload
 
     async def _catalog_counts(self) -> dict[str, Any]:
@@ -408,7 +422,11 @@ class DomainDashboardService:
         ]
 
     async def _chat_targets(
-        self, domain: WorkspaceDomain, catalog: dict[str, Any]
+        self,
+        domain: WorkspaceDomain,
+        catalog: dict[str, Any],
+        *,
+        chat_mode: str = "metrics",
     ) -> list[dict[str, Any]]:
         detail = list(catalog.get("teams_detail") or [])
         if domain != "stock_broker":
@@ -419,9 +437,21 @@ class DomainDashboardService:
             self.session, self.context
         ).list_available_for_user(self.context.user_id)
         rows = [_team_chat_target(row) for row in assigned]
-        if not rows and self.context.can_administer():
+        # Catalog dump is metrics-only. Admin desk stays assigned-only so an
+        # empty assignment list does not resurrect every published pack slug.
+        if (
+            chat_mode != "admin_desk"
+            and not rows
+            and self.context.can_administer()
+        ):
             rows = [row for row in detail if row.get("published")]
-        return order_desk_chat_targets(rows)
+        if chat_mode == "admin_desk":
+            return order_admin_desk_chat_targets(rows)
+        return [
+            row
+            for row in order_desk_chat_targets(rows)
+            if row.get("slug") != "signals-ops"
+        ]
 
     def _quick_links(
         self, domain: WorkspaceDomain, catalog: dict[str, Any]
