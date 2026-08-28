@@ -7,10 +7,12 @@ import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
 import { OptionsLabScreenerPanel } from "@/components/domains/OptionsLabScreenerPanel";
 import {
   deskInstrumentKey,
+  publishDeskInstrument,
   readDeskInstrument,
   subscribeDeskInstrument,
   type DeskInstrumentSelection,
 } from "@/components/domains/desk-instrument";
+import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
 import { Badge } from "@/components/ui/Badge";
@@ -1091,6 +1093,14 @@ export function SignalMetricsPanel({
         fut_symbol: row.fut_symbol,
         strike_step: row.strike_step && row.strike_step > 0 ? row.strike_step : undefined,
       });
+      publishDeskInstrument({
+        underlying_symbol: row.underlying_symbol,
+        underlying_label: row.underlying_label,
+        fut_symbol: row.fut_symbol || suggestFutSymbol(row.underlying_symbol) || undefined,
+        strike_step:
+          row.strike_step && row.strike_step > 0 ? row.strike_step : undefined,
+        source: "signal",
+      });
       if (row.atm != null) setScreenerAtmHint(Math.round(row.atm));
       else setScreenerAtmHint(null);
       setScreenerOpen(false);
@@ -1110,15 +1120,26 @@ export function SignalMetricsPanel({
         return;
       }
       onPresetChange(value);
+      const preset = presets.find((p) => p.symbol === value);
+      if (preset) {
+        publishDeskInstrument({
+          underlying_symbol: preset.symbol,
+          underlying_label: preset.label,
+          fut_symbol:
+            preset.fut_symbol?.trim() || suggestFutSymbol(preset.symbol) || undefined,
+          strike_step: preset.strike_step,
+          source: "signal",
+        });
+      }
     },
-    [onPresetChange, readOnly],
+    [onPresetChange, presets, readOnly],
   );
 
-  // Mirror Options Lab stream / setup into Signal Engine when this tab mounts
-  // or when Options Lab publishes a new instrument (same browser session).
+  // Mirror other desks' instrument picks (same browser session).
   useEffect(() => {
-    if (configLoading) return;
+    if (configLoading || readOnly) return;
     const apply = (selection: DeskInstrumentSelection) => {
+      if (selection.source === "signal") return;
       const key = deskInstrumentKey(selection);
       if (key === lastDeskInstrumentKey.current) return;
       const current = configRef.current;
@@ -1150,9 +1171,9 @@ export function SignalMetricsPanel({
     };
 
     const existing = readDeskInstrument();
-    if (existing) apply(existing);
+    if (existing && existing.source !== "signal") apply(existing);
     return subscribeDeskInstrument(apply);
-  }, [applyInstrumentSelection, configLoading]);
+  }, [applyInstrumentSelection, configLoading, readOnly]);
 
   useEffect(() => {
     if (!screenerOpen) return;

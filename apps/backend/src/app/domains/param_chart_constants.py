@@ -10,23 +10,14 @@ from typing import Any
 
 from app.domains.trade_desk_checklist import DEFAULT_METRICS
 
+# Re-export — canonical definition lives in desk_instrument.py.
+from app.domains.desk_instrument import (
+    DESK_INSTRUMENT_SETTINGS_KEY,
+    merge_desk_instrument_into_chart,
+)
+
 # Nested under Signal engine tool settings (same pattern as Options Lab).
 PARAM_CHART_SETTINGS_KEY = "param_chart"
-# Shared board identity (Signal / Param Chart / Lab). Read-only here until
-# DeskInstrumentService lands — Param Chart never writes this key.
-DESK_INSTRUMENT_SETTINGS_KEY = "desk_instrument"
-
-# desk_instrument field → Param Chart config field. Tab-owned keys
-# (year / month / interval / entry premiums) stay on the param_chart nest.
-_DESK_INSTRUMENT_TO_CHART: dict[str, str] = {
-    "underlying_symbol": "underlying_symbol",
-    "underlying_label": "underlying_label",
-    "fut_symbol": "fut_symbol",
-    "strike_step": "strike_step",
-    "ce_symbol": "ce_symbol",
-    "pe_symbol": "pe_symbol",
-    "atm": "strike",
-}
 
 # Checklist numbers from customer shared params photos (deduped annotations).
 PARAM_CHART_SHARED_CHECK_NOS: frozenset[int] = frozenset(
@@ -131,25 +122,6 @@ def normalize_param_chart_interval(raw: object) -> str:
         "MONTHLY": "1M",
     }
     return aliases.get(upper, "1D")
-
-
-def merge_desk_instrument_into_chart(settings: dict[str, Any] | None) -> dict[str, Any]:
-    """Resolve Param Chart instrument fields without writing Signal keys.
-
-    Prefers ``desk_instrument`` (future shared board) when it has an underlying;
-    otherwise the ``param_chart`` nest. Year / month / interval / entry premiums
-    always come from the Param Chart nest.
-    """
-    blob = settings if isinstance(settings, dict) else {}
-    nested = blob.get(PARAM_CHART_SETTINGS_KEY)
-    merged = dict(nested) if isinstance(nested, dict) else {}
-    desk = blob.get(DESK_INSTRUMENT_SETTINGS_KEY)
-    if isinstance(desk, dict) and str(desk.get("underlying_symbol") or "").strip():
-        for src, dst in _DESK_INSTRUMENT_TO_CHART.items():
-            val = desk.get(src)
-            if val is not None and val != "":
-                merged[dst] = val
-    return merged
 
 
 def shared_metric_defs() -> list[dict[str, Any]]:

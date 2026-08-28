@@ -1020,13 +1020,19 @@ class OptionsLabService:
         self.engine = SignalEngineService(session, context)
 
     async def _read_config(self) -> OptionsLabConfig:
+        from app.domains.desk_instrument import merge_board_into_mapping, read_desk_board
+
         tool = await self.engine._signal_engine_tool()
         if tool is None:
             return OptionsLabConfig()
         settings = await self.engine._tool_settings(tool)
         nested = settings.get(OPTIONS_LAB_SETTINGS_KEY)
-        if isinstance(nested, dict):
-            return OptionsLabConfig.from_dict(nested)
+        lab_dict: dict[str, Any] = dict(nested) if isinstance(nested, dict) else {}
+        board = read_desk_board(settings)
+        if board and not str(lab_dict.get("underlying_symbol") or "").strip():
+            lab_dict = merge_board_into_mapping(lab_dict, board, fill_only=True)
+        if lab_dict:
+            return OptionsLabConfig.from_dict(lab_dict)
         return OptionsLabConfig()
 
     async def get_admin_config(self) -> dict[str, Any]:
@@ -1166,11 +1172,22 @@ class OptionsLabService:
             if not _fut_matches_underlying(incoming_fut, symbol):
                 merged_lab["fut_symbol"] = suggested
         next_config = OptionsLabConfig.from_dict(merged_lab)
-        # Patch only our nested subtree — never rewrite Signal / Param Chart keys.
-        await self.engine._patch_tool_settings(
-            tool,
-            {OPTIONS_LAB_SETTINGS_KEY: next_config.to_admin_dict()},
+        from app.domains.desk_instrument import (
+            board_from_mapping,
+            desk_instrument_tool_patch,
+            patch_touches_identity,
         )
+
+        tool_patch: dict[str, Any] = {
+            OPTIONS_LAB_SETTINGS_KEY: next_config.to_admin_dict(),
+        }
+        if patch_touches_identity(patch):
+            board = board_from_mapping(merged_lab, source="options-lab")
+            desk_patch = desk_instrument_tool_patch(board, current)
+            if desk_patch:
+                tool_patch.update(desk_patch)
+        # Patch only our nested subtree — never rewrite Signal / Param Chart keys.
+        await self.engine._patch_tool_settings(tool, tool_patch)
         # Config fingerprint changed — drop SSE fast-path pointers so the next
         # frame reloads Postgres rather than serving a stale chain key.
         await ol_cache.clear_fingerprints(_tenant_key(self.context))
@@ -1267,6 +1284,52 @@ class OptionsLabService:
             force_baseline=force_baseline,
         )
 
+    async def _signal_chain_seed(self, config: OptionsLabConfig) -> dict[str, Any] | None:
+        """Reuse Signal spot/ATM when Lab underlying matches (skip spot sandbox hop)."""
+        if config.mock or not str(config.underlying_symbol or "").strip():
+            return None
+        from app.domains import signal_engine_cache as signal_cache
+        from app.domains.signal_engine import _sanitize_option_symbol
+
+        tenant_id = _tenant_key(self.context)
+        snap = await signal_cache.merged_frame(
+            tenant_id,
+            instrument=config.underlying_symbol.strip(),
+        )
+        if not isinstance(snap, dict):
+            return None
+        row_under = str(
+            snap.get("instrument")
+            or (snap.get("underlying") if isinstance(snap.get("underlying"), dict) else {}).get(
+                "symbol"
+            )
+            or ""
+        ).strip()
+        if row_under != config.underlying_symbol.strip():
+            return None
+        underlying = snap.get("underlying") if isinstance(snap.get("underlying"), dict) else {}
+        spot = _pick_float(underlying, "ltp", "last_price", "last", "spot")
+        if spot is None:
+            spot = _pick_float(snap, "spot", "ltp")
+        if spot is None:
+            return None
+        atm_raw = snap.get("atm")
+        try:
+            atm = int(round(float(atm_raw))) if atm_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            atm = None
+        if atm is None:
+            atm = _round_strike(spot, config.strike_step)
+        ce = _sanitize_option_symbol(str(snap.get("ce_symbol") or ""))
+        pe = _sanitize_option_symbol(str(snap.get("pe_symbol") or ""))
+        return {
+            "spot": round(float(spot), 2),
+            "atm": atm,
+            "ce_symbol": ce or None,
+            "pe_symbol": pe or None,
+            "quote_source": "signal_board",
+        }
+
     async def chain_snapshot(self, *, wings: int = DEFAULT_WINGS) -> dict[str, Any]:
         wings = _clamp_wings(wings)
         config = await self._read_config()
@@ -1321,26 +1384,30 @@ class OptionsLabService:
                 "wings": wings,
             }
 
-        # Derive strikes from a cached spot quote when possible (single broker round-trip).
-        spot_quotes = await self.engine._fetch_quote(
-            [config.underlying_symbol],
-            prefer="get_quote",
-        )
-        spot_row = _find_quote_row(spot_quotes, config.underlying_symbol)
-        spot = _pick_float(spot_row or {}, "last_price", "ltp", "last")
-        if spot is None:
-            auth = _broker_auth_warning(getattr(self.engine, "_last_quote_error", None))
-            return {
-                "ok": False,
-                "error": auth
-                or f"No live quote for {config.underlying_symbol}.",
-                "warnings": warnings,
-                "wings": wings,
-                "underlying_symbol": config.underlying_symbol,
-                "fut_symbol": fut_symbol,
-            }
-
-        atm = _round_strike(spot, config.strike_step)
+        # Derive strikes from Signal board when aligned, else a spot quote round-trip.
+        seed = await self._signal_chain_seed(config)
+        if seed and seed.get("spot") is not None:
+            spot = float(seed["spot"])
+            atm = int(seed.get("atm") or _round_strike(spot, config.strike_step))
+        else:
+            spot_quotes = await self.engine._fetch_quote(
+                [config.underlying_symbol],
+                prefer="get_quote",
+            )
+            spot_row = _find_quote_row(spot_quotes, config.underlying_symbol)
+            spot = _pick_float(spot_row or {}, "last_price", "ltp", "last")
+            if spot is None:
+                auth = _broker_auth_warning(getattr(self.engine, "_last_quote_error", None))
+                return {
+                    "ok": False,
+                    "error": auth
+                    or f"No live quote for {config.underlying_symbol}.",
+                    "warnings": warnings,
+                    "wings": wings,
+                    "underlying_symbol": config.underlying_symbol,
+                    "fut_symbol": fut_symbol,
+                }
+            atm = _round_strike(spot, config.strike_step)
         strikes, ce_syms, pe_syms = build_chain_symbols(
             fut_symbol,
             atm,

@@ -18,6 +18,9 @@ import { useOptionsLabConfigAutosave } from "@/components/domains/useOptionsLabC
 import {
   deskInstrumentKey,
   publishDeskInstrument,
+  readDeskInstrument,
+  subscribeDeskInstrument,
+  type DeskInstrumentSelection,
 } from "@/components/domains/desk-instrument";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import type { StrategyLeg, StrategyTemplateId } from "@/components/domains/options-lab-strategy";
@@ -477,8 +480,29 @@ export function OptionsLabPanel({
 
   const streamGeneration = useRef(0);
   const lastDeskPublishKey = useRef("");
+  const lastDeskApplyKey = useRef("");
 
-  // Push Options Lab instrument (+ ATM CE/PE from the live chain) to Signal Engine.
+  // Apply Signal / Param Chart picks while Lab is open (same browser session).
+  useEffect(() => {
+    if (!active || readOnly || !configReady) return;
+    const apply = (selection: DeskInstrumentSelection) => {
+      if (selection.source === "options-lab") return;
+      const key = deskInstrumentKey(selection);
+      if (key === lastDeskApplyKey.current) return;
+      lastDeskApplyKey.current = key;
+      patchConfig({
+        underlying_symbol: selection.underlying_symbol,
+        underlying_label: selection.underlying_label,
+        fut_symbol: selection.fut_symbol,
+        strike_step: selection.strike_step,
+      });
+    };
+    const existing = readDeskInstrument();
+    if (existing && existing.source !== "options-lab") apply(existing);
+    return subscribeDeskInstrument(apply);
+  }, [active, configReady, patchConfig, readOnly]);
+
+  // Push Options Lab instrument (+ ATM CE/PE from the live chain) to other desks.
   useEffect(() => {
     if (!active) return;
     const underlying =

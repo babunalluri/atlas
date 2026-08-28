@@ -967,10 +967,24 @@ class ParamChartService:
         if not merged.get("fut_symbol"):
             merged["fut_symbol"] = suggest_fut_symbol(str(merged["underlying_symbol"]))
 
-        # Patch only our nested subtree — never rewrite Signal / Options Lab keys.
-        await self.engine._patch_tool_settings(
-            tool, {PARAM_CHART_SETTINGS_KEY: merged}
+        from app.domains.desk_instrument import (
+            board_from_mapping,
+            desk_instrument_tool_patch,
+            patch_touches_identity,
         )
+
+        tool_patch: dict[str, Any] = {PARAM_CHART_SETTINGS_KEY: merged}
+        if patch_touches_identity(patch):
+            board = board_from_mapping(
+                merged,
+                source="param-chart",
+                atm=merged.get("strike"),
+            )
+            desk_patch = desk_instrument_tool_patch(board, current)
+            if desk_patch:
+                tool_patch.update(desk_patch)
+        # Patch only our nested subtree — never rewrite Signal / Options Lab keys.
+        await self.engine._patch_tool_settings(tool, tool_patch)
         # Nested param_chart lives inside the signal setup memo — drop it so the
         # next _read_config / _load_setup sees the patch (Fix 4 / memo path).
         await signal_cache.delete_metric(_tenant_key(self.context), "setup")

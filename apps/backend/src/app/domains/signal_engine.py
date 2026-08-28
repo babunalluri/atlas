@@ -2465,8 +2465,20 @@ class SignalEngineService:
         merged = _drop_mismatched_option_symbols(merged)
         # Patch only Signal-owned keys so Options Lab / Param Chart nested
         # subtrees (and concurrent Start/Stop) are not clobbered by a stale blob.
+        from app.domains.desk_instrument import (
+            board_from_mapping,
+            desk_instrument_tool_patch,
+            patch_touches_identity,
+        )
+
         signal_patch = _signal_settings_patch(current, merged)
-        await self._patch_tool_settings(tool, signal_patch)
+        combined_patch: dict[str, Any] = dict(signal_patch)
+        if patch_touches_identity(patch):
+            board = board_from_mapping(merged, source="signal")
+            desk_patch = desk_instrument_tool_patch(board, current)
+            if desk_patch:
+                combined_patch.update(desk_patch)
+        await self._patch_tool_settings(tool, combined_patch)
         # Expire identity so subsequent reads in this request see the write.
         await self.session.flush()
         await self.session.refresh(tool)

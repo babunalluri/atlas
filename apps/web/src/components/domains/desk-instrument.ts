@@ -1,26 +1,26 @@
 /**
- * Shared desk instrument handoff: Options Lab → Signal Engine.
+ * Shared desk instrument handoff across Signal Engine, Options Lab, and Param Chart.
  *
- * Options Lab owns the live chain stream (`stream?wings=…`). When its
- * underlying / FUT / ATM options change, publish here so Signal Engine can
- * mirror the same instruments without a second screener pick.
- *
- * Same-tab only: ``sessionStorage`` + ``CustomEvent``. Cross-tab sync is
- * intentionally out of scope (``storage`` events do not fire for
- * sessionStorage writes).
+ * Same-tab: ``sessionStorage`` + ``CustomEvent``. Backend persists under
+ * ``desk_instrument`` in signal tool settings on each desk config PATCH.
  */
+
+export type DeskInstrumentSource =
+  | "signal"
+  | "options-lab"
+  | "param-chart";
 
 export type DeskInstrumentSelection = {
   underlying_symbol: string;
   underlying_label: string;
   fut_symbol?: string;
   strike_step?: number;
-  /** ATM CE/PE from the Options Lab chain when known. */
+  /** ATM CE/PE when known from chain or Signal board. */
   ce_symbol?: string;
   pe_symbol?: string;
-  /** Epoch ms — newest write wins when Signal applies. */
+  /** Epoch ms — newest write wins when a desk applies. */
   updated_at_ms: number;
-  source: "options-lab";
+  source: DeskInstrumentSource;
 };
 
 const STORAGE_KEY = "atlas-desk-instrument";

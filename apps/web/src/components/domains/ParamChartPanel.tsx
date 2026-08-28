@@ -22,6 +22,14 @@ import {
   type SignalUnderlyingPreset,
 } from "@/lib/api/admin";
 import { streamParamChart } from "@/lib/api/param-chart-stream";
+import {
+  deskInstrumentKey,
+  publishDeskInstrument,
+  readDeskInstrument,
+  subscribeDeskInstrument,
+  type DeskInstrumentSelection,
+} from "@/components/domains/desk-instrument";
+import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
 
@@ -1650,6 +1658,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     null,
   );
   const prefetchedIntervals = useRef(new Set<string>());
+  const lastDeskInstrumentKey = useRef("");
 
   useEffect(() => {
     setCustomPresets(loadCustomPresets());
@@ -1854,6 +1863,29 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     },
     [applySnapshot, getAccessToken, loadMonthUntilReady],
   );
+
+  useEffect(() => {
+    if (!active || !config) return;
+    const apply = (selection: DeskInstrumentSelection) => {
+      if (selection.source === "param-chart") return;
+      const key = deskInstrumentKey(selection);
+      if (key === lastDeskInstrumentKey.current) return;
+      lastDeskInstrumentKey.current = key;
+      void patchConfig({
+        underlying_symbol: selection.underlying_symbol,
+        underlying_label: selection.underlying_label,
+        fut_symbol: selection.fut_symbol,
+        ...(selection.strike_step != null
+          ? { strike_step: selection.strike_step }
+          : {}),
+        ...(selection.ce_symbol ? { ce_symbol: selection.ce_symbol } : {}),
+        ...(selection.pe_symbol ? { pe_symbol: selection.pe_symbol } : {}),
+      });
+    };
+    const existing = readDeskInstrument();
+    if (existing && existing.source !== "param-chart") apply(existing);
+    return subscribeDeskInstrument(apply);
+  }, [active, config, patchConfig]);
 
   const commitNumeric = useCallback(
     (field: "strike" | "entry_ce_premium" | "entry_pe_premium", raw: string) => {
@@ -2073,6 +2105,16 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
               ...(preset?.strike_step != null
                 ? { strike_step: preset.strike_step }
                 : {}),
+            });
+            publishDeskInstrument({
+              underlying_symbol: symbol,
+              underlying_label: preset?.label ?? symbol,
+              fut_symbol:
+                preset?.fut_symbol?.trim() ||
+                suggestFutSymbol(symbol) ||
+                undefined,
+              strike_step: preset?.strike_step,
+              source: "param-chart",
             });
           }}
         >
