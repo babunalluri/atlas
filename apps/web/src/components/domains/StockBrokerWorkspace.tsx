@@ -143,7 +143,7 @@ export function StockBrokerWorkspace({
 
       <section
         className={cn(
-          "min-h-0 min-w-0 flex-1 overflow-y-auto px-5 lg:basis-[66%]",
+          "min-h-0 min-w-0 flex-1 overflow-hidden px-5 lg:basis-[66%]",
           showPageHeader ? "py-5" : "py-2",
           "flex flex-col",
         )}
@@ -224,7 +224,7 @@ export function StockBrokerWorkspace({
               stream and left the board on dashes / a hist reload. */}
           <div
             className={cn(
-              "mt-3 min-h-0 flex-1",
+              "mt-3 flex min-h-0 flex-1 flex-col overflow-hidden",
               deskTab !== "signals" && "hidden",
             )}
             aria-hidden={deskTab !== "signals"}
@@ -241,7 +241,7 @@ export function StockBrokerWorkspace({
           </div>
           <div
             className={cn(
-              "mt-3 min-h-0 flex-1",
+              "mt-3 flex min-h-0 flex-1 flex-col overflow-hidden",
               deskTab !== "param-chart" && "hidden",
             )}
             aria-hidden={deskTab !== "param-chart"}

@@ -33,7 +33,7 @@ export function DomainWorkspacePage({
 
   if (data.domain === "stock_broker") {
     return (
-      <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
         {error ? (
           <p className="shrink-0 border-b border-rose/30 bg-rose/10 px-5 py-2 text-xs text-rose">
             {error}

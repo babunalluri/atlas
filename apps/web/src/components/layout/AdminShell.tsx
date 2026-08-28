@@ -611,7 +611,7 @@ export function AdminShell({
             isPlatformAdmin={isPlatformAdmin}
           />
         </aside>
-        <main className="overlay-y-auto min-h-0 min-w-0 flex-1 px-5 py-8">
+        <main className="overlay-y-auto flex min-h-0 min-w-0 flex-1 flex-col px-5 py-8">
           {children}
         </main>
       </div>

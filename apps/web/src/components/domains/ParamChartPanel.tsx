@@ -212,6 +212,8 @@ function DualAxisMonthChart({
   const [viewCount, setViewCount] = useState(0);
   const [dragging, setDragging] = useState(false);
   const plotRef = useRef<HTMLDivElement | null>(null);
+  const plotBoxRef = useRef<HTMLDivElement | null>(null);
+  const [plotBox, setPlotBox] = useState({ w: 980, h: 360 });
   const dragRef = useRef<{
     originX: number;
     originStart: number;
@@ -262,6 +264,26 @@ function DualAxisMonthChart({
     return () => el.removeEventListener("wheel", onWheel);
   }, [seriesKey]);
 
+  useEffect(() => {
+    const el = plotBoxRef.current;
+    if (!el) return;
+    const apply = (width: number, height: number) => {
+      const nextW = Math.max(280, Math.round(width));
+      const nextH = Math.max(180, Math.round(height));
+      setPlotBox((prev) =>
+        prev.w === nextW && prev.h === nextH ? prev : { w: nextW, h: nextH },
+      );
+    };
+    apply(el.clientWidth, el.clientHeight);
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (!cr) return;
+      apply(cr.width, cr.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [seriesKey, days.length]);
+
   const candidates: ChartSeriesId[] = [
     primaryId,
     "close",
@@ -291,7 +313,7 @@ function DualAxisMonthChart({
       .filter(Boolean)
       .join(" · ");
     return (
-      <div className="flex h-56 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-line px-4 text-center text-sm text-slate-muted">
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-line px-4 text-center text-sm text-slate-muted">
         <p className="font-medium text-ink">Chart has no series yet</p>
         <p>
           No OHLC bars for this month/interval yet (dump miss or empty Kite
@@ -407,17 +429,16 @@ function DualAxisMonthChart({
 
   const hasPriceOverlays = priceOverlaySeries.some((s) => s.pts.length > 0);
   const showMetricPane = metricOverlaySeries.some((s) => s.pts.length > 0);
-  const w = 760;
-  const priceH = showMetricPane ? 210 : 248;
-  const gap = 8;
-  const metricH = showMetricPane ? 100 : 0;
-  const metricGap = showMetricPane ? 8 : 0;
-  const histH = 64;
-  const axisH = 18;
-  const h = priceH + gap + metricH + metricGap + histH + axisH;
-  // Slim Y gutters — smaller ticks so candles keep the width.
-  const left = 30;
-  const right = hasPriceOverlays ? 30 : 6;
+  const w = plotBox.w;
+  const h = plotBox.h;
+  const axisH = 16;
+  const gap = 6;
+  const metricGap = showMetricPane ? 6 : 0;
+  const histH = Math.max(36, Math.min(72, Math.round(h * 0.14)));
+  const metricH = showMetricPane ? Math.max(48, Math.round(h * 0.2)) : 0;
+  const priceH = Math.max(96, h - gap - metricH - metricGap - histH - axisH);
+  const left = 36;
+  const right = hasPriceOverlays ? 36 : 7;
   const top = 10;
   const priceBottomPad = 6;
   const innerW = w - left - right;
@@ -631,7 +652,7 @@ function DualAxisMonthChart({
       ? histTop + histPadTop + histInner / 2
       : histTop + histPadTop + histInner;
   const barSlot = innerW / n;
-  const barW = Math.max(2.5, Math.min(10, barSlot * 0.62));
+  const barW = Math.max(2, Math.min(8, barSlot * 0.48));
 
   const fmtAxis = (v: number) => {
     const a = Math.abs(v);
@@ -641,8 +662,8 @@ function DualAxisMonthChart({
   };
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-0.5 text-[11px] text-slate-muted">
+    <div className="flex min-h-0 flex-1 flex-col gap-1">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 px-0.5 text-[11px] text-slate-muted">
         <span className="inline-flex items-center gap-1.5">
           <span
             className={cn(
@@ -699,7 +720,7 @@ function DualAxisMonthChart({
       <div
         ref={plotRef}
         className={cn(
-          "relative overflow-hidden rounded-md border border-line/70 bg-[#0b1220]/[0.03] dark:bg-black/20",
+          "relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line/70 bg-[#0b1220]/[0.03] dark:bg-black/20",
           dragging ? "cursor-grabbing" : "cursor-grab",
         )}
         style={{ touchAction: "none" }}
@@ -750,11 +771,14 @@ function DualAxisMonthChart({
           }
         }}
       >
+        <div ref={plotBoxRef} className="relative min-h-0 flex-1">
         <svg
           viewBox={`0 0 ${w} ${h}`}
-          className="h-auto w-full select-none"
+          className="absolute inset-0 h-full w-full select-none"
+          preserveAspectRatio="none"
           role="img"
           aria-label="Param Chart"
+          shapeRendering="geometricPrecision"
         >
           {/* Price pane grid */}
           {[0, 0.25, 0.5, 0.75, 1].map((t) => {
@@ -778,7 +802,7 @@ function DualAxisMonthChart({
                   y={y + 3}
                   textAnchor="end"
                   className="fill-rose-500/70"
-                  fontSize={6}
+                  fontSize={7}
                   fontFamily="ui-monospace, monospace"
                 >
                   {fmtAxis(pVal)}
@@ -789,7 +813,7 @@ function DualAxisMonthChart({
                     y={y + 3}
                     textAnchor="start"
                     className="fill-sky-500/70"
-                    fontSize={6}
+                    fontSize={7}
                     fontFamily="ui-monospace, monospace"
                   >
                     {fmtAxis(oVal)}
@@ -867,7 +891,7 @@ function DualAxisMonthChart({
                       y={y + 3}
                       textAnchor="end"
                       className="fill-violet-500/80"
-                      fontSize={6}
+                      fontSize={7}
                       fontFamily="ui-monospace, monospace"
                     >
                       {fmtAxis(mVal)}
@@ -996,7 +1020,7 @@ function DualAxisMonthChart({
                           y={yAdj + 3}
                           textAnchor="end"
                           fill="#fff"
-                          fontSize={6}
+                          fontSize={7}
                           fontFamily="ui-monospace, monospace"
                         >
                           {label}
@@ -1030,9 +1054,9 @@ function DualAxisMonthChart({
                 const x = xAt(i);
                 const bodyTop = yPrimary(Math.max(o, c));
                 const bodyBot = yPrimary(Math.min(o, c));
-                const bodyH = Math.max(1.2, bodyBot - bodyTop);
-                const wickW = Math.max(1, Math.min(2, barW * 0.18));
-                const bodyW = Math.max(2.5, Math.min(12, barW * 0.7));
+                const bodyH = Math.max(1, bodyBot - bodyTop);
+                const wickW = Math.max(0.85, Math.min(1.45, barW * 0.16));
+                const bodyW = Math.max(2, Math.min(8, barW * 0.62));
                 return (
                   <g key={`cndl-${d.date}`}>
                     <line
@@ -1061,7 +1085,7 @@ function DualAxisMonthChart({
                 d={primaryPath}
                 fill="none"
                 stroke="#f43f5e"
-                strokeWidth={1.6}
+                strokeWidth={1.25}
                 strokeLinejoin="round"
                 strokeLinecap="round"
               />
@@ -1080,7 +1104,7 @@ function DualAxisMonthChart({
                 d={d}
                 fill="none"
                 stroke={s.color}
-                strokeWidth={1.6}
+                strokeWidth={1.25}
                 strokeLinejoin="round"
                 strokeLinecap="round"
               />
@@ -1237,10 +1261,11 @@ function DualAxisMonthChart({
             </ul>
           </div>
         ) : null}
+        </div>
 
         {/* Slim scrubber — labels only on sparse ticks; cells stay clickable */}
         <div
-          className="grid border-t border-line/60 bg-canvas/30"
+          className="grid shrink-0 border-t border-line/60 bg-canvas/30"
           style={{
             paddingLeft: `${leftPct}%`,
             paddingRight: `${rightPct}%`,
@@ -1356,18 +1381,22 @@ function ParamSidebar({
     for (const [title, items] of byCat) {
       out.push({
         title,
-        items: items.map((m) => ({
-          id: `metric:${m.id}` as ChartSeriesId,
-          label: m.label,
-          meta: `#${m.check_no}`,
-        })),
+        items: items.map((m) => {
+          const cat = (m.category || title).trim();
+          const shortCat = (cat.split("&")[0] || cat).trim().split(/\s+/)[0] || cat;
+          return {
+            id: `metric:${m.id}` as ChartSeriesId,
+            label: m.label,
+            meta: `${shortCat} #${m.check_no}`,
+          };
+        }),
       });
     }
     return out;
   }, [filteredMetrics, q]);
 
   return (
-    <aside className="flex h-full min-h-0 w-full flex-col rounded-md border border-line bg-canvas/40 lg:max-w-[16.5rem]">
+    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col rounded-md border border-line bg-canvas/40 lg:max-w-[16.5rem]">
       <div className="space-y-2 border-b border-line p-2">
         <input
           type="search"
@@ -1427,15 +1456,20 @@ function ParamSidebar({
                     <button
                       type="button"
                       onClick={() => onSelectSeries(item.id)}
+                      title={
+                        item.meta
+                          ? `${item.meta} · ${item.label}`
+                          : item.label
+                      }
                       className={cn(
-                        "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm transition",
+                        "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition",
                         selected
                           ? "bg-sky-500/15 text-ink ring-1 ring-sky-500/40"
                           : "text-slate-muted hover:bg-raised/70 hover:text-ink",
                       )}
                     >
                       <span
-                        className="mt-1.5 size-2 shrink-0 rounded-full"
+                        className="size-2 shrink-0 rounded-full"
                         style={{
                           backgroundColor:
                             item.id === "close"
@@ -1445,11 +1479,13 @@ function ParamSidebar({
                                 : "#94a3b8",
                         }}
                       />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate font-medium">{item.label}</span>
+                      <span className="min-w-0 flex-1 truncate">
                         {item.meta ? (
-                          <span className="text-[10px] text-slate-muted">{item.meta}</span>
+                          <span className="mr-1 font-mono text-[10px] text-slate-muted">
+                            {item.meta}
+                          </span>
                         ) : null}
+                        <span className="font-medium">{item.label}</span>
                       </span>
                       {live?.value != null && live.value !== "" ? (
                         <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink">
@@ -1802,8 +1838,8 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/40 px-2 py-1.5">
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/40 px-2 py-1.5">
         <select
           className="max-w-[9.5rem] rounded border border-line bg-raised px-2 py-1 text-sm"
           disabled={!config}
@@ -2024,13 +2060,13 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       </div>
 
       {error ? (
-        <p className="rounded-md border border-rose-300/60 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+        <p className="shrink-0 rounded-md border border-rose-300/60 bg-rose-50 px-3 py-2 text-sm text-rose-700">
           {error}
         </p>
       ) : null}
 
       {alertHits.length ? (
-        <div className="rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
+        <div className="shrink-0 rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
           <span className="font-semibold">Param alerts · </span>
           {alertHits.join(" · ")}
         </div>
@@ -2053,9 +2089,9 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           today={month?.today}
         />
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
-          <div className="rounded-md border border-line bg-raised/40 p-3">
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-raised/40 p-2">
+            <div className="mb-1.5 flex shrink-0 flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold tracking-tight">
                 {config?.underlying_label ?? "Param Chart"} ·{" "}
                 {config
@@ -2158,7 +2194,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
               </div>
             </div>
             {selectedDay ? (
-              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-line bg-canvas/50 px-2.5 py-1.5 text-xs">
+              <div className="mb-1.5 flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-line bg-canvas/50 px-2.5 py-1.5 text-xs">
                 <span className="text-slate-muted">
                   Day {selectedDay.day_index} · {selectedDay.date}
                 </span>
@@ -2228,7 +2264,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
               );
               if (!wantsPremium || hasPremium || !tokenMiss) return null;
               return (
-                <p className="mt-2 rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-100">
+                <p className="mt-2 shrink-0 rounded-md border border-amber-300/50 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-100">
                   CE/PE premiums missing for this month: the option contract is
                   expired and Atlas has no saved instrument token yet. Open this
                   month and hit <strong>Refresh</strong> once while the contract
