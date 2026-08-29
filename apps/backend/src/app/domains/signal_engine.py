@@ -330,12 +330,17 @@ async def _compute_state_payload(
 ) -> dict[str, Any]:
     """Run state() with a hard timeout so sandbox storms cannot hold the lock forever.
 
+    ``config`` is the board to compute — primary desk or a matrix row clone.
+    Matrix refresh must pass ``config_for_instrument(...)`` here; calling
+    ``state()`` without it always reloads the desk primary and then stamps that
+    primary board into ``row:{asked}`` (BANKNIFTY window painting SENSEX/NIFTY).
+
     On timeout, prefer the last live snapshot over an empty ``starting`` frame so
     a slow tick cannot wipe CE/PE / VIX / stock rows the desk already had.
     """
     try:
         payload = await asyncio.wait_for(
-            service.state(),
+            service.state(config=config),
             timeout=STATE_COMPUTE_TIMEOUT_MS / 1000,
         )
     except asyncio.TimeoutError:
@@ -473,10 +478,16 @@ async def state_for_stream(
 
 
 def frame_instrument(payload: dict[str, Any]) -> str:
-    """Which instrument a desk frame actually describes."""
+    """Which instrument a desk frame actually paints.
+
+    Prefer ``underlying.symbol`` over a stamped ``instrument`` field: matrix
+    writes used to store the primary board under ``row:{asked}`` with only the
+    key rewritten, so trusting ``instrument`` skipped warming and left
+    BANKNIFTY windows showing NIFTY/SENSEX numbers.
+    """
     under = payload.get("underlying")
     under = under if isinstance(under, dict) else {}
-    return str(payload.get("instrument") or under.get("symbol") or "")
+    return str(under.get("symbol") or payload.get("instrument") or "")
 
 
 def preset_label(symbol: str) -> str:
@@ -4004,8 +4015,19 @@ class SignalEngineService:
 
         return feed
 
-    async def state(self) -> dict[str, Any]:
-        config, has_broker, team_ready = await self._load_setup()
+    async def state(
+        self, config: SignalEngineConfig | None = None
+    ) -> dict[str, Any]:
+        """Build one Signal Engine board.
+
+        Pass ``config`` to compute a matrix row (or any non-primary underlying)
+        without reloading the desk primary from tool settings. Auto-ATM
+        persistence stays primary-only so row ticks cannot rewrite CE/PE.
+        """
+        loaded, has_broker, team_ready = await self._load_setup()
+        using_override = config is not None
+        if config is None:
+            config = loaded
         tenant_id = _tenant_key(self.context)
         if not config.engine_enabled:
             frozen = await cache.get_snapshot(tenant_id)
@@ -4097,14 +4119,16 @@ class SignalEngineService:
         if feed.get("nifty_ltp") is not None:
             payload["nifty_ltp"] = feed.get("nifty_ltp")
         # Persist empty/mismatched CE/PE so setup bar + ticker stay in sync.
-        try:
-            await self.maybe_persist_auto_atm_symbols(payload)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "signal_auto_atm_persist_failed",
-                tenant_id=_tenant_key(self.context),
-                error=str(exc)[:160],
-            )
+        # Matrix row overrides must not write another index's ATM into primary.
+        if not using_override:
+            try:
+                await self.maybe_persist_auto_atm_symbols(payload)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "signal_auto_atm_persist_failed",
+                    tenant_id=_tenant_key(self.context),
+                    error=str(exc)[:160],
+                )
         return payload
 
     async def publish_entry(

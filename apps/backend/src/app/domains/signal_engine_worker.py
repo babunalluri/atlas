@@ -691,7 +691,7 @@ async def _refresh_pinned_matrix_rows(
     set run far past the refresh gate, leaving the tail permanently stale.
     """
     from app.domains.signal_engine_constants import MATRIX_PASS_BUDGET_MS
-    from app.domains.signal_matrix import split_snapshot
+    from app.domains.signal_matrix import instrument_key, split_snapshot
 
     # Resume after whichever row the previous pass finished on, so a budget cut
     # rotates through the watch set instead of recomputing the same head. The
@@ -729,6 +729,26 @@ async def _refresh_pinned_matrix_rows(
         computed += 1
         _MATRIX_CURSOR[tenant_key] = sym
         if not isinstance(row_payload, dict):
+            continue
+        under = (
+            row_payload.get("underlying")
+            if isinstance(row_payload.get("underlying"), dict)
+            else {}
+        )
+        painted = str(
+            under.get("symbol") or row_payload.get("instrument") or ""
+        ).strip()
+        if painted and instrument_key(painted) != instrument_key(sym):
+            # Refuse to poison row:{asked} with another board. Historically
+            # ``_compute_state_payload`` ignored ``config`` and always ran the
+            # primary, then stamped ``instrument=sym`` — that is what made
+            # BANKNIFTY windows show NIFTY/SENSEX.
+            logger.warning(
+                "signal_matrix_row_underlying_mismatch",
+                tenant_id=tenant_key,
+                asked=sym,
+                painted=painted,
+            )
             continue
         row_payload = {
             **row_payload,

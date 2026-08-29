@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -417,6 +418,155 @@ def test_warming_row_frame_keeps_global_top_level_fields() -> None:
     assert out["team_slug"] == "signals-ops"
     assert out["engine_enabled"] is True
     assert out["underlying"]["label"] == "NSE:TCS"
+
+
+@pytest.mark.asyncio
+async def test_stream_frame_warms_poisoned_row_with_wrong_underlying() -> None:
+    """A row stamped for BANKNIFTY but painting NIFTY must warm, not pass through."""
+    import uuid
+
+    from app.domains.signal_engine import stream_frame_from_cache
+
+    tenant_key = str(uuid.uuid4())
+    await cache.set_metric(tenant_key, "engine_enabled", "medium", True)
+    await cache.set_globals(
+        tenant_key,
+        {"metrics": [{"id": "fii", "category": "macro", "value": 1}]},
+    )
+    # Poison: instrument key says BANKNIFTY, board is still NIFTY 50.
+    await cache.set_row(
+        tenant_key,
+        "NSE:NIFTY BANK",
+        {
+            "instrument": "NSE:NIFTY BANK",
+            "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+            "passed": 23,
+            "evaluable": 43,
+            "feed_source": "live",
+            "metrics": [{"id": "atm", "category": "price", "value": 25000}],
+        },
+    )
+
+    frame = await stream_frame_from_cache(tenant_key, instrument="NSE:NIFTY BANK")
+
+    assert frame is not None
+    assert frame["underlying"]["symbol"] == "NSE:NIFTY BANK"
+    assert frame["passed"] == 0
+    assert frame["feed_source"] == "starting"
+    assert frame.get("engine_computing") is True
+
+
+@pytest.mark.asyncio
+async def test_compute_state_payload_passes_config_override_to_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix rows must compute the asked instrument, not silently reload primary."""
+    import uuid
+
+    from app.db.models import Role
+    from app.domains.signal_engine import (
+        SignalEngineConfig,
+        SignalEngineService,
+        _compute_state_payload,
+    )
+    from app.tenancy.context import TenantContext
+
+    tenant_id = uuid.uuid4()
+    session = MagicMock()
+    session.info = {"tenant_id": tenant_id}
+    context = TenantContext(
+        tenant_id=tenant_id,
+        user_id="tester",
+        role=Role.platform_admin,
+        auth_org_id="org-test",
+    )
+    service = SignalEngineService(session, context)
+    seen: dict[str, object] = {}
+
+    async def fake_state(*, config: SignalEngineConfig | None = None) -> dict:
+        seen["config"] = config
+        assert config is not None
+        return {
+            "underlying": {
+                "symbol": config.underlying_symbol,
+                "label": config.underlying_label or config.underlying_symbol,
+            },
+            "instrument": config.underlying_symbol,
+            "feed_source": "live",
+            "passed": 1,
+            "evaluable": 1,
+            "metrics": [],
+            "engine_enabled": True,
+        }
+
+    monkeypatch.setattr(service, "state", fake_state)
+    row_cfg = SignalEngineConfig(
+        engine_enabled=True,
+        underlying_symbol="NSE:NIFTY BANK",
+        underlying_label="NIFTY BANK",
+    )
+    out = await _compute_state_payload(service, config=row_cfg, last_good=None)
+    assert seen["config"] is row_cfg
+    assert out["underlying"]["symbol"] == "NSE:NIFTY BANK"
+
+
+@pytest.mark.asyncio
+async def test_matrix_refresh_skips_writing_mismatched_underlying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If compute still paints the primary, do not store it under row:{asked}."""
+    from app.domains import signal_engine_worker as worker
+    from app.domains.signal_engine import SignalEngineConfig
+
+    worker.reset_matrix_bg_for_tests()
+    tenant_key = "tenant-mismatch-row"
+    written: list[tuple[str, dict]] = []
+
+    async def fake_extras(*_a: object, **_k: object) -> list[SignalEngineConfig]:
+        return [
+            SignalEngineConfig(
+                underlying_symbol="NSE:NIFTY BANK", engine_enabled=True
+            )
+        ]
+
+    async def fake_compute(_service: object, *, config: object, last_good: object):
+        # Simulate the historical bug: ignore config, paint primary.
+        return {
+            "underlying": {"symbol": "NSE:NIFTY 50", "label": "NIFTY 50"},
+            "instrument": "NSE:NIFTY 50",
+            "metrics": [],
+            "passed": 9,
+        }
+
+    async def fake_set_row(tid: str, sym: str, doc: dict, **_k: object) -> None:
+        written.append((sym, doc))
+
+    monkeypatch.setattr(worker, "_matrix_extra_configs", fake_extras)
+    monkeypatch.setattr(worker, "_compute_state_payload", fake_compute)
+    monkeypatch.setattr(cache, "set_row", fake_set_row)
+
+    class _Nested:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+    class _Session:
+        def begin_nested(self) -> _Nested:
+            return _Nested()
+
+    await worker._refresh_pinned_matrix_rows(
+        service=object(),
+        session=_Session(),
+        tenant_key=tenant_key,
+        primary=SignalEngineConfig(
+            underlying_symbol="NSE:NIFTY 50", engine_enabled=True
+        ),
+        epoch=1,
+    )
+    assert written == []
+    worker.reset_matrix_bg_for_tests()
 
 
 @pytest.mark.asyncio

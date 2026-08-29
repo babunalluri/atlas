@@ -1384,7 +1384,7 @@ async def test_compute_state_payload_keeps_last_good_on_timeout(monkeypatch) -> 
     )
     service = SignalEngineService(session, context)
 
-    async def _hang() -> dict:
+    async def _hang(*_args: object, **_kwargs: object) -> dict:
         await asyncio.sleep(3600)
         return {}
 
