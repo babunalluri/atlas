@@ -15,7 +15,7 @@ describe("workspace profile copy", () => {
     expect(en.common.settings.title).toBe("Settings");
   });
 
-  it("links settings gear to the vault page instead of a profile dropdown", () => {
+  it("opens settings in a dialog from the gear, not a profile dropdown", () => {
     const source = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "WorkspaceProfileMenu.tsx"),
       "utf8",
@@ -23,9 +23,13 @@ describe("workspace profile copy", () => {
     expect(source).not.toMatch(/Groww|GrowwTest|Kite/i);
     expect(source).not.toContain("listUserVault");
     expect(source).toContain("settings.title");
-    expect(source).toContain("/settings");
     expect(source).toContain("SettingsGearIcon");
-    expect(source).not.toContain("aria-haspopup");
+    // Settings opens over the surface so a streaming desk is not torn down.
+    expect(source).toContain("Modal");
+    expect(source).toContain("WorkspaceSettingsBody");
+    // Still not a dropdown: a dialog, never a menu.
+    expect(source).toContain('aria-haspopup="dialog"');
+    expect(source).not.toContain('role="menu"');
     expect(source).not.toContain("LanguageSwitcher");
   });
 
@@ -38,12 +42,18 @@ describe("workspace profile copy", () => {
     expect(barSource).toContain("signOutFederated");
     expect(barSource).toContain('t("signOut")');
 
+    // The settings content lives in the body component, which both the page
+    // and the gear's dialog render.
     const settingsSource = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "WorkspaceSettingsPage.tsx"),
+      join(dirname(fileURLToPath(import.meta.url)), "WorkspaceSettingsBody.tsx"),
       "utf8",
     );
     expect(settingsSource).toContain("LanguageSwitcher");
     expect(settingsSource).toContain("settings.preferences");
+    expect(settingsSource).toContain("UserSelfVaultEditor");
+    // The body must not reach back for the account bar — that cycle is why it
+    // was split out of the page in the first place.
+    expect(settingsSource).not.toContain("ChatAccountBar");
   });
 
   it("lets users overwrite a saved secret without reading the stored value", () => {

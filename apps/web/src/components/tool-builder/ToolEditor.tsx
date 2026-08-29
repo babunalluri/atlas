@@ -12,7 +12,6 @@ import { Input, Label, Select, Textarea } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
   CheckIcon,
-  EyeIcon,
   PencilIcon,
   PublishIcon,
   SaveIcon,

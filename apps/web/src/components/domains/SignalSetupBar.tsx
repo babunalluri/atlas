@@ -27,6 +27,7 @@ export function SignalSetupBar({
   loading,
   atmHint = null,
   readOnly = false,
+  lockInstrument = false,
 }: {
   config: SignalEngineAdminConfig | null;
   presets: Array<{ label: string; symbol: string; strike_step: number }>;
@@ -38,6 +39,12 @@ export function SignalSetupBar({
   /** Live ATM from signal metrics — used to suggest CE/PE strikes. */
   atmHint?: number | null;
   readOnly?: boolean;
+  /**
+   * Pin the instrument. In read-only mode the preset dropdown normally switches
+   * which instrument you *view*; when the caller already fixed the instrument
+   * (a workspace row), that switch contradicts the window's own heading.
+   */
+  lockInstrument?: boolean;
 }) {
   const presetOptions = useMemo(() => buildPresetOptions(presets), [presets]);
 
@@ -141,9 +148,10 @@ export function SignalSetupBar({
       strikeOptions={strikeOptions}
       idPrefix="signal"
       dense
-      showTradingView
+      showTradingView={false}
+      hidePreset={lockInstrument}
       readOnly={readOnly}
-      allowPresetChange={readOnly}
+      allowPresetChange={readOnly && !lockInstrument}
       containerClassName="w-full rounded-md border border-line bg-canvas/40 px-2 py-1"
       layoutClassName="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1"
       underlyingAllowCustom={!presetLocked}

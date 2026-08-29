@@ -3500,6 +3500,8 @@ export interface DomainDeskBook {
   id: string;
   label: string;
   tab: string;
+  /** "books" for the top-level nav; "bids" for the Bids sub-nav. */
+  group?: string;
   via: string | null;
   team_slug: string | null;
   source: string | null;
@@ -3734,8 +3736,15 @@ export async function patchSignalConfig(
 
 export async function getSignalState(
   accessToken: string,
+  /** Matrix row to read. Omit for the desk primary. */
+  instrument?: string | null,
 ): Promise<SignalEngineState> {
-  return apiFetch<SignalEngineState>("/admin/signals/state", { accessToken });
+  const qs = instrument?.trim()
+    ? `?instrument=${encodeURIComponent(instrument.trim())}`
+    : "";
+  return apiFetch<SignalEngineState>(`/admin/signals/state${qs}`, {
+    accessToken,
+  });
 }
 
 export async function publishSignalEntry(
@@ -3888,6 +3897,8 @@ export async function getParamChartMonth(
     year?: number;
     month?: number;
     interval?: string;
+    /** Instrument to read. Omit for the tenant desk instrument. */
+    underlying?: string | null;
     refresh?: boolean;
     buildMissing?: boolean;
   },
@@ -3896,6 +3907,7 @@ export async function getParamChartMonth(
   if (opts?.year != null) params.set("year", String(opts.year));
   if (opts?.month != null) params.set("month", String(opts.month));
   if (opts?.interval) params.set("interval", opts.interval);
+  if (opts?.underlying?.trim()) params.set("underlying", opts.underlying.trim());
   if (opts?.refresh) params.set("refresh", "true");
   if (opts?.buildMissing === false) params.set("build_missing", "false");
   const qs = params.toString();
@@ -4058,8 +4070,11 @@ export async function resetOptionsLabOiBaseline(
 export async function getOptionsChain(
   accessToken: string,
   wings = 15,
+  /** Pin one window to an instrument; omit to use the tenant desk config. */
+  underlying?: string | null,
 ): Promise<OptionsChainSnapshot> {
   const params = new URLSearchParams({ wings: String(wings) });
+  if (underlying?.trim()) params.set("underlying", underlying.trim());
   return apiFetch<OptionsChainSnapshot>(`/admin/options-lab/chain?${params}`, {
     accessToken,
   });
@@ -4070,7 +4085,11 @@ export interface OptionsScreenerRow {
   underlying_label: string;
   fut_symbol: string;
   strike_step?: number | null;
+  universe?: string | null;
   spot: number | null;
+  /** Day change vs previous close; null when the quote carried no close. */
+  change?: number | null;
+  change_pct?: number | null;
   atm: number | null;
   atm_iv: number | null;
   straddle: number | null;
@@ -4081,6 +4100,10 @@ export interface OptionsScreenerRow {
   oi_pct_chg: number | null;
   iv_chg: number | null;
   ivp: number | null;
+  /** Free-float market cap in ₹ crore (NSE). Null until the slow tier fills it. */
+  market_cap?: number | null;
+  /** Trailing P/E — per symbol for equities, index P/E for indices. */
+  pe_ratio?: number | null;
   error: string | null;
 }
 

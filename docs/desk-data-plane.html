@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Desk Data Plane</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+  :root {
+    --ground: #f5f7f9;
+    --surface: #ffffff;
+    --surface-2: #eef2f5;
+    --ink: #0c1620;
+    --ink-2: #35485a;
+    --muted: #5f7181;
+    --line: #d9e1e8;
+    --line-2: #c3cfd9;
+    --accent: #0a7d72;
+    --accent-soft: #d6ece9;
+    --on-accent: #ffffff;
+    --warn: #96660a;
+    --warn-soft: #f7ecd6;
+    --danger: #a83a2f;
+    --danger-soft: #f8e2df;
+    --shadow: 0 1px 2px rgba(12, 22, 32, .06), 0 8px 24px -16px rgba(12, 22, 32, .3);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0c131b;
+      --surface: #141d27;
+      --surface-2: #1b2733;
+      --ink: #dee8ef;
+      --ink-2: #aebecc;
+      --muted: #7d90a0;
+      --line: #253340;
+      --line-2: #334554;
+      --accent: #3fb5a6;
+      --accent-soft: #123531;
+      --on-accent: #06231f;
+      --warn: #d9a441;
+      --warn-soft: #33280f;
+      --danger: #e0705f;
+      --danger-soft: #38201c;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0c131b;
+    --surface: #141d27;
+    --surface-2: #1b2733;
+    --ink: #dee8ef;
+    --ink-2: #aebecc;
+    --muted: #7d90a0;
+    --line: #253340;
+    --line-2: #334554;
+    --accent: #3fb5a6;
+    --accent-soft: #123531;
+    --on-accent: #06231f;
+    --warn: #d9a441;
+    --warn-soft: #33280f;
+    --danger: #e0705f;
+    --danger-soft: #38201c;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 3rem 1.5rem 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+  }
+
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace; }
+
+  h1, h2, h3 { text-wrap: balance; margin: 0; letter-spacing: -0.015em; }
+  h1 { font-size: clamp(2rem, 1.4rem + 2.4vw, 2.9rem); font-weight: 700; line-height: 1.12; }
+  h2 { font-size: 1.4rem; font-weight: 600; }
+  h3 { font-size: 1.02rem; font-weight: 600; }
+  p { margin: 0; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .72rem;
+    font-weight: 500;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  header.hero { display: flex; flex-direction: column; gap: 1rem; }
+  .lede { font-size: 1.12rem; color: var(--ink-2); max-width: 60ch; }
+
+  .verdict {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    align-items: center;
+    margin-top: .5rem;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .74rem;
+    font-weight: 500;
+    padding: .3rem .6rem;
+    border-radius: 3px;
+    border: 1px solid var(--line-2);
+    color: var(--ink-2);
+    background: var(--surface);
+  }
+  .chip.ok { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .chip.warn { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+
+  section { display: flex; flex-direction: column; gap: 1.25rem; }
+  .section-head { display: flex; flex-direction: column; gap: .4rem; }
+  .section-head p { color: var(--ink-2); max-width: 65ch; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+  }
+
+  figure { margin: 0; display: flex; flex-direction: column; gap: .75rem; }
+  .fig-scroll { overflow-x: auto; padding: 1.25rem; }
+  svg.flow { display: block; width: 100%; min-width: 44rem; height: auto; color: var(--ink-2); }
+  figcaption { font-size: .88rem; color: var(--muted); padding: 0 .25rem; }
+
+  .svg-box { fill: var(--surface-2); stroke: var(--line-2); }
+  .svg-box-accent { fill: var(--accent-soft); stroke: var(--accent); }
+  .svg-label { fill: var(--ink); font-family: "IBM Plex Sans", sans-serif; font-size: 12.5px; font-weight: 600; }
+  .svg-sub { fill: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; }
+  .svg-time { fill: var(--accent); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 500; }
+  .svg-edge { stroke: var(--line-2); stroke-width: 1.4; fill: none; }
+  .svg-edge-accent { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+  .svg-lane { fill: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .1em; }
+
+  /* Scenario switcher */
+  .tabs { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .tab {
+    font-family: inherit;
+    font-size: .88rem;
+    font-weight: 500;
+    padding: .5rem .85rem;
+    border-radius: 3px;
+    border: 1px solid var(--line-2);
+    background: var(--surface);
+    color: var(--ink-2);
+    cursor: pointer;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .tab:hover { border-color: var(--accent); color: var(--ink); }
+  .tab[aria-selected="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+
+  .tab:focus-visible, .toggle:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .stat { background: var(--surface); padding: .9rem 1rem; display: flex; flex-direction: column; gap: .2rem; }
+  .stat dt { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-family: "IBM Plex Mono", monospace; }
+  .stat dd { margin: 0; font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat dd small { font-size: .8rem; font-weight: 400; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+  .table-scroll { overflow-x: auto; }
+  th, td { text-align: left; padding: .6rem .85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .7rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.k { font-family: "IBM Plex Mono", monospace; font-size: .78rem; word-break: break-all; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .inst { color: var(--accent); font-weight: 600; }
+
+  .cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+  .card { padding: 1.1rem 1.15rem; display: flex; flex-direction: column; gap: .6rem; }
+  .card h3 { display: flex; align-items: baseline; gap: .5rem; }
+  .card p { font-size: .9rem; color: var(--ink-2); }
+
+  .fix { padding: 1.25rem; display: flex; flex-direction: column; gap: .9rem; }
+  .fix-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .toggle {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: .74rem;
+    padding: .3rem .6rem;
+    border-radius: 3px;
+    border: 1px solid var(--line-2);
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .toggle[aria-pressed="true"] { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+
+  .ba { display: grid; gap: .6rem; }
+  .ba-row { display: grid; grid-template-columns: 5.5rem 1fr; gap: .75rem; align-items: start; font-size: .82rem; }
+  .ba-tag { font-family: "IBM Plex Mono", monospace; font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; padding-top: .15rem; }
+  .ba-row.before .ba-tag { color: var(--danger); }
+  .ba-row.after .ba-tag { color: var(--accent); }
+  .ba-val { font-family: "IBM Plex Mono", monospace; word-break: break-all; }
+  .ba-row.before .ba-val { color: var(--ink-2); text-decoration: line-through; text-decoration-color: var(--danger); text-decoration-thickness: 1px; }
+  .ba[hidden] { display: none; }
+
+  details.layer { border-bottom: 1px solid var(--line); }
+  details.layer:last-of-type { border-bottom: none; }
+  details.layer summary {
+    cursor: pointer;
+    padding: .85rem 1.1rem;
+    display: flex;
+    align-items: baseline;
+    gap: .7rem;
+    font-weight: 600;
+    font-size: .95rem;
+    list-style: none;
+  }
+  details.layer summary::-webkit-details-marker { display: none; }
+  details.layer summary::before {
+    content: "+";
+    font-family: "IBM Plex Mono", monospace;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  details.layer[open] summary::before { content: "\2013"; }
+  details.layer summary .cadence { margin-left: auto; font-family: "IBM Plex Mono", monospace; font-size: .74rem; color: var(--muted); font-weight: 400; }
+  .layer-body { padding: 0 1.1rem 1.1rem 2.35rem; display: flex; flex-direction: column; gap: .6rem; font-size: .89rem; color: var(--ink-2); }
+  .layer-body ul { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .3rem; }
+
+  .callout { padding: 1.1rem 1.15rem; border-left: 3px solid var(--warn); background: var(--warn-soft); border-radius: 0 4px 4px 0; display: flex; flex-direction: column; gap: .5rem; }
+  .callout h3 { color: var(--ink); }
+  .callout p { font-size: .9rem; color: var(--ink-2); }
+
+  .note { font-size: .82rem; color: var(--muted); }
+  .note code { font-size: .78rem; }
+
+  footer { border-top: 1px solid var(--line); padding-top: 1.5rem; font-size: .84rem; color: var(--muted); display: flex; flex-direction: column; gap: .4rem; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">Trading desk · real-time data plane</p>
+    <h1>Two Lab windows, ten admin screens, one WebSocket</h1>
+    <p class="lede">
+      How the Kite ticker, the workers, the SSE watchers and the Signal matrix stay in
+      sync when several people watch different instruments at once — what guarantees that,
+      what it costs in latency, and where it still runs out of room.
+    </p>
+    <div class="verdict">
+      <span class="chip ok">Verified for both scenarios</span>
+      <span class="chip">736 backend / 249 web tests</span>
+      <span class="chip warn">2 standing limits</span>
+    </div>
+  </header>
+
+  <!-- ────────────────────────────  THE PATH  ──────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">01 · The path</p>
+      <h2>One tick, end to end</h2>
+      <p>
+        Every window is an SSE reader on a Redis key. Nothing computes in the request
+        path: the browser reads cache, and a worker fills it. The instrument travels the
+        whole way down as part of every key — that is the single idea the whole design
+        rests on.
+      </p>
+    </div>
+
+    <div class="panel">
+      <figure>
+        <div class="fig-scroll">
+          <svg class="flow" viewBox="0 0 880 470" role="img"
+               aria-label="Layered data path: browser windows open SSE connections that read instrument-scoped Redis keys; workers refresh those keys and register instrument-scoped subscriptions with one shared Kite WebSocket per tenant.">
+            <defs>
+              <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+              </marker>
+              <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/>
+              </marker>
+            </defs>
+
+            <!-- lane labels -->
+            <text class="svg-lane" x="8" y="30">BROWSER</text>
+            <text class="svg-lane" x="8" y="140">SSE</text>
+            <text class="svg-lane" x="8" y="250">REDIS</text>
+            <text class="svg-lane" x="8" y="352">WORKER</text>
+            <text class="svg-lane" x="8" y="440">KITE</text>
+
+            <!-- browser row -->
+            <rect class="svg-box-accent" x="110" y="10" width="170" height="46" rx="3"/>
+            <text class="svg-label" x="124" y="30">Lab · NIFTY 50</text>
+            <text class="svg-sub" x="124" y="46">end user, tab 1</text>
+
+            <rect class="svg-box-accent" x="300" y="10" width="170" height="46" rx="3"/>
+            <text class="svg-label" x="314" y="30">Lab · SENSEX</text>
+            <text class="svg-sub" x="314" y="46">end user, tab 2</text>
+
+            <rect class="svg-box" x="490" y="10" width="380" height="46" rx="3"/>
+            <text class="svg-label" x="504" y="30">Admin · 10 screens</text>
+            <text class="svg-sub" x="504" y="46">Lab · Param Chart · Signal, mixed instruments</text>
+
+            <!-- browser -> sse -->
+            <path class="svg-edge-accent" d="M195 56 L195 108" marker-end="url(#aa)"/>
+            <path class="svg-edge-accent" d="M385 56 L385 108" marker-end="url(#aa)"/>
+            <path class="svg-edge" d="M680 56 L680 108" marker-end="url(#a)"/>
+            <text class="svg-time" x="203" y="86">125 ms frames</text>
+
+            <!-- sse row -->
+            <rect class="svg-box" x="110" y="108" width="360" height="52" rx="3"/>
+            <text class="svg-label" x="124" y="129">GET /stream?underlying=…</text>
+            <text class="svg-sub" x="124" y="147">reads cache · touches watcher · never computes</text>
+
+            <rect class="svg-box" x="490" y="108" width="380" height="52" rx="3"/>
+            <text class="svg-label" x="504" y="129">GET /stream?instrument=…</text>
+            <text class="svg-sub" x="504" y="147">globals + row[instrument] merged per frame</text>
+
+            <!-- sse -> redis -->
+            <path class="svg-edge-accent" d="M290 160 L290 214" marker-end="url(#aa)"/>
+            <path class="svg-edge" d="M680 160 L680 214" marker-end="url(#a)"/>
+            <text class="svg-time" x="298" y="192">&lt; 1 ms read</text>
+
+            <!-- redis row -->
+            <rect class="svg-box" x="110" y="214" width="760" height="86" rx="3"/>
+            <text class="svg-label" x="124" y="236">Instrument is part of every key</text>
+            <text class="svg-sub" x="124" y="256">options-lab:watch:{tenant}|NSE:NIFTY 50   ·   options-lab:watch:{tenant}|BSE:SENSEX</text>
+            <text class="svg-sub" x="124" y="272">signals:{tenant}:row:NSE:NIFTY_50   +   signals:{tenant}:globals   (shared)</text>
+            <text class="svg-sub" x="124" y="288">param-chart:{tenant}:pack:{instrument}:{interval}:{month}</text>
+
+            <!-- redis <-> worker -->
+            <path class="svg-edge" d="M290 300 L290 330" marker-end="url(#a)"/>
+            <path class="svg-edge" d="M400 330 L400 300" marker-end="url(#a)"/>
+            <text class="svg-time" x="418" y="320">writes every 125 ms – 15 s</text>
+
+            <!-- worker row -->
+            <rect class="svg-box" x="110" y="330" width="240" height="60" rx="3"/>
+            <text class="svg-label" x="124" y="351">Lab worker</text>
+            <text class="svg-sub" x="124" y="368">one refresh per watched</text>
+            <text class="svg-sub" x="124" y="382">instrument · max 3 at once</text>
+
+            <rect class="svg-box" x="368" y="330" width="240" height="60" rx="3"/>
+            <text class="svg-label" x="382" y="351">Signal matrix</text>
+            <text class="svg-sub" x="382" y="368">rows in rotation</text>
+            <text class="svg-sub" x="382" y="382">10 s budget per pass</text>
+
+            <rect class="svg-box" x="626" y="330" width="244" height="60" rx="3"/>
+            <text class="svg-label" x="640" y="351">Param Chart worker</text>
+            <text class="svg-sub" x="640" y="368">overlay per (tenant,</text>
+            <text class="svg-sub" x="640" y="382">instrument)</text>
+
+            <!-- workers -> hub -->
+            <path class="svg-edge-accent" d="M230 390 L230 418" marker-end="url(#aa)"/>
+            <path class="svg-edge-accent" d="M488 390 L488 418" marker-end="url(#aa)"/>
+            <path class="svg-edge-accent" d="M748 390 L748 418" marker-end="url(#aa)"/>
+
+            <!-- hub -->
+            <rect class="svg-box-accent" x="110" y="418" width="760" height="44" rx="3"/>
+            <text class="svg-label" x="124" y="438">Kite ticker hub — one WebSocket per tenant</text>
+            <text class="svg-sub" x="124" y="454">sources unioned: signal · param_chart · options_lab:{instrument} × N   →   delta subscribe / unsubscribe</text>
+          </svg>
+        </div>
+        <figcaption>
+          Every hop is instrument-scoped except the last: the three tools register separate
+          named sources, and the hub unions them onto a single socket rather than letting
+          the newest writer replace the others.
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────  SCENARIO  ──────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">02 · Live state</p>
+      <h2>What actually exists in Redis</h2>
+      <p>
+        Pick a scenario to see the keys and hub sources it creates. Watch keys carry a
+        45-second TTL, so a closed window disappears on its own and its work stops.
+      </p>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Scenario">
+      <button class="tab" role="tab" id="tab-user" aria-selected="true" aria-controls="scenario-out">End user · 2 Lab windows</button>
+      <button class="tab" role="tab" id="tab-admin" aria-selected="false" aria-controls="scenario-out">Admin · 10 screens</button>
+      <button class="tab" role="tab" id="tab-both" aria-selected="false" aria-controls="scenario-out">Both at once</button>
+    </div>
+
+    <div id="scenario-out" role="tabpanel" aria-live="polite" tabindex="0">
+      <dl class="stat-row" id="stats"></dl>
+      <div class="panel table-scroll" style="margin-top:1rem">
+        <table>
+          <thead>
+            <tr><th>Redis key</th><th>Holds</th><th>Lifetime</th></tr>
+          </thead>
+          <tbody id="keys"></tbody>
+        </table>
+      </div>
+      <p class="note" style="margin-top:.75rem" id="scenario-note"></p>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────  TIMING  ──────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">03 · Timing</p>
+      <h2>How long each hop takes</h2>
+      <p>
+        Two different things get called “time” here, and conflating them is how people
+        mis-predict this system. <strong>Cadence</strong> is fixed in code and exact.
+        <strong>Duration</strong> is how long real work takes — none of it is currently
+        measured, so those rows are estimates to instrument, not facts.
+      </p>
+    </div>
+
+    <div class="panel table-scroll">
+      <table>
+        <thead>
+          <tr><th>Hop</th><th>Time</th><th>Kind</th><th>Where it comes from</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Kite tick → ticker book</td><td class="num">real time</td><td>push</td><td class="k">WebSocket, no polling</td></tr>
+          <tr><td>SSE frame → browser</td><td class="num">125 ms</td><td>cadence</td><td class="k">STREAM_INTERVAL_MS</td></tr>
+          <tr><td>Redis read in the SSE loop</td><td class="num">&lt; 1 ms</td><td>duration</td><td class="k">single GET, no Postgres</td></tr>
+          <tr><td>Worker tick (watchers present)</td><td class="num">125 ms</td><td>cadence</td><td class="k">STREAM_INTERVAL_MS</td></tr>
+          <tr><td>Worker tick (idle)</td><td class="num">2 s</td><td>cadence</td><td class="k">TICKER_IDLE_POLL_SECONDS</td></tr>
+          <tr><td>Broker quote reuse</td><td class="num">500 ms</td><td>TTL</td><td class="k">BROKER_QUOTE_TTL_MS</td></tr>
+          <tr><td>Option chain / ATM IV cache</td><td class="num">15 s</td><td>TTL</td><td class="k">OPTION_CHAIN_TTL_MS</td></tr>
+          <tr><td>Trend / levels cache</td><td class="num">30 s</td><td>TTL</td><td class="k">TREND_TTL_MS · LEVELS_TTL_MS</td></tr>
+          <tr><td>Matrix pass gate</td><td class="num">15 s</td><td>cadence</td><td class="k">MATRIX_REFRESH_GATE_MS</td></tr>
+          <tr><td>Matrix rows computed per pass</td><td class="num">10 s</td><td>budget</td><td class="k">MATRIX_PASS_BUDGET_MS</td></tr>
+          <tr><td>Watcher expiry after tab closes</td><td class="num">45 s</td><td>TTL</td><td class="k">WATCH_TTL_SECONDS</td></tr>
+          <tr><td>Board marked stale</td><td class="num">45 s</td><td>TTL</td><td class="k">SNAPSHOT_FRESH_MS</td></tr>
+          <tr><td>Last-good board retained</td><td class="num">10 min</td><td>TTL</td><td class="k">SNAPSHOT_TTL_MS</td></tr>
+          <tr><td>Screener / medium tier</td><td class="num">60 s</td><td>TTL</td><td class="k">TIER_TTL_MS["medium"]</td></tr>
+          <tr><td>Param Chart month pack</td><td class="num">1 h</td><td>TTL</td><td class="k">MONTH_PACK_TTL_MS</td></tr>
+          <tr><td>Market cap / P&#47;E (NSE)</td><td class="num">6 h</td><td>TTL</td><td class="k">FUNDAMENTALS_TTL_SECONDS</td></tr>
+          <tr><td>One chain scan</td><td class="num">~1–3 s</td><td>estimate</td><td class="k">not measured — instrument this</td></tr>
+          <tr><td>One Signal row build</td><td class="num">~1–3 s</td><td>estimate</td><td class="k">not measured — sets rows-per-pass</td></tr>
+          <tr><td>Cold Param Chart month rebuild</td><td class="num">up to minutes</td><td>estimate</td><td class="k">Kite historical pull</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <h3>The one number that decides everything</h3>
+      <p>
+        A Signal row build is sequential and unmeasured. At ~2 s a row, a 10-second pass
+        serves about five rows, so ten watched instruments refresh roughly every other pass
+        — around 30 seconds each, not 125 ms. Measure this before promising anyone a
+        refresh rate.
+      </p>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────  FIXES  ──────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">04 · What was broken</p>
+      <h2>Three collisions, all the same shape</h2>
+      <p>
+        Each bug was a key that named a tenant but not an instrument, so the second window
+        overwrote the first. Toggle each card to see the before and after.
+      </p>
+    </div>
+
+    <div class="panel fix">
+      <div class="fix-head">
+        <h3>Two Lab windows fought over one ticker subscription</h3>
+        <button class="toggle" aria-pressed="false" data-ba="ba1">show the bug</button>
+      </div>
+      <p style="font-size:.9rem;color:var(--ink-2)">
+        The hub <em>replaces</em> a source's whole token map. Both Lab windows synced under
+        the same source name, so every tick NIFTY's chain unsubscribed SENSEX's and back —
+        both windows flapping to REST. Found only when the scenario changed from
+        Lab+Signal to Lab+Lab.
+      </p>
+      <div class="ba" id="ba1" hidden>
+        <div class="ba-row before"><span class="ba-tag">before</span><span class="ba-val">sources["options_lab"] = { … }   ← last writer wins</span></div>
+        <div class="ba-row after"><span class="ba-tag">after</span><span class="ba-val">sources["options_lab:NSE:NIFTY 50"] + sources["options_lab:BSE:SENSEX"] → unioned</span></div>
+      </div>
+    </div>
+
+    <div class="panel fix">
+      <div class="fix-head">
+        <h3>Param Chart moved the desk for everyone</h3>
+        <button class="toggle" aria-pressed="false" data-ba="ba2">show the bug</button>
+      </div>
+      <p style="font-size:.9rem;color:var(--ink-2)">
+        Opening a chart for an instrument issued a tenant-wide config PATCH, and the month
+        pack key had no instrument in it. Ten admin screens overwrote one another and
+        dragged Signal's desk primary along.
+      </p>
+      <div class="ba" id="ba2" hidden>
+        <div class="ba-row before"><span class="ba-tag">before</span><span class="ba-val">pack:1D:2026-08   ·   client PATCHes tenant config</span></div>
+        <div class="ba-row after"><span class="ba-tag">after</span><span class="ba-val">pack:NSE:NIFTY 50:1D:2026-08   ·   instrument rides ?underlying=</span></div>
+      </div>
+    </div>
+
+    <div class="panel fix">
+      <div class="fix-head">
+        <h3>Signal starved every unpinned instrument</h3>
+        <button class="toggle" aria-pressed="false" data-ba="ba3">show the bug</button>
+      </div>
+      <p style="font-size:.9rem;color:var(--ink-2)">
+        The worker warmed two extra rows, pinned names first — so RELIANCE behind three
+        pinned indices never got a row, and the stream quietly served the desk primary's
+        numbers under RELIANCE's heading.
+      </p>
+      <div class="ba" id="ba3" hidden>
+        <div class="ba-row before"><span class="ba-tag">before</span><span class="ba-val">max_extra = 2 · pinned first · fall back to desk row, unlabelled</span></div>
+        <div class="ba-row after"><span class="ba-tag">after</span><span class="ba-val">ad-hoc first · 10 s budget · rotation cursor · warming frame names the instrument</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────  LAYERS  ──────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">05 · Guarantees</p>
+      <h2>What each layer promises</h2>
+    </div>
+
+    <div class="panel">
+      <details class="layer" open>
+        <summary>Kite ticker hub <span class="cadence">real time · 1 socket / tenant</span></summary>
+        <div class="layer-body">
+          <ul>
+            <li>One WebSocket per tenant regardless of how many windows are open.</li>
+            <li>Each tool owns named sources; the hub unions them and sends only the delta.</li>
+            <li>Closing a window prunes just that instrument's source — never another tool's.</li>
+            <li><strong>Refuses to start</strong> when <code>WEB_CONCURRENCY &gt; 1</code>.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="layer">
+        <summary>Workers <span class="cadence">125 ms tick · bounded fan-out</span></summary>
+        <div class="layer-body">
+          <ul>
+            <li>Lab: one refresh per watched instrument, at most 3 concurrently.</li>
+            <li>Signal: rows in rotation inside a 10 s budget; the cursor resumes where the last pass stopped, so the tail is never starved.</li>
+            <li>Param Chart: one overlay per (tenant, instrument), plus per-instrument rebuild locks.</li>
+            <li>A failure on one instrument no longer cancels the rest of the tick.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="layer">
+        <summary>Redis <span class="cadence">every key carries the instrument</span></summary>
+        <div class="layer-body">
+          <ul>
+            <li>Watch keys are <code>{tenant}|{instrument}</code> with a 45 s TTL — self-cleaning.</li>
+            <li>Signal splits shared <code>globals</code> from per-instrument <code>row</code>. Globals are <strong>written once</strong> per warm cycle, not once computed — every row build still produces them, and the metric tier caches absorb the repeat.</li>
+            <li>Lab snapshots are fingerprinted by underlying and wings.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="layer">
+        <summary>SSE readers <span class="cadence">125 ms · cache only</span></summary>
+        <div class="layer-body">
+          <ul>
+            <li>Never computes and never opens Postgres in the steady state.</li>
+            <li>Identical frames send a keepalive instead, so React does not re-render at 8 Hz.</li>
+            <li>An instrument with no row yet gets a <em>warming</em> frame under its own name — never another instrument's numbers.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="layer">
+        <summary>Browser <span class="cadence">one tool per window</span></summary>
+        <div class="layer-body">
+          <ul>
+            <li>The shared instrument board is <code>sessionStorage</code> + a DOM event — per tab, so separate tabs never cross-talk.</li>
+            <li>The instrument lives in the URL and rides every request as a query parameter.</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────  LIMITS  ──────────────────────────── -->
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">06 · Standing limits</p>
+      <h2>Things you did not ask about, and should know</h2>
+    </div>
+
+    <div class="cards">
+      <div class="panel card">
+        <h3>Rotation is not simultaneity</h3>
+        <p>
+          Ten watched Signal rows are served in rotation, not all at once. Every row is
+          served; not every row is equally fresh at any instant. A row that waited a pass
+          shows its age badge — that is correct behaviour, not a fault.
+        </p>
+      </div>
+      <div class="panel card">
+        <h3>Single process is a hard ceiling</h3>
+        <p>
+          <code>WEB_CONCURRENCY=1</code>, and the hub refuses to run otherwise. Every
+          in-process cache assumes it too. This work made the ceiling behave well under
+          load; it did not raise it. Raising it means moving the hub out of the web process.
+        </p>
+      </div>
+      <div class="panel card">
+        <h3>Old chart packs are orphaned</h3>
+        <p>
+          The Param Chart key shape changed, so cached packs from before the deploy are
+          unreachable. The first open per instrument rebuilds from Kite and may show the
+          “still rebuilding” notice. One-time cost, no data loss.
+        </p>
+      </div>
+      <div class="panel card">
+        <h3>Not yet proven against live Kite</h3>
+        <p>
+          The tests prove the keying, budgets and pruning. They do not prove Kite's rate
+          limits hold at ten-window fan-out. Watch
+          <code>options_lab_yield_to_signal</code> and
+          <code>signal_matrix_pass_budget_spent</code> on first real use.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Verified against the working tree — 736 backend and 249 web tests passing.</p>
+    <p>Cadences and TTLs are read from the code; durations marked “estimate” are not instrumented yet.</p>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    "use strict";
+
+    var SCENARIOS = {
+      user: {
+        stats: [
+          ["Windows", "2", "Options Lab"],
+          ["Instruments", "2", "NIFTY 50 · SENSEX"],
+          ["WebSockets", "1", "per tenant"],
+          ["Hub sources", "2", "options_lab:*"]
+        ],
+        keys: [
+          ["atlas:options-lab:watch:{t}|NSE:NIFTY 50", "Window 1 is alive", "45 s TTL"],
+          ["atlas:options-lab:watch:{t}|BSE:SENSEX", "Window 2 is alive", "45 s TTL"],
+          ["atlas:options-lab:{t}:fp:15:NSE:NIFTY 50", "Chain fingerprint", "10 min"],
+          ["atlas:options-lab:{t}:fp:15:BSE:SENSEX", "Chain fingerprint", "10 min"],
+          ["atlas:options-lab:{t}:snapshot:15:{fp}", "Chain rows per instrument", "10 min"]
+        ],
+        note: "Both chains stay subscribed on one socket. Before the fix these two windows overwrote each other's subscription on every 125 ms tick."
+      },
+      admin: {
+        stats: [
+          ["Windows", "10", "mixed tools"],
+          ["Instruments", "10", "one per screen"],
+          ["WebSockets", "1", "still one"],
+          ["Hub sources", "2 + N", "signal + param_chart + lab×N"]
+        ],
+        keys: [
+          ["atlas:signals:watchinstr:{t}", "Hash: field per watched instrument", "45 s TTL"],
+          ["atlas:signals:{t}:globals", "Market-wide checks, computed once", "10 min"],
+          ["atlas:signals:{t}:row:NSE:NIFTY_50", "One row per instrument (spaces \u2192 _)", "10 min"],
+          ["atlas:param-chart:watch:{t}|{instrument}", "Chart window is alive", "45 s TTL"],
+          ["atlas:param-chart:{t}:pack:{instrument}:1D:2026-08", "Month OHLC + premium trail", "1 h"],
+          ["atlas:param-chart:{t}:overlay:{instrument}", "Today's live overlay", "short"],
+          ["atlas:options-lab:watch:{t}|{instrument}", "Lab window is alive", "45 s TTL"]
+        ],
+        note: "Signal rows rotate inside a 10-second budget, so ten instruments refresh in roughly two passes rather than all at once. Lab refreshes are capped at three concurrent chain scans."
+      },
+      both: {
+        stats: [
+          ["Windows", "12", "1 end user + 1 admin"],
+          ["Instruments", "≤ 12", "deduplicated"],
+          ["WebSockets", "1", "shared, unioned"],
+          ["Concurrent scans", "3", "semaphore"]
+        ],
+        keys: [
+          ["atlas:options-lab:watch:{t}|*", "One per open Lab instrument", "45 s TTL"],
+          ["atlas:signals:watchinstr:{t}", "Every watched Signal instrument", "45 s TTL"],
+          ["atlas:param-chart:watch:{t}|*", "One per open Chart instrument", "45 s TTL"],
+          ["atlas:signals:{t}:globals", "Shared by every Signal row", "10 min"],
+          ["atlas:signals:{t}:row:*", "Per instrument (spaces \u2192 _), built in rotation", "10 min"],
+          ["atlas:options-lab:{t}:snapshot:*", "Per instrument + wings", "10 min"],
+          ["atlas:param-chart:{t}:pack:*", "Per instrument + interval + month", "1 h"]
+        ],
+        note: "The end user and the admin share one tenant socket. If they watch the same instrument they share its keys and its compute — the work is deduplicated, not doubled."
+      }
+    };
+
+    var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+    var statsEl = document.getElementById("stats");
+    var keysEl = document.getElementById("keys");
+    var noteEl = document.getElementById("scenario-note");
+
+    function render(name) {
+      var s = SCENARIOS[name];
+      if (!s) return;
+
+      statsEl.textContent = "";
+      s.stats.forEach(function (row) {
+        var wrap = document.createElement("div");
+        wrap.className = "stat";
+        var dt = document.createElement("dt");
+        dt.textContent = row[0];
+        var dd = document.createElement("dd");
+        dd.textContent = row[1];
+        var small = document.createElement("small");
+        small.textContent = " " + row[2];
+        dd.appendChild(small);
+        wrap.appendChild(dt);
+        wrap.appendChild(dd);
+        statsEl.appendChild(wrap);
+      });
+
+      keysEl.textContent = "";
+      s.keys.forEach(function (row) {
+        var tr = document.createElement("tr");
+        var k = document.createElement("td");
+        k.className = "k";
+        k.textContent = row[0];
+        var h = document.createElement("td");
+        h.textContent = row[1];
+        var l = document.createElement("td");
+        l.className = "num";
+        l.textContent = row[2];
+        tr.appendChild(k);
+        tr.appendChild(h);
+        tr.appendChild(l);
+        keysEl.appendChild(tr);
+      });
+
+      noteEl.textContent = s.note;
+    }
+
+    tabs.forEach(function (tab) {
+      tab.addEventListener("click", function () {
+        tabs.forEach(function (t) { t.setAttribute("aria-selected", String(t === tab)); });
+        render(tab.id.replace("tab-", ""));
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll(".toggle"), function (btn) {
+      btn.addEventListener("click", function () {
+        var panel = document.getElementById(btn.getAttribute("data-ba"));
+        if (!panel) return;
+        var open = btn.getAttribute("aria-pressed") === "true";
+        btn.setAttribute("aria-pressed", String(!open));
+        panel.hidden = open;
+        btn.textContent = open ? "show the bug" : "hide";
+      });
+    });
+
+    render("user");
+  })();
+</script>
+</body>
+</html>

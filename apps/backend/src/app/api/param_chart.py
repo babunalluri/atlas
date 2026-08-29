@@ -77,6 +77,10 @@ async def get_param_chart_month(
     year: int | None = Query(None, ge=2000, le=2100),
     month: int | None = Query(None, ge=1, le=12),
     interval: str | None = Query(None),
+    underlying: str | None = Query(
+        None,
+        description="Instrument to read (e.g. NSE:NIFTY 50). Defaults to the desk instrument.",
+    ),
     refresh: bool = Query(False),
     build_missing: bool = Query(True),
 ) -> dict[str, Any]:
@@ -84,6 +88,7 @@ async def get_param_chart_month(
         year=year,
         month=month,
         interval=interval,
+        underlying=underlying,
         force_refresh=refresh,
         build_missing=build_missing,
     )
@@ -119,24 +124,33 @@ async def persist_param_chart_metrics(
 async def stream_param_chart(
     request: Request,
     context: StreamAdminContext,
+    underlying: str | None = Query(
+        None,
+        description="Instrument to watch. Defaults to the desk instrument.",
+    ),
 ) -> StreamingResponse:
     """SSE: today overlay from Redis (book + Signal snapshot), ~8 Hz."""
 
     async def event_stream() -> AsyncIterator[bytes]:
         tenant_key = str(context.tenant_id)
+        selected = (underlying or "").strip() or None
         last_rev: tuple[Any, ...] | None = None
         try:
             while True:
                 if await request.is_disconnected():
                     break
-                payload = await overlay_frame_from_cache(tenant_key)
+                payload = await overlay_frame_from_cache(tenant_key, selected)
                 if payload is None:
-                    payload = await refresh_overlay_from_cache(tenant_key)
+                    payload = await refresh_overlay_from_cache(
+                        tenant_key, underlying=selected
+                    )
                 if payload is None:
                     async with SessionFactory() as session:
                         async with session.begin():
                             await apply_tenant_guc(session, context.tenant_id)
-                            payload = await month_state_for_stream(session, context)
+                            payload = await month_state_for_stream(
+                                session, context, selected
+                            )
                 rev = stream_revision(payload)
                 if rev == last_rev:
                     yield SSE_KEEPALIVE

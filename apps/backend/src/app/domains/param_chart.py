@@ -462,6 +462,52 @@ def _apply_premiums(
     return updated
 
 
+def config_for_underlying(
+    base: ParamChartConfig, underlying: str | None
+) -> ParamChartConfig:
+    """Clone the desk config aimed at another underlying (request-scoped).
+
+    Lets one Chart window read an instrument the tenant desk config does not
+    point at, without PATCHing org-wide config — previously every window that
+    changed instrument moved the chart for the whole tenant.
+
+    Strike and CE/PE are cleared rather than inherited: a BANKNIFTY strike is
+    meaningless on SENSEX, and ``heal_option_symbols_for_month`` re-derives the
+    option legs for the new underlying. Strike step comes from the index
+    presets, then the equity seed, then the desk's own step.
+    """
+    from dataclasses import replace
+
+    from app.domains.options_lab import UNDERLYING_PRESETS, suggest_fut_symbol
+    from app.domains.options_lab_underlyings import EQUITY_FNO_SEED
+
+    sym = (underlying or "").strip()
+    if not sym or sym == base.underlying_symbol:
+        return base
+
+    preset: dict[str, Any] | None = next(
+        (p for p in UNDERLYING_PRESETS if str(p.get("symbol")) == sym), None
+    ) or next((p for p in EQUITY_FNO_SEED if str(p.get("symbol")) == sym), None)
+
+    step = base.strike_step
+    if preset is not None:
+        try:
+            step = max(1, int(preset["strike_step"]))
+        except (KeyError, TypeError, ValueError):
+            step = base.strike_step
+
+    return replace(
+        base,
+        underlying_symbol=sym,
+        underlying_label=str(preset.get("label")) if preset else sym,
+        fut_symbol=suggest_fut_symbol(sym) or "",
+        strike_step=step,
+        strike=None,
+        ce_symbol="",
+        pe_symbol="",
+    )
+
+
 @dataclass
 class ParamChartConfig:
     underlying_symbol: str = "NSE:NIFTY BANK"
@@ -772,16 +818,64 @@ def apply_today_overlay(
     return out
 
 
-async def refresh_overlay_from_cache(tenant_id: str) -> dict[str, Any] | None:
-    """Write today's SSE overlay from Redis + ticker book. No Postgres / Kite hist."""
-    await pc_cache.touch_watcher(tenant_id)
+async def resolve_atm_strike(
+    tenant_id: str, cfg: ParamChartConfig
+) -> ParamChartConfig:
+    """Give a request-scoped config an ATM strike from live spot.
+
+    ``config_for_underlying`` clears the desk strike because a BANKNIFTY strike
+    is meaningless on NIFTY. Without a replacement the config carries no
+    strike, ``heal_option_symbols_for_month`` bails at ``strike <= 0``, and the
+    window renders OHLC with no CE/PE — no premium trail, which is the whole
+    point of this chart. Book-only: never REST from here.
+    """
+    if cfg.strike and int(cfg.strike) > 0:
+        return cfg
+    symbol = (cfg.underlying_symbol or "").strip()
+    if not symbol:
+        return cfg
+    quotes = await _book_quotes(tenant_id, [symbol])
+    row = quotes.get(symbol) if isinstance(quotes, dict) else None
+    spot = _pick_float(row if isinstance(row, dict) else None, "last_price", "ltp", "last")
+    if spot is None and isinstance(row, dict):
+        ohlc = row.get("ohlc") if isinstance(row.get("ohlc"), dict) else None
+        spot = _pick_float(ohlc, "close")
+    if spot is None or spot <= 0:
+        # No book yet — leave the strike unset rather than invent one. The next
+        # tick retries once the ticker has this instrument subscribed.
+        return cfg
+    step = max(1, int(cfg.strike_step or 50))
+    strike = int(round(float(spot) / step) * step)
+    from dataclasses import replace
+
+    return replace(cfg, strike=strike)
+
+
+async def refresh_overlay_from_cache(
+    tenant_id: str, *, underlying: str | None = None
+) -> dict[str, Any] | None:
+    """Write today's SSE overlay from Redis + ticker book. No Postgres / Kite hist.
+
+    Deliberately does NOT register a watcher. Readers own registration (the SSE
+    loop touches in ``overlay_frame_from_cache``, the REST read in
+    ``month_state``); the worker is the other caller here, and a refresh that
+    re-touched its own watch key renewed it forever — the desk never went idle
+    once a single window had ever been opened.
+    """
     cfg = await config_from_setup_cache(tenant_id)
     if cfg is None:
         return None
+    if underlying and underlying.strip():
+        cfg = config_for_underlying(cfg, underlying)
+        cfg = await resolve_atm_strike(tenant_id, cfg)
     y, m = cfg.resolved_year_month()
     cfg = heal_option_symbols_for_month(cfg, year=y, month=m)
     pack = await pc_cache.get_month_pack(
-        tenant_id, year=y, month=m, interval=cfg.interval
+        tenant_id,
+        year=y,
+        month=m,
+        interval=cfg.interval,
+        underlying=cfg.underlying_symbol,
     )
     live = await live_quote_overlay(tenant_id, cfg)
     if isinstance(pack, dict) and pack.get("days"):
@@ -813,7 +907,9 @@ async def refresh_overlay_from_cache(tenant_id: str) -> dict[str, Any] | None:
             merged["quote_stale"] = True
             merged["quote_reference"] = live.get("quote_reference") or "previous_close"
     slim = _slim_stream_frame(merged)
-    await pc_cache.set_overlay(tenant_id, slim)
+    # Same slot the reader asked for, or the next SSE frame would serve this
+    # instrument's rows from the desk instrument's slot.
+    await pc_cache.set_overlay(tenant_id, slim, underlying=underlying)
     return slim
 
 
@@ -1422,8 +1518,9 @@ class ParamChartService:
     ) -> dict[str, Any]:
         tenant_id = _tenant_key(self.context)
         ui_iv = _normalize_interval(cfg.interval)
+        scope = cfg.underlying_symbol
         cached = await pc_cache.get_month_pack(
-            tenant_id, year=year, month=month, interval=ui_iv
+            tenant_id, year=year, month=month, interval=ui_iv, underlying=scope
         )
         if (
             not force_refresh
@@ -1492,7 +1589,7 @@ class ParamChartService:
             }
 
         got_lock = await pc_cache.try_rebuild_lock(
-            tenant_id, year=year, month=month, interval=ui_iv
+            tenant_id, year=year, month=month, interval=ui_iv, underlying=scope
         )
         if not got_lock:
             # Another worker is rebuilding — return stub; client retries.
@@ -1524,7 +1621,7 @@ class ParamChartService:
         try:
             # Re-check after lock — winner may have finished.
             cached2 = await pc_cache.get_month_pack(
-                tenant_id, year=year, month=month, interval=ui_iv
+                tenant_id, year=year, month=month, interval=ui_iv, underlying=scope
             )
             if (
                 not force_refresh
@@ -1622,12 +1719,21 @@ class ParamChartService:
                     error=str(exc)[:200],
                 )
             await pc_cache.set_month_pack(
-                tenant_id, year=year, month=month, interval=ui_iv, payload=pack
+                tenant_id,
+                year=year,
+                month=month,
+                interval=ui_iv,
+                payload=pack,
+                underlying=scope,
             )
             return pack
         finally:
             await pc_cache.release_rebuild_lock(
-                tenant_id, year=year, month=month, interval=ui_iv
+                tenant_id,
+                year=year,
+                month=month,
+                interval=ui_iv,
+                underlying=scope,
             )
 
     async def _live_quote_overlay(self, cfg: ParamChartConfig) -> dict[str, Any]:
@@ -1645,12 +1751,23 @@ class ParamChartService:
         year: int | None = None,
         month: int | None = None,
         interval: str | None = None,
+        underlying: str | None = None,
         force_refresh: bool = False,
         build_missing: bool = True,
         persist_metrics: bool = True,
     ) -> dict[str, Any]:
         cfg = await self._read_config()
         saved_cfg = cfg
+        # Request-scoped instrument: read another underlying without moving the
+        # tenant desk chart for everyone else.
+        if underlying and underlying.strip():
+            cfg = config_for_underlying(cfg, underlying)
+            cfg = await resolve_atm_strike(_tenant_key(self.context), cfg)
+        # Watch the slot the CALLER reads from, not the symbol it resolves to.
+        # Registering a desk-default read under its resolved symbol created a
+        # second watch key nobody read, and the worker then refreshed it — and
+        # re-touched it — on every tick, so it never expired.
+        watch_scope = (underlying or "").strip() or None
         y, m = cfg.resolved_year_month()
         if year:
             y = year
@@ -1666,13 +1783,19 @@ class ParamChartService:
             force_refresh=force_refresh,
             build_missing=build_missing,
         )
+        # An off-desk read must report the instrument it actually served, or
+        # the window would render SENSEX rows under the desk's BANKNIFTY name.
         admin_cfg = (
-            saved_cfg.to_admin_dict() if interval else cfg.to_admin_dict()
+            saved_cfg.to_admin_dict()
+            if interval and not underlying
+            else cfg.to_admin_dict()
         )
         # Soft/building stubs must not fabricate a lone "today" bar — SSE would
         # otherwise replace a full intraday hist with one empty row.
         if pack.get("building"):
-            await pc_cache.touch_watcher(_tenant_key(self.context))
+            await pc_cache.touch_watcher(
+                _tenant_key(self.context), underlying=watch_scope
+            )
             live = await self._live_quote_overlay(cfg)
             live_metrics = (
                 live["live_metrics"]
@@ -1717,7 +1840,9 @@ class ParamChartService:
                 await self.persist_metrics_from_signal_snapshot(force=False)
             except Exception:  # noqa: BLE001
                 logger.warning("param_chart_metrics_persist_failed")
-        await pc_cache.touch_watcher(_tenant_key(self.context))
+        await pc_cache.touch_watcher(
+            _tenant_key(self.context), underlying=watch_scope
+        )
         return {
             **merged,
             "ok": True,
@@ -1809,6 +1934,7 @@ class ParamChartService:
             month=m,
             interval=_normalize_interval(cfg.interval),
             payload=pack,
+            underlying=cfg.underlying_symbol,
         )
         logger.info(
             "param_chart_metrics_persisted",
@@ -1867,19 +1993,30 @@ def _slim_stream_frame(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def overlay_frame_from_cache(tenant_id: str) -> dict[str, Any] | None:
-    """SSE hot path: Redis overlay only (no Postgres / Kite)."""
-    await pc_cache.touch_watcher(tenant_id)
-    frame = await pc_cache.get_overlay(tenant_id)
+async def overlay_frame_from_cache(
+    tenant_id: str, underlying: str | None = None
+) -> dict[str, Any] | None:
+    """SSE hot path: Redis overlay only (no Postgres / Kite).
+
+    ``underlying`` selects the per-instrument overlay slot and is now carried
+    end to end: the request scopes the config, and packs, locks and the watcher
+    are all keyed by the instrument it resolves to.
+    """
+    await pc_cache.touch_watcher(tenant_id, underlying=underlying)
+    frame = await pc_cache.get_overlay(tenant_id, underlying)
     return frame if isinstance(frame, dict) else None
 
 
 async def month_state_for_stream(
     session: AsyncSession,
     context: Any,
+    underlying: str | None = None,
 ) -> dict[str, Any]:
     # Soft: never run Kite year rebuilds or EOD persist on the live SSE loop.
+    # The instrument must reach month_state, or the overlay written to this
+    # instrument's slot would carry the desk instrument's rows.
     full = await ParamChartService(session, context).month_state(
+        underlying=underlying,
         build_missing=False,
         persist_metrics=False,
     )
@@ -1887,7 +2024,7 @@ async def month_state_for_stream(
     # Overlay cache is the live path — do not persist a hist-building stub or
     # SSE will keep serving building=True after the month pack expires.
     slim["building"] = False
-    await pc_cache.set_overlay(_tenant_key(context), slim)
+    await pc_cache.set_overlay(_tenant_key(context), slim, underlying=underlying)
     return slim
 
 

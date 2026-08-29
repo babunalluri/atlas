@@ -7,8 +7,9 @@ import { getOnboardingStatus, getWorkspaceInfo } from "@/lib/api/admin";
 import { useAgentOsToken } from "@/lib/auth/token";
 
 /**
- * Resolves the signed-in user's tenant and redirects to `/t/{slug}/chat`.
- * Kept for deep links and bookmarks; home no longer promotes this path.
+ * Resolves the signed-in user's tenant and redirects into their workspace:
+ * `/t/{slug}/workspace` for trading desks (instrument-first), `/t/{slug}/chat`
+ * otherwise. Kept for deep links and bookmarks; home no longer promotes this.
  */
 export default function ChatEntryPage() {
   const router = useRouter();
@@ -41,7 +42,13 @@ export default function ChatEntryPage() {
           setError("Workspace slug is missing.");
           return;
         }
-        router.replace(`/t/${slug}/chat`);
+        // Trading desks are instrument-first: land on the instrument list, not
+        // a desk already pinned to one instrument. Other domains keep chat.
+        router.replace(
+          workspace.domain === "stock_broker"
+            ? `/t/${slug}/workspace`
+            : `/t/${slug}/chat`,
+        );
       } catch (reason) {
         if (!cancelled) {
           setError(

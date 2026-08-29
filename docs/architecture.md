@@ -101,4 +101,5 @@ Shared runtime is the default for cost and operability. Dedicated DB/runtime cel
 Stock-broker desk surfaces (Signal Engine, Options Lab, Param Chart) share instrument identity via Postgres `desk_instrument` and optional same-tab `sessionStorage` handoff. Signal matrix live state lives in Redis; Lab chain cache is separate.
 
 - [Desk instrument board](desk-instrument.md) — architecture, Redis/Postgres keys, Signal → Lab walkthrough.
+- [Desk architecture roadmap](desk-architecture-roadmap.md) — instrument-first UX, unified per-instrument matrix, phased rollout.
 - [Options Lab market profile](options-lab-market-profile.md) — deferred US/IN market abstraction.

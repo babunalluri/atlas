@@ -65,6 +65,12 @@ SCREENER_WINGS = 5
 SCREENER_WINGS_EQUITY = 2
 # Cap live equity/all scans so cold opens stay responsive.
 SCREENER_EQUITY_CAP = 20
+# How many watched (tenant, instrument) chain refreshes may run concurrently in
+# one worker tick. Each is a full chain scan against Kite, and the tick fanned
+# out over every watcher with no ceiling — ten open Lab windows meant ten
+# simultaneous scans on a single-worker backend. Excess work is not dropped,
+# just queued behind the semaphore.
+LAB_REFRESH_CONCURRENCY = 3
 # Keep enough intra-session detail while avoiding huge write amplification.
 STRADDLE_HISTORY_MAX = 480  # ~8m at 1 point/s per strike (fetched_at is whole seconds)
 STRADDLE_HISTORY_RESPONSE_MAX = 600  # chart-facing payload cap
@@ -266,6 +272,50 @@ def suggest_fut_symbol(
     return suggest_equity_fut_symbol(underlying_symbol, when=when)
 
 
+def config_for_underlying(
+    base: OptionsLabConfig, underlying: str | None
+) -> OptionsLabConfig:
+    """Clone the desk config aimed at another underlying (request-scoped).
+
+    Phase 0 / E1: lets one window stream an instrument the tenant desk config
+    does not point at, without PATCHing org-wide config. FUT is derived rather
+    than inherited — the desk's FUT belongs to the desk's underlying.
+
+    Strike step comes from the index presets, then the equity seed, then the
+    caller's step. An unknown equity therefore keeps the desk step, which may
+    be wrong for that name; the full NFO parse (I2) is the proper fix.
+    """
+    from dataclasses import replace
+
+    sym = (underlying or "").strip()
+    if not sym or sym == base.underlying_symbol:
+        return base
+
+    preset: dict[str, Any] | None = next(
+        (p for p in UNDERLYING_PRESETS if str(p.get("symbol")) == sym), None
+    )
+    if preset is None:
+        preset = next(
+            (p for p in EQUITY_FNO_SEED if str(p.get("symbol")) == sym), None
+        )
+
+    step = base.strike_step
+    if preset is not None:
+        try:
+            step = max(1, int(preset["strike_step"]))
+        except (KeyError, TypeError, ValueError):
+            step = base.strike_step
+
+    label = str(preset.get("label")) if preset else sym
+    return replace(
+        base,
+        underlying_symbol=sym,
+        underlying_label=label,
+        fut_symbol=suggest_fut_symbol(sym) or "",
+        strike_step=step,
+    )
+
+
 def screener_presets(
     universe: str = "indices",
     *,
@@ -406,6 +456,37 @@ async def apply_screener_ivp(
     return out
 
 
+def day_change_from_quote(
+    quote_row: dict[str, Any] | None, spot: float | None
+) -> tuple[float | None, float | None]:
+    """(change, change_pct) vs previous close, for watchlist-style rows.
+
+    Computes ``spot − ohlc.close`` first: in a Kite quote, ``ohlc.close`` is the
+    *previous* close, and deriving from two real prices is more reliable than
+    the broker's ``net_change`` — which comes back as 0 for equity rows even
+    when the name has moved, making every equity read "0.00". ``net_change`` is
+    the fallback for quotes that carry no OHLC.
+
+    Returns (None, None) when the quote carries neither, so a missing change
+    renders as "—" and never as a fabricated zero.
+    """
+    if not isinstance(quote_row, dict):
+        return None, None
+    close = _pick_float(quote_row.get("ohlc") or {}, "close", ohlc_fallback=False)
+    change: float | None = None
+    if spot is not None and close is not None:
+        change = spot - close
+    if change is None:
+        change = _pick_float(quote_row, "net_change", "change", ohlc_fallback=False)
+    if change is None:
+        return None, None
+    # Percent needs the prior close as the base; derive it when only net_change
+    # was supplied, and never divide by zero.
+    base = close if close is not None else (spot - change if spot is not None else None)
+    pct = (change / base) * 100 if base else None
+    return round(change, 2), (round(pct, 2) if pct is not None else None)
+
+
 def compose_screener_row(
     preset: dict[str, Any],
     *,
@@ -415,17 +496,22 @@ def compose_screener_row(
     summary: dict[str, Any],
     rows: list[dict[str, Any]],
     error: str | None = None,
+    quote_row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     symbol = str(preset.get("symbol") or "")
     label = str(preset.get("label") or symbol)
     atm_metrics = _atm_metrics_from_rows(rows)
+    change, change_pct = day_change_from_quote(quote_row, spot)
 
     return {
         "underlying_symbol": symbol,
         "underlying_label": label,
         "fut_symbol": fut_symbol,
         "strike_step": int(preset.get("strike_step") or 50),
+        "universe": preset.get("universe"),
         "spot": round(spot, 2) if spot is not None else None,
+        "change": change,
+        "change_pct": change_pct,
         "atm": atm,
         "atm_iv": atm_metrics["atm_iv"],
         "straddle": atm_metrics["straddle"],
@@ -436,8 +522,79 @@ def compose_screener_row(
         "oi_pct_chg": None,
         "iv_chg": None,
         "ivp": None,
+        # Filled by apply_screener_fundamentals — declared here so every row has
+        # the key and the UI can tell "not loaded" from "not applicable".
+        "market_cap": None,
+        "pe_ratio": None,
         "error": error,
     }
+
+
+# Background fundamentals refreshes, kept referenced so the loop cannot GC them.
+_FUNDAMENTALS_TASKS: set[asyncio.Task[Any]] = set()
+
+
+async def apply_screener_fundamentals(
+    rows: list[dict[str, Any]],
+    *,
+    mock: bool,
+) -> list[dict[str, Any]]:
+    """Attach market cap (₹ crore) and P/E to screener rows.
+
+    Reads cache only. The NSE fetch warms the site homepage before every call,
+    so a cold pass can run for minutes — awaiting it here would hang the
+    screener, including the cached fast path the workspace polls every 20 s.
+    Instead a refresh runs in the background and lands on a later poll; until
+    then a name keeps ``None`` and renders as "—". This must never fail a scan:
+    quotes and the chain are the product, these are trim.
+    """
+    from app.domains.equity_fundamentals import (
+        mock_fundamentals,
+        read_fundamentals,
+        refresh_due,
+        refresh_fundamentals,
+    )
+
+    symbols = [
+        str(row.get("underlying_symbol") or "")
+        for row in rows
+        if row.get("underlying_symbol")
+    ]
+    if not symbols:
+        return rows
+    # The row already knows which universe it came from, so the fetcher never
+    # has to guess whether a name is an index.
+    index_symbols = tuple(
+        str(row.get("underlying_symbol") or "")
+        for row in rows
+        if str(row.get("universe") or "").lower() == "indices"
+        and row.get("underlying_symbol")
+    )
+
+    if mock:
+        data = mock_fundamentals(symbols)
+    else:
+        data = read_fundamentals(symbols, index_symbols=index_symbols)
+        if refresh_due(symbols, index_symbols=index_symbols):
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    refresh_fundamentals, symbols, index_symbols=index_symbols
+                )
+            )
+            _FUNDAMENTALS_TASKS.add(task)
+            task.add_done_callback(_FUNDAMENTALS_TASKS.discard)
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        hit = data.get(str(row.get("underlying_symbol") or "")) or {}
+        out.append(
+            {
+                **row,
+                "market_cap": hit.get("market_cap"),
+                "pe_ratio": hit.get("pe_ratio"),
+            }
+        )
+    return out
 
 
 def mock_screener_rows(presets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -469,6 +626,8 @@ def mock_screener_rows(presets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "oi_pct_chg": round(idx * 1.8 - 2.5, 2),
                 "iv_chg": round(-1.5 + idx * 0.7, 2),
                 "ivp": ivp,
+                "market_cap": None,
+                "pe_ratio": None,
                 "error": None,
             }
         )
@@ -919,11 +1078,13 @@ async def chain_frame_from_cache(
     tenant_id: str,
     *,
     wings: int = DEFAULT_WINGS,
+    underlying: str | None = None,
 ) -> dict[str, Any] | None:
     """Serve one Options Lab SSE frame from Redis only (no Postgres).
 
     Returns None when fingerprint or snapshot is missing so the caller can open
-    a short-lived DB session for the cold path.
+    a short-lived DB session for the cold path. ``underlying`` scopes the
+    pointer + watcher to one instrument so two windows do not clobber (E1/E2).
     """
     wings = _clamp_wings(wings)
     # Prefer Signal when both desks are open on a small VM.
@@ -931,7 +1092,9 @@ async def chain_frame_from_cache(
 
     if await signal_cache.watcher_alive(tenant_id):
         wings = min(wings, MIN_WINGS)
-    fingerprint = await ol_cache.get_fingerprint(tenant_id, wings=wings)
+    fingerprint = await ol_cache.get_fingerprint(
+        tenant_id, wings=wings, underlying=underlying
+    )
     if not fingerprint:
         return None
     snapshot = await ol_cache.get_snapshot(
@@ -939,7 +1102,7 @@ async def chain_frame_from_cache(
     )
     if snapshot is None:
         return None
-    await ol_cache.touch_watcher(tenant_id, wings=wings)
+    await ol_cache.touch_watcher(tenant_id, wings=wings, underlying=underlying)
     return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
 
 
@@ -947,8 +1110,13 @@ async def chain_state_for_stream(
     service: "OptionsLabService",
     *,
     wings: int = DEFAULT_WINGS,
+    underlying: str | None = None,
 ) -> dict[str, Any]:
-    """Coalesce concurrent Options Lab stream readers to one chain tick per key."""
+    """Coalesce concurrent Options Lab stream readers to one chain tick per key.
+
+    ``underlying`` (E1) builds a request-scoped config so one window can stream
+    an instrument the tenant desk config does not point at.
+    """
     wings = _clamp_wings(wings)
     tenant_id = _tenant_key(service.context)
     # Prefer Signal when both desks are open on a small VM.
@@ -956,7 +1124,7 @@ async def chain_state_for_stream(
 
     if await signal_cache.watcher_alive(tenant_id):
         wings = min(wings, MIN_WINGS)
-    config = await service._read_config()
+    config = config_for_underlying(await service._read_config(), underlying)
     fingerprint = config.cache_fingerprint()
 
     snapshot = await ol_cache.get_snapshot(
@@ -965,7 +1133,7 @@ async def chain_state_for_stream(
     if snapshot is not None:
         # Re-seed fp pointer for SSE Redis fast path (e.g. after deploy).
         await ol_cache.remember_fingerprint(
-            tenant_id, wings=wings, fingerprint=fingerprint
+            tenant_id, wings=wings, fingerprint=fingerprint, underlying=underlying
         )
         return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
 
@@ -978,11 +1146,15 @@ async def chain_state_for_stream(
                 return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
             # Shield + bound wait: SSE reconnects must not orphan sandbox work.
             payload = await asyncio.wait_for(
-                asyncio.shield(service.chain_snapshot(wings=wings)),
+                asyncio.shield(service.chain_snapshot(wings=wings, config=config)),
                 timeout=60.0,
             )
             await ol_cache.set_snapshot(
-                tenant_id, payload, wings=wings, fingerprint=fingerprint
+                tenant_id,
+                payload,
+                wings=wings,
+                fingerprint=fingerprint,
+                underlying=underlying,
             )
             return _decorate_stream_payload(payload, tenant_id=tenant_id)
         finally:
@@ -998,9 +1170,13 @@ async def chain_state_for_stream(
         if snapshot is not None:
             return _decorate_stream_payload(snapshot, tenant_id=tenant_id)
 
-    payload = await service.chain_snapshot(wings=wings)
+    payload = await service.chain_snapshot(wings=wings, config=config)
     await ol_cache.set_snapshot(
-        tenant_id, payload, wings=wings, fingerprint=fingerprint
+        tenant_id,
+        payload,
+        wings=wings,
+        fingerprint=fingerprint,
+        underlying=underlying,
     )
     return _decorate_stream_payload(payload, tenant_id=tenant_id)
 
@@ -1063,7 +1239,9 @@ class OptionsLabService:
         equity_presets, equity_meta = await self._equity_presets(allow_live_fetch=False)
         presets = merge_presets(
             [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
-            equity_presets,
+            # Tag equities too — clients group the picker by universe, and an
+            # untagged row is indistinguishable from an index.
+            [{**p, "universe": "equities"} for p in equity_presets],
         )
         return {
             "ok": True,
@@ -1201,16 +1379,26 @@ class OptionsLabService:
         tool_patch: dict[str, Any] = {
             OPTIONS_LAB_SETTINGS_KEY: next_config.to_admin_dict(),
         }
+        board_moved = False
         if patch_touches_identity(patch):
             board = board_from_mapping(merged_lab, source="options-lab")
             desk_patch = desk_instrument_tool_patch(board, current)
             if desk_patch:
                 tool_patch.update(desk_patch)
+                board_moved = True
         # Patch only our nested subtree — never rewrite Signal / Param Chart keys.
         await self.engine._patch_tool_settings(tool, tool_patch)
         # Config fingerprint changed — drop SSE fast-path pointers so the next
         # frame reloads Postgres rather than serving a stale chain key.
         await ol_cache.clear_fingerprints(_tenant_key(self.context))
+        if board_moved:
+            # Signal memoizes the whole settings blob under "setup", and the
+            # board now lives in it (config_with_desk_board). Without this drop
+            # the engine keeps the previous instrument until that TTL expires —
+            # the same invalidation Param Chart already does on its own writes.
+            from app.domains import signal_engine_cache as signal_cache
+
+            await signal_cache.delete_metric(_tenant_key(self.context), "setup")
         return {"ok": True, **await self.get_admin_config()}
 
     async def reset_oi_baseline(self) -> dict[str, Any]:
@@ -1355,9 +1543,17 @@ class OptionsLabService:
             "quote_source": "signal_board",
         }
 
-    async def chain_snapshot(self, *, wings: int = DEFAULT_WINGS) -> dict[str, Any]:
+    async def chain_snapshot(
+        self,
+        *,
+        wings: int = DEFAULT_WINGS,
+        config: OptionsLabConfig | None = None,
+    ) -> dict[str, Any]:
+        """Build one chain snapshot. ``config`` overrides the tenant desk config
+        so a request-scoped instrument (E1 ``?underlying=``) can be served."""
         wings = _clamp_wings(wings)
-        config = await self._read_config()
+        if config is None:
+            config = await self._read_config()
         tenant_id = _tenant_key(self.context)
         cache_key = f"options_lab:chain:{wings}:{config.cache_fingerprint()}"
         cached = await _cache_get(tenant_id, cache_key)
@@ -1511,6 +1707,12 @@ class OptionsLabService:
             rows_with_deltas = apply_screener_session_deltas(list(rows), baselines)
             if not cached.get("partial"):
                 rows_with_deltas = await apply_screener_ivp(tenant_id, rows_with_deltas)
+            # Re-applied on cached hits too: fundamentals fill a few names per
+            # pass, so a row that was "—" when this payload was cached can be
+            # answered now without waiting for the scan cache to expire.
+            rows_with_deltas = await apply_screener_fundamentals(
+                rows_with_deltas, mock=False
+            )
             return {
                 **cached,
                 "rows": rows_with_deltas,
@@ -1586,6 +1788,9 @@ class OptionsLabService:
                         row.get("atm_iv"),
                         mock=True,
                     )
+            payload["rows"] = await apply_screener_fundamentals(
+                payload["rows"], mock=True
+            )
             await _cache_set(tenant_id, cache_key, "medium", payload)
             return payload
 
@@ -1648,8 +1853,11 @@ class OptionsLabService:
                 "rows": errors,
             }
 
-        # Spots: prefer LTP for speed on the fast path; full uses get_quote.
-        spot_prefer = "get_ltp" if mode == "fast" else "get_quote"
+        # Spots always via get_quote: `get_ltp` omits OHLC, and without the
+        # previous close the watchlist cannot show day change — it would render
+        # every row as "—". Same single batched call either way; the fast path's
+        # saving is skipping the chain scan, not the quote flavour.
+        spot_prefer = "get_quote"
         spot_quotes = await self.engine._fetch_quote(
             list(dict.fromkeys(spot_symbols)),
             prefer=spot_prefer,
@@ -1687,6 +1895,7 @@ class OptionsLabService:
                         "fut": fut,
                         "spot": spot,
                         "atm": atm,
+                        "quote_row": spot_row,
                         "strikes": [],
                         "ce_syms": [],
                         "pe_syms": [],
@@ -1720,6 +1929,7 @@ class OptionsLabService:
                     "fut": fut,
                     "spot": spot,
                     "atm": atm,
+                    "quote_row": spot_row,
                     "strikes": strikes,
                     "ce_syms": ce_syms,
                     "pe_syms": pe_syms,
@@ -1757,6 +1967,7 @@ class OptionsLabService:
                         fut_symbol=fut,
                         summary={},
                         rows=[],
+                        quote_row=item.get("quote_row"),
                     )
                 )
                 continue
@@ -1805,6 +2016,7 @@ class OptionsLabService:
                     summary=summary,
                     rows=chain_rows,
                     error=row_error,
+                    quote_row=item.get("quote_row"),
                 )
             )
 
@@ -1814,6 +2026,10 @@ class OptionsLabService:
             rows_with_deltas = await apply_screener_ivp(tenant_id, rows_with_deltas)
         else:
             rows_with_deltas = rows_out
+
+        rows_with_deltas = await apply_screener_fundamentals(
+            rows_with_deltas, mock=False
+        )
 
         payload = {
             "ok": True,
@@ -1889,10 +2105,43 @@ class OptionsLabService:
         tenant_id = _tenant_key(self.context)
         return await delete_portfolio(tenant_id, portfolio_id)
 
+    def _owner_scope(self) -> str | None:
+        """Whose bots and backtests this caller may see.
+
+        ``None`` for operators — an admin manages the whole tenant, and the bot
+        worker needs the same unscoped view to run everyone's armed bots. A
+        trader gets their own user id, so the shared tenant blob is partitioned
+        per user rather than being everybody's.
+
+        Contexts that do not implement ``can_administer`` (synthetic/internal
+        callers) keep the pre-ownership operator view rather than silently
+        losing access to rows they used to manage.
+        """
+        can_administer = getattr(self.context, "can_administer", None)
+        if not callable(can_administer) or can_administer():
+            return None
+        return str(getattr(self.context, "user_id", "") or "") or None
+
+    async def bot_mode_unscoped(self, bot_id: str) -> str | None:
+        """Mode of any bot in the tenant, ignoring ownership.
+
+        Security guards must see the truth: an end user may not read another
+        user's bot, but "is this a live bot?" still has to be answerable, or the
+        live-mode refusal would silently degrade into "not found".
+        """
+        from app.domains.options_lab_bots import load_bots
+
+        for row in await load_bots(_tenant_key(self.context)):
+            if row.get("id") == bot_id:
+                return str(row.get("mode") or "paper").lower()
+        return None
+
     async def list_backtests(self) -> dict[str, Any]:
         from app.domains.options_lab_backtests import list_backtests
 
-        return await list_backtests(_tenant_key(self.context))
+        return await list_backtests(
+            _tenant_key(self.context), owner_id=self._owner_scope()
+        )
 
     async def create_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
         from app.domains.options_lab_backtests import create_backtest
@@ -1918,7 +2167,9 @@ class OptionsLabService:
                     body["warnings"].append(
                         "Historical closes unavailable — fell back to synthetic √t path."
                     )
-        out = await create_backtest(_tenant_key(self.context), body)
+        out = await create_backtest(
+            _tenant_key(self.context), body, owner_id=self._owner_scope()
+        )
         warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else None
         if out.get("ok") and warnings:
             out["warnings"] = warnings
@@ -1929,12 +2180,16 @@ class OptionsLabService:
     async def get_backtest(self, backtest_id: str) -> dict[str, Any]:
         from app.domains.options_lab_backtests import get_backtest
 
-        return await get_backtest(_tenant_key(self.context), backtest_id)
+        return await get_backtest(
+            _tenant_key(self.context), backtest_id, owner_id=self._owner_scope()
+        )
 
     async def delete_backtest(self, backtest_id: str) -> dict[str, Any]:
         from app.domains.options_lab_backtests import delete_backtest
 
-        return await delete_backtest(_tenant_key(self.context), backtest_id)
+        return await delete_backtest(
+            _tenant_key(self.context), backtest_id, owner_id=self._owner_scope()
+        )
 
     async def summarize_backtests(
         self,
@@ -1948,6 +2203,7 @@ class OptionsLabService:
             _tenant_key(self.context),
             ids=ids,
             limit=limit,
+            owner_id=self._owner_scope(),
         )
 
     async def run_model_backtest(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2100,12 +2356,16 @@ class OptionsLabService:
     async def list_bots(self) -> dict[str, Any]:
         from app.domains.options_lab_bots import list_bots
 
-        return await list_bots(_tenant_key(self.context))
+        return await list_bots(
+            _tenant_key(self.context), owner_id=self._owner_scope()
+        )
 
     async def get_bot(self, bot_id: str) -> dict[str, Any]:
         from app.domains.options_lab_bots import get_bot
 
-        return await get_bot(_tenant_key(self.context), bot_id)
+        return await get_bot(
+            _tenant_key(self.context), bot_id, owner_id=self._owner_scope()
+        )
 
     async def create_bot(self, payload: dict[str, Any]) -> dict[str, Any]:
         from app.domains.options_lab_backtests import get_backtest
@@ -2118,7 +2378,9 @@ class OptionsLabService:
             body["underlying_symbol"] = config.underlying_symbol
         bt_id = body.get("backtest_id")
         if bt_id and not body.get("legs"):
-            got = await get_backtest(tenant_id, str(bt_id))
+            got = await get_backtest(
+                tenant_id, str(bt_id), owner_id=self._owner_scope()
+            )
             if not got.get("ok"):
                 return {"ok": False, "error": got.get("error") or "Backtest not found."}
             bt = got["backtest"]
@@ -2129,17 +2391,21 @@ class OptionsLabService:
                 body["underlying_symbol"] = bt.get("underlying_symbol")
             body.setdefault("source", "backtest")
             # Keep operator SL/TP defaults — path_trough is ₹ PnL, not a %.
-        return await create_bot(tenant_id, body)
+        return await create_bot(tenant_id, body, owner_id=self._owner_scope())
 
     async def update_bot(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         from app.domains.options_lab_bots import update_bot
 
-        return await update_bot(_tenant_key(self.context), bot_id, payload)
+        return await update_bot(
+            _tenant_key(self.context), bot_id, payload, owner_id=self._owner_scope()
+        )
 
     async def delete_bot(self, bot_id: str) -> dict[str, Any]:
         from app.domains.options_lab_bots import delete_bot
 
-        return await delete_bot(_tenant_key(self.context), bot_id)
+        return await delete_bot(
+            _tenant_key(self.context), bot_id, owner_id=self._owner_scope()
+        )
 
     async def run_bot(
         self,
@@ -2170,7 +2436,9 @@ class OptionsLabService:
         from app.domains.options_lab_trading import estimate_lot_size
 
         tenant_id = _tenant_key(self.context)
-        got = await get_bot(tenant_id, bot_id)
+        # Owner-scoped: a trader acts only on their own bot. The worker builds a
+        # tenant_admin context, so the auto path still sees every armed bot.
+        got = await get_bot(tenant_id, bot_id, owner_id=self._owner_scope())
         if not got.get("ok"):
             return got
         bot = dict(got["bot"])
@@ -2395,7 +2663,9 @@ class OptionsLabService:
         from app.domains.options_lab_trading import estimate_lot_size
 
         tenant_id = _tenant_key(self.context)
-        got = await get_bot(tenant_id, bot_id)
+        # Owner-scoped: a trader acts only on their own bot. The worker builds a
+        # tenant_admin context, so the auto path still sees every armed bot.
+        got = await get_bot(tenant_id, bot_id, owner_id=self._owner_scope())
         if not got.get("ok"):
             return got
         bot = dict(got["bot"])

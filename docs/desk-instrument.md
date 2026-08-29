@@ -21,6 +21,8 @@ It is **not** the Signal matrix, **not** Redis, and **not** the options chain. E
 
 **Analogy:** `desk_instrument` = nameplate on the desk · matrix = checklist grid · Redis snapshot = live TV feed.
 
+**Long-term direction:** [Desk architecture roadmap](desk-architecture-roadmap.md) — instrument-first landing, unified per-instrument matrix, phased backend unification.
+
 ---
 
 ## Where it lives
@@ -58,9 +60,10 @@ Empty `underlying_symbol` is **not** written (guard in `desk_instrument_tool_pat
 
 | Desk | Behavior |
 |------|----------|
-| **Options Lab** | If `options_lab.underlying_symbol` is **empty**, fill from board (`fill_only=True`). Existing Lab underlying is kept (Signal NIFTY + Lab SENSEX can coexist). |
+| **Options Lab** | Board **wins** over nested `options_lab` on read (`fill_only=False` in `options_lab._read_config`). |
 | **Param Chart** | Board **wins** over nested `param_chart` instrument fields when board has an underlying. |
-| **Signal** | Board **wins** over stale signal nest on GET (one instrument per desk). Same-tab handoff via `sessionStorage`. |
+| **Signal (admin GET)** | Board merged in `get_admin_config()` via `merge_desk_instrument_into_signal()` — UI config matches board. |
+| **Signal (engine / ticker)** | Still reads signal nest via `_load_config()` → `_load_setup()` **without** board merge — **known gap**; worker may run a different underlying than the UI until PATCH saves. See [roadmap Phase 2](desk-architecture-roadmap.md#phase-2--one-identity-m-in-progress). |
 
 ### Lab chain seed from Signal (Live only)
 
@@ -182,8 +185,9 @@ Lab publishes **underlying / FUT / strike step** only — not live chain CE/PE o
 | Desk | Backend read rule | Frontend subscribe |
 |------|-------------------|-------------------|
 | **Param Chart** | Board **wins** over nested `param_chart` (`merge_desk_instrument_into_chart`) | Identity only (underlying, FUT, strike step) — never live chain CE/PE |
-| **Options Lab** | Board **fills empty** Lab config only (`fill_only=True`) | Applies identity from other desks |
-| **Signal** | Own config on cold start | Identity from other desks; CE/PE only when explicitly published (screener/setup) |
+| **Options Lab** | Board **wins** over nested `options_lab` (`fill_only=False`) | Applies identity from other desks |
+| **Signal (GET)** | Board merged in `get_admin_config()` only | Same-tab handoff; CE/PE when explicitly published |
+| **Signal (engine)** | Nest via `_load_config()` — **no board merge yet** | N/A |
 
 `ce_symbol` / `pe_symbol` on the Postgres board reflect the last **manual** identity PATCH. Signal **auto-ATM** updates the signal config directly and does **not** write the board (otherwise ATM rolls would invalidate Param Chart month packs).
 
@@ -191,9 +195,10 @@ Lab publishes **underlying / FUT / strike step** only — not live chain CE/PE o
 
 ## Limits (by design)
 
-- **Independent underlyings:** Lab keeps its own underlying once set; board only fills **empty** Lab config.
-- **Cold reload:** Signal does not read the board on GET; desks may differ until user picks or opens tabs that sync.
-- **Partial sync:** Same-tab publish today is strongest on **underlying** picks; FUT/strike-only edits in one desk may not propagate to others until underlying changes or backend PATCH updates the board.
+- **Engine vs UI drift:** Signal admin GET merges the board; `_load_config()` / ticker still use the nest until Phase 2 worker merge (see [roadmap](desk-architecture-roadmap.md)).
+- **Multi-window:** Chart overlay and Lab chain caches are tenant-singleton — multi-instrument windows clobber until Phase 0 cache keys ship.
+- **Same-tab handoff:** `sessionStorage` + `CustomEvent` do not cross windows; use URL per window for instrument-first routing.
+- **Partial sync:** FUT/strike-only edits in one desk may not propagate via frontend bus until `patchIdentity()` centralizes publish.
 - **Margin / broker auth:** Not solved by `desk_instrument`; Live margin still depends on Kite toolkit binding.
 - **Lab tab open:** Chain + sandbox work still runs when Lab is active; board does not remove that cost.
 
@@ -209,7 +214,7 @@ Lab publishes **underlying / FUT / strike step** only — not live chain CE/PE o
 | Param Chart merge | `apps/backend/src/app/domains/param_chart.py` |
 | Redis merge | `apps/backend/src/app/domains/signal_engine_cache.py` (`merged_frame`) |
 | Frontend handoff | `apps/web/src/components/domains/desk-instrument.ts` |
-| Desk tab lifecycle | `apps/web/src/components/domains/StockBrokerWorkspace.tsx` |
+| Workspace lifecycle | `apps/web/src/components/domains/TraderWorkspace.tsx` (three-tab desk retired) |
 | Tests | `apps/backend/tests/test_desk_instrument.py`, `apps/web/src/components/domains/desk-instrument.test.ts` |
 
 ---

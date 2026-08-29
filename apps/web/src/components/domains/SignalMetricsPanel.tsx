@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { SignalSetupBar } from "@/components/domains/SignalSetupBar";
-import { DeskBooksPanel } from "@/components/domains/DeskBooksPanel";
-import { OptionsLabScreenerPanel } from "@/components/domains/OptionsLabScreenerPanel";
+import { TradingViewButton } from "@/components/domains/CommonInstrumentSetupBar";
 import {
   deskInstrumentKey,
   publishDeskInstrument,
@@ -12,6 +11,7 @@ import {
   subscribeDeskInstrument,
   type DeskInstrumentSelection,
 } from "@/components/domains/desk-instrument";
+import { isRateLimited, nextStreamBackoffMs } from "@/lib/api/rate-limit";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import { useSignalConfigAutosave } from "@/components/domains/useSignalConfigAutosave";
 import { AdminFormDialog } from "@/components/ui/AdminFormDialog";
@@ -27,18 +27,10 @@ import {
   CloseIcon,
   ChevronDownIcon,
   ArrowUpIcon,
-  BookIcon,
-  SearchIcon,
 } from "@/components/ui/icons";
 import {
-  getOptionsScreener,
   getSignalState,
   publishSignalEntry,
-  resetOptionsLabScreenerBaseline,
-  type DomainBrokerTool,
-  type DomainDashboard,
-  type OptionsScreenerRow,
-  type OptionsScreenerSnapshot,
   type SignalEngineAdminConfig,
   type SignalEngineState,
   type SignalEntry,
@@ -48,8 +40,6 @@ import {
 import { streamSignalState } from "@/lib/api/signals-stream";
 import { useAgentOsToken } from "@/lib/auth/token";
 import { cn } from "@/lib/utils";
-
-const SCREENER_POLL_MS = 60_000;
 
 /** Trade Desk Checklist category order (matches backend). */
 const CHECKLIST_CATEGORY_ORDER = [
@@ -845,22 +835,20 @@ function MetricTable({
 }
 
 export function SignalMetricsPanel({
-  deskSnapshot,
-  brokerTools = [],
-  refreshing,
-  onRefreshBooks,
-  fetchedAt,
-  rangeDays,
   readOnly = false,
+  instrument,
+  hideChartButton = false,
 }: {
-  deskSnapshot?: DomainDashboard["desk_snapshot"];
-  brokerTools?: DomainBrokerTool[];
-  refreshing?: boolean;
-  onRefreshBooks?: () => void;
-  fetchedAt?: string;
-  rangeDays?: number;
   /** Org-wide viewers: board only — no setup edits / Start-Stop / notify. */
   readOnly?: boolean;
+  /**
+   * Matrix row to open, from the trader workspace. The engine builds a row for
+   * any instrument with an open board, and both the stream and the REST read
+   * are scoped by it, so the board names what was asked for.
+   */
+  instrument?: string;
+  /** True when a dialog header already shows TV beside the instrument. */
+  hideChartButton?: boolean;
 } = {}) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [state, setState] = useState<SignalEngineState | null>(null);
@@ -873,19 +861,7 @@ export function SignalMetricsPanel({
   const [streaming, setStreaming] = useState(false);
   const [warningsOpen, setWarningsOpen] = useState(true);
   const [engineBusy, setEngineBusy] = useState(false);
-  const [booksOpen, setBooksOpen] = useState(false);
-  const [screenerOpen, setScreenerOpen] = useState(false);
-  const [screener, setScreener] = useState<OptionsScreenerSnapshot | null>(null);
-  const [screenerUniverse, setScreenerUniverse] = useState<
-    "indices" | "equities" | "all"
-  >("indices");
-  const [screenerLoading, setScreenerLoading] = useState(false);
-  const [screenerError, setScreenerError] = useState<string | null>(null);
-  const [resettingScreener, setResettingScreener] = useState(false);
-  const [screenerAtmHint, setScreenerAtmHint] = useState<number | null>(null);
   const mounted = useRef(true);
-  const screenerSeq = useRef(0);
-  const screenerAbortRef = useRef<AbortController | null>(null);
   const lastDeskInstrumentKey = useRef("");
 
   const {
@@ -904,16 +880,121 @@ export function SignalMetricsPanel({
     syncResolvedOptions,
   } = useSignalConfigAutosave(getAccessToken, isLoaded && isSignedIn);
 
-  const [viewInstrument, setViewInstrument] = useState<string>("");
+  // Seed from the caller's instrument when given; otherwise the desk primary.
+  const [viewInstrument, setViewInstrument] = useState<string>(
+    () => instrument?.trim() || "",
+  );
+  // Workspace / deep-link pinned this window to one instrument. Desk handoff
+  // and setup-bar edits must not re-point the stream at the tenant primary.
+  const pinnedInstrument = Boolean(instrument?.trim());
+  // Follow the prop when the window is re-pointed at another instrument. The
+  // lazy initializer above only runs on mount, so without this a reused panel
+  // would keep streaming the instrument it first opened with.
   useEffect(() => {
+    const wanted = instrument?.trim();
+    if (wanted) setViewInstrument(wanted);
+  }, [instrument]);
+  useEffect(() => {
+    if (pinnedInstrument) return;
     const fromConfig = config?.underlying_symbol?.trim() || "";
     if (!viewInstrument && fromConfig) {
       setViewInstrument(fromConfig);
     }
-  }, [config?.underlying_symbol, viewInstrument]);
+  }, [config?.underlying_symbol, pinnedInstrument, viewInstrument]);
 
   const configRef = useRef(config);
   configRef.current = config;
+
+  /**
+   * Setup bar reads tenant desk config. A pinned window (workspace modal /
+   * `/signal/{instrument}`) streams another row — without this mirror the
+   * dropdowns keep saying NIFTY while the header says BANKNIFTY / SENSEX.
+   */
+  const displayConfig = useMemo((): SignalEngineAdminConfig | null => {
+    if (!config) return config;
+    const wanted = viewInstrument.trim();
+    if (!wanted) return config;
+    if (
+      !pinnedInstrument &&
+      wanted === (config.underlying_symbol || "").trim()
+    ) {
+      return config;
+    }
+    if (!pinnedInstrument && !readOnly) return config;
+
+    const sameAsDesk = wanted === (config.underlying_symbol || "").trim();
+    if (sameAsDesk) return config;
+
+    const preset = presets.find((p) => p.symbol === wanted);
+    const streamMatches =
+      (state?.underlying?.symbol || "").trim().toUpperCase() ===
+      wanted.toUpperCase();
+    const warming =
+      streamMatches &&
+      (state?.feed_source === "starting" || state?.engine_computing);
+
+    return {
+      ...config,
+      underlying_symbol: wanted,
+      underlying_label: preset?.label || state?.underlying?.label || wanted,
+      fut_symbol: suggestFutSymbol(wanted) || "",
+      strike_step: preset?.strike_step ?? config.strike_step,
+      // Warming / off-desk rows must not inherit the desk's NIFTY CE/PE.
+      ce_symbol: streamMatches && !warming ? state?.ce_symbol || "" : "",
+      pe_symbol: streamMatches && !warming ? state?.pe_symbol || "" : "",
+    };
+  }, [
+    config,
+    pinnedInstrument,
+    presets,
+    readOnly,
+    state?.ce_symbol,
+    state?.engine_computing,
+    state?.feed_source,
+    state?.pe_symbol,
+    state?.underlying?.label,
+    state?.underlying?.symbol,
+    viewInstrument,
+  ]);
+
+  /**
+   * Read-only viewers may only switch between pinned matrix rows, so the list is
+   * filtered to those. But a workspace row can request an unpinned instrument
+   * (RELIANCE): with no matching <option>, the select silently falls back to
+   * rendering the first one, which read as "opened RELIANCE, preset says
+   * NIFTY 50". Keep the requested instrument in the list so the control states
+   * what was actually asked for; the banner below says the data is unavailable.
+   */
+  const visiblePresets = useMemo(() => {
+    const base =
+      readOnly && pinnedInstruments.length > 0
+        ? presets.filter((p) =>
+            pinnedInstruments.some(
+              (pin) =>
+                pin === p.symbol ||
+                pin.replace(/ /g, "_") === p.symbol.replace(/ /g, "_"),
+            ),
+          )
+        : presets;
+    const wanted = viewInstrument.trim();
+    if (!wanted || base.some((p) => p.symbol === wanted)) return base;
+    const known = presets.find((p) => p.symbol === wanted);
+    return [
+      ...base,
+      known ?? { label: wanted, symbol: wanted, strike_step: 50 },
+    ];
+  }, [presets, pinnedInstruments, readOnly, viewInstrument]);
+
+  // The stream now names the requested instrument even before its row is warm
+  // (it serves a warming frame rather than the desk primary), so this should
+  // not fire. Kept as a last-resort disclosure: showing one instrument's
+  // numbers under another's heading is the one failure we must never hide.
+  const requestedInstrumentUnavailable = Boolean(
+    instrument?.trim() &&
+      state?.underlying?.symbol &&
+      state.underlying.symbol.trim().toUpperCase() !==
+        instrument.trim().toUpperCase(),
+  );
 
   useEffect(() => {
     if (!state) return;
@@ -968,7 +1049,7 @@ export function SignalMetricsPanel({
     state?.underlying?.symbol === activeUnderlying
       ? metricsAtmHint
       : null;
-  const atmHint = metricsAtmAligned ?? screenerAtmHint;
+  const atmHint = metricsAtmAligned;
   const metricGroups = useMemo(
     () => groupMetricsByCategory(metrics),
     [metrics],
@@ -1003,7 +1084,9 @@ export function SignalMetricsPanel({
     try {
       const token = await getAccessToken();
       if (!token || !mounted.current) return;
-      const data = await getSignalState(token);
+      // Must carry the instrument: this runs on mount and on Refresh, and an
+      // unscoped read used to stamp the desk primary over the open board.
+      const data = await getSignalState(token, viewInstrument || null);
       if (mounted.current) {
         setState(data);
         setError(null);
@@ -1013,105 +1096,10 @@ export function SignalMetricsPanel({
         setError(err instanceof Error ? err.message : "Failed to load signal state");
       }
     }
-  }, [getAccessToken]);
-
-  useEffect(() => {
-    if (!booksOpen && !screenerOpen) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setBooksOpen(false);
-        setScreenerOpen(false);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [booksOpen, screenerOpen]);
-
-  const refreshScreener = useCallback(async () => {
-    const seq = ++screenerSeq.current;
-    screenerAbortRef.current?.abort();
-    const controller = new AbortController();
-    screenerAbortRef.current = controller;
-    setScreenerLoading(true);
-    try {
-      const token = await getAccessToken();
-      if (!token || !mounted.current) return;
-      const fast = await getOptionsScreener(
-        token,
-        screenerUniverse,
-        "fast",
-        controller.signal,
-      );
-      if (!mounted.current || seq !== screenerSeq.current) return;
-      setScreener(fast);
-      setScreenerError(fast.ok ? null : fast.error ?? "Screener unavailable");
-      setScreenerLoading(false);
-
-      if (fast.ok && fast.partial === true) {
-        const full = await getOptionsScreener(
-          token,
-          screenerUniverse,
-          "full",
-          controller.signal,
-        );
-        if (!mounted.current || seq !== screenerSeq.current) return;
-        setScreener(full);
-        setScreenerError(full.ok ? null : full.error ?? "Screener unavailable");
-      }
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      if (mounted.current && seq === screenerSeq.current) {
-        setScreenerError(
-          err instanceof Error ? err.message : "Failed to load screener",
-        );
-      }
-    } finally {
-      if (mounted.current && seq === screenerSeq.current) {
-        setScreenerLoading(false);
-      }
-    }
-  }, [getAccessToken, screenerUniverse]);
-
-  const onResetScreenerBaseline = useCallback(async () => {
-    setResettingScreener(true);
-    try {
-      const token = await getAccessToken();
-      if (!token) return;
-      await resetOptionsLabScreenerBaseline(token);
-      await refreshScreener();
-    } finally {
-      setResettingScreener(false);
-    }
-  }, [getAccessToken, refreshScreener]);
-
-  const onSelectScreenerUnderlying = useCallback(
-    (row: OptionsScreenerRow) => {
-      // strike_step precedence lives in applyInstrumentSelection (preset wins).
-      applyInstrumentSelection({
-        underlying_symbol: row.underlying_symbol,
-        underlying_label: row.underlying_label,
-        fut_symbol: row.fut_symbol,
-        strike_step: row.strike_step && row.strike_step > 0 ? row.strike_step : undefined,
-      });
-      publishDeskInstrument({
-        underlying_symbol: row.underlying_symbol,
-        underlying_label: row.underlying_label,
-        fut_symbol: row.fut_symbol || suggestFutSymbol(row.underlying_symbol) || undefined,
-        strike_step:
-          row.strike_step && row.strike_step > 0 ? row.strike_step : undefined,
-        source: "signal",
-      });
-      if (row.atm != null) setScreenerAtmHint(Math.round(row.atm));
-      else setScreenerAtmHint(null);
-      setScreenerOpen(false);
-    },
-    [applyInstrumentSelection],
-  );
+  }, [getAccessToken, viewInstrument]);
 
   const onPresetChangeFromBar = useCallback(
     (value: string) => {
-      // Dropdown path has no screener ATM — drop a stale hint from a prior pick.
-      setScreenerAtmHint(null);
       if (value && value !== "custom") {
         setViewInstrument(value);
       }
@@ -1136,8 +1124,11 @@ export function SignalMetricsPanel({
   );
 
   // Mirror other desks' instrument picks (same browser session).
+  // Pinned windows keep the row they were opened for — applying Lab/Chart
+  // handoff here rewrote viewInstrument to NIFTY and made the mismatch banner
+  // fire under a SENSEX / BANKNIFTY heading.
   useEffect(() => {
-    if (configLoading || readOnly) return;
+    if (configLoading || readOnly || pinnedInstrument) return;
     const apply = (selection: DeskInstrumentSelection) => {
       if (selection.source === "signal") return;
       const key = deskInstrumentKey(selection);
@@ -1174,22 +1165,7 @@ export function SignalMetricsPanel({
     const existing = readDeskInstrument();
     if (existing && existing.source !== "signal") apply(existing);
     return subscribeDeskInstrument(apply);
-  }, [applyInstrumentSelection, configLoading, readOnly]);
-
-  useEffect(() => {
-    if (!screenerOpen) return;
-    void refreshScreener();
-    const timer = window.setInterval(() => void refreshScreener(), SCREENER_POLL_MS);
-    return () => {
-      window.clearInterval(timer);
-      screenerAbortRef.current?.abort();
-    };
-  }, [refreshScreener, screenerOpen]);
-
-  // Live metrics ATM wins once it matches the configured underlying.
-  useEffect(() => {
-    if (metricsAtmAligned != null) setScreenerAtmHint(null);
-  }, [metricsAtmAligned]);
+  }, [applyInstrumentSelection, configLoading, pinnedInstrument, readOnly]);
 
   useEffect(() => {
     mounted.current = true;
@@ -1223,13 +1199,16 @@ export function SignalMetricsPanel({
           if (!mounted.current || cancelled || controller.signal.aborted) return;
           setError(err instanceof Error ? err.message : "Signal stream failed");
           setStreaming(false);
-          void refreshOnce();
+          // A 429 means we are already over budget: a REST refresh here spends
+          // another request and keeps the sliding window full, so the panel can
+          // never recover. Back off for a full window instead.
+          if (!isRateLimited(err)) void refreshOnce();
+          backoffMs = nextStreamBackoffMs(backoffMs, err);
         } finally {
           if (mounted.current && !cancelled) setStreaming(false);
         }
         if (cancelled || controller.signal.aborted || !mounted.current) return;
         await new Promise((resolve) => setTimeout(resolve, backoffMs));
-        backoffMs = Math.min(backoffMs * 2, 8_000);
       }
     })();
 
@@ -1402,6 +1381,14 @@ export function SignalMetricsPanel({
               ) : saveStatus === "saved" ? (
                 <Badge tone="success">Saved</Badge>
               ) : null}
+            {/* TV belongs beside the instrument it charts. In a dialog the
+                header carries it instead. */}
+            {!hideChartButton ? (
+              <TradingViewButton
+                symbol={state?.underlying?.symbol ?? ""}
+                label={state?.underlying?.label}
+              />
+            ) : null}
             <span className="text-xs text-slate-muted">
               {state?.underlying?.label ?? "No underlying"} ·{" "}
               {state ? `${state.passed}/${state.evaluable} passing` : "—"} ·{" "}
@@ -1418,28 +1405,6 @@ export function SignalMetricsPanel({
             </span>
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-            <Button
-              variant={screenerOpen ? "primary" : "secondary"}
-              size="sm"
-              icon={<SearchIcon />}
-              onClick={() => {
-                setBooksOpen(false);
-                setScreenerOpen((open) => !open);
-              }}
-            >
-              Screener
-            </Button>
-            <Button
-              variant={booksOpen ? "primary" : "secondary"}
-              size="sm"
-              icon={<BookIcon />}
-              onClick={() => {
-                setScreenerOpen(false);
-                setBooksOpen((open) => !open);
-              }}
-            >
-              Books
-            </Button>
             {!readOnly ? (
               <label
                 htmlFor="signal-mock"
@@ -1514,6 +1479,14 @@ export function SignalMetricsPanel({
         ) : null}
       </header>
 
+      {requestedInstrumentUnavailable ? (
+        <p className="mt-2 rounded-lg border border-amber/40 bg-amber/10 px-3 py-2 text-sm text-amber">
+          Signal is showing <strong>{state?.underlying?.symbol}</strong>, not{" "}
+          <strong>{instrument}</strong>. The engine builds a row for any
+          instrument with an open board, so this should clear on the next tick.
+        </p>
+      ) : null}
+
       {error ? <p className="mt-2 text-sm text-rose-600">{error}</p> : null}
       {configError ? (
         <p className="mt-2 text-sm text-rose-600">{configError}</p>
@@ -1570,37 +1543,23 @@ export function SignalMetricsPanel({
 
       <div className="mt-2 shrink-0">
         <SignalSetupBar
-          config={
-            readOnly && viewInstrument && config
-              ? {
-                  ...config,
-                  underlying_symbol: viewInstrument,
-                  underlying_label:
-                    presets.find((p) => p.symbol === viewInstrument)?.label ||
-                    viewInstrument,
-                }
-              : config
-          }
-          presets={
-            readOnly && pinnedInstruments.length > 0
-              ? presets.filter((p) =>
-                  pinnedInstruments.some(
-                    (pin) => pin === p.symbol || pin.replace(/ /g, "_") === p.symbol.replace(/ /g, "_"),
-                  ),
-                )
-              : presets
-          }
+          // The workspace fixed the instrument; the dropdown must not fight it.
+          lockInstrument={pinnedInstrument}
+          config={displayConfig}
+          presets={visiblePresets}
           presetKey={
-            readOnly && viewInstrument
-              ? viewInstrument
+            pinnedInstrument || readOnly
+              ? viewInstrument || presetKey
               : presetKey
           }
-          presetLocked={presetLocked && !readOnly}
+          presetLocked={presetLocked && !readOnly && !pinnedInstrument}
           onPresetChange={onPresetChangeFromBar}
           patchConfig={patchConfig}
           loading={configLoading}
           atmHint={atmHint}
-          readOnly={readOnly}
+          // Pinned modal is a view of one matrix row — do not PATCH the org
+          // desk config from FUT/CE edits under a BANKNIFTY / SENSEX heading.
+          readOnly={readOnly || pinnedInstrument}
         />
       </div>
 
@@ -1654,100 +1613,6 @@ export function SignalMetricsPanel({
         </p>
       ) : null}
 
-      {booksOpen ? (
-        <div className="absolute inset-0 z-30 flex justify-end bg-ink/35">
-          <button
-            type="button"
-            aria-label="Close overlay"
-            className="absolute inset-0 cursor-default"
-            onClick={() => setBooksOpen(false)}
-          />
-          <aside
-            role="dialog"
-            aria-modal="true"
-            aria-label="Desk books"
-            className="relative z-10 flex h-full w-full max-w-3xl flex-col border-l border-line bg-canvas shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
-              <h2 className="flex items-center gap-2 font-display text-base font-semibold text-ink">
-                <BookIcon className="h-4 w-4" />
-                Books
-              </h2>
-              <button
-                type="button"
-                onClick={() => setBooksOpen(false)}
-                aria-label="Close"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-muted hover:bg-fog/70 hover:text-ink"
-              >
-                <CloseIcon className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
-              <DeskBooksPanel
-                className="mt-2"
-                snapshot={deskSnapshot}
-                customer={false}
-                brokerTools={brokerTools}
-                refreshing={refreshing}
-                onRefresh={onRefreshBooks}
-                fetchedAt={fetchedAt}
-                rangeDays={rangeDays}
-              />
-            </div>
-          </aside>
-        </div>
-      ) : null}
-
-      {screenerOpen ? (
-        <div className="absolute inset-0 z-30 flex justify-end bg-ink/35">
-          <button
-            type="button"
-            aria-label="Close overlay"
-            className="absolute inset-0 cursor-default"
-            onClick={() => setScreenerOpen(false)}
-          />
-          <aside
-            role="dialog"
-            aria-modal="true"
-            aria-label="Screener"
-            className="relative z-10 flex h-full w-full max-w-5xl flex-col border-l border-line bg-canvas shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
-              <h2 className="flex items-center gap-2 font-display text-base font-semibold text-ink">
-                <SearchIcon className="h-4 w-4" />
-                Screener
-              </h2>
-              <button
-                type="button"
-                onClick={() => setScreenerOpen(false)}
-                aria-label="Close"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-muted hover:bg-fog/70 hover:text-ink"
-              >
-                <CloseIcon className="h-4 w-4" />
-              </button>
-            </div>
-            {screenerError ? (
-              <div className="mx-3 mt-2 rounded-md border border-rose/30 bg-rose/10 px-2 py-1 text-xs text-rose">
-                {screenerError}
-              </div>
-            ) : null}
-            <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
-              <OptionsLabScreenerPanel
-                snapshot={screener}
-                loading={screenerLoading}
-                universe={screenerUniverse}
-                onUniverseChange={setScreenerUniverse}
-                onRefresh={() => void refreshScreener()}
-                onResetBaseline={() => void onResetScreenerBaseline()}
-                resetting={resettingScreener}
-                onSelectUnderlying={onSelectScreenerUnderlying}
-              />
-            </div>
-          </aside>
-        </div>
-      ) : null}
     </section>
   );
 }

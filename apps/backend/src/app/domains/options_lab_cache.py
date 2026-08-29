@@ -41,8 +41,22 @@ def _snapshot_key(tenant_id: str, *, wings: int, fingerprint: str) -> str:
     return f"atlas:options-lab:{tenant_id}:snapshot:{wings}:{fingerprint}"
 
 
-def _watch_key(tenant_id: str) -> str:
-    return f"atlas:options-lab:watch:{tenant_id}"
+# Instrument dimension (Phase 0 / E1-E2). The snapshot key already separates
+# instruments through the config fingerprint; the *pointer* and *watch* keys did
+# not, so two windows on different underlyings clobbered each other. ``-`` means
+# "whatever the tenant desk config says" — the pre-E1 behaviour.
+DESK_DEFAULT_INSTRUMENT = "-"
+
+
+def instrument_slug(underlying: str | None) -> str:
+    """Cache-key segment for one instrument (``-`` = tenant desk default)."""
+    return (underlying or "").strip().upper() or DESK_DEFAULT_INSTRUMENT
+
+
+def _watch_key(tenant_id: str, underlying: str | None = None) -> str:
+    # ``|`` separates tenant from instrument: tenant ids are UUIDs and trading
+    # symbols contain ':' and ' ' but never '|', so the split back is safe.
+    return f"atlas:options-lab:watch:{tenant_id}|{instrument_slug(underlying)}"
 
 
 def _lock_key(tenant_id: str, *, wings: int, fingerprint: str) -> str:
@@ -53,8 +67,12 @@ def _snap_bucket_key(tenant_id: str, *, wings: int, fingerprint: str) -> str:
     return f"{tenant_id}|{wings}|{fingerprint}"
 
 
-def _fingerprint_key(tenant_id: str, *, wings: int) -> str:
-    return f"atlas:options-lab:{tenant_id}:fp:{wings}"
+def _fingerprint_key(
+    tenant_id: str, *, wings: int, underlying: str | None = None
+) -> str:
+    return (
+        f"atlas:options-lab:{tenant_id}:fp:{wings}:{instrument_slug(underlying)}"
+    )
 
 
 def reset_options_lab_cache_for_tests() -> None:
@@ -67,42 +85,39 @@ def reset_options_lab_cache_for_tests() -> None:
 
 
 async def remember_fingerprint(
-    tenant_id: str, *, wings: int, fingerprint: str
+    tenant_id: str, *, wings: int, fingerprint: str, underlying: str | None = None
 ) -> None:
     """Remember the last snapshot fingerprint so SSE can skip Postgres."""
+    key = _fingerprint_key(tenant_id, wings=wings, underlying=underlying)
     client = await get_redis()
     if client is not None:
         try:
-            await client.set(
-                _fingerprint_key(tenant_id, wings=wings),
-                fingerprint,
-                px=SNAPSHOT_TTL_MS,
-            )
+            await client.set(key, fingerprint, px=SNAPSHOT_TTL_MS)
             return
         except Exception:
             await invalidate_redis()
             logger.warning("options_lab_cache_fp_set_failed", tenant_id=tenant_id)
-    _fingerprints[_fingerprint_key(tenant_id, wings=wings)] = (
-        _now_ms() + SNAPSHOT_TTL_MS,
-        fingerprint,
-    )
+    _fingerprints[key] = (_now_ms() + SNAPSHOT_TTL_MS, fingerprint)
 
 
-async def get_fingerprint(tenant_id: str, *, wings: int) -> str | None:
+async def get_fingerprint(
+    tenant_id: str, *, wings: int, underlying: str | None = None
+) -> str | None:
+    key = _fingerprint_key(tenant_id, wings=wings, underlying=underlying)
     client = await get_redis()
     if client is not None:
         try:
-            raw = await client.get(_fingerprint_key(tenant_id, wings=wings))
+            raw = await client.get(key)
             return str(raw) if raw else None
         except Exception:
             await invalidate_redis()
             logger.warning("options_lab_cache_fp_get_failed", tenant_id=tenant_id)
-    row = _fingerprints.get(_fingerprint_key(tenant_id, wings=wings))
+    row = _fingerprints.get(key)
     if row is None:
         return None
     expires_at, fingerprint = row
     if _now_ms() >= expires_at:
-        _fingerprints.pop(_fingerprint_key(tenant_id, wings=wings), None)
+        _fingerprints.pop(key, None)
         return None
     return fingerprint
 
@@ -164,6 +179,7 @@ async def set_snapshot(
     *,
     wings: int,
     fingerprint: str,
+    underlying: str | None = None,
 ) -> None:
     client = await get_redis()
     if client is not None:
@@ -174,7 +190,7 @@ async def set_snapshot(
                 px=SNAPSHOT_TTL_MS,
             )
             await remember_fingerprint(
-                tenant_id, wings=wings, fingerprint=fingerprint
+                tenant_id, wings=wings, fingerprint=fingerprint, underlying=underlying
             )
             return
         except Exception:
@@ -194,16 +210,22 @@ async def set_snapshot(
         ]
         for key, _row in oldest:
             _snapshots.pop(key, None)
-    await remember_fingerprint(tenant_id, wings=wings, fingerprint=fingerprint)
+    await remember_fingerprint(
+        tenant_id, wings=wings, fingerprint=fingerprint, underlying=underlying
+    )
 
 
-async def touch_watcher(tenant_id: str, *, wings: int) -> None:
-    meta = {"wings": int(wings)}
+async def touch_watcher(
+    tenant_id: str, *, wings: int, underlying: str | None = None
+) -> None:
+    slug = instrument_slug(underlying)
+    meta = {"wings": int(wings), "underlying": slug}
+    key = _watch_key(tenant_id, underlying)
     client = await get_redis()
     if client is not None:
         try:
             await client.set(
-                _watch_key(tenant_id),
+                key,
                 json.dumps(meta, separators=(",", ":")),
                 ex=WATCH_TTL_SECONDS,
             )
@@ -212,28 +234,48 @@ async def touch_watcher(tenant_id: str, *, wings: int) -> None:
             await invalidate_redis()
             logger.warning("options_lab_cache_watch_touch_failed", tenant_id=tenant_id)
 
-    _watchers[tenant_id] = (_now_ms() + (WATCH_TTL_SECONDS * 1000), meta)
+    _watchers[f"{tenant_id}|{slug}"] = (_now_ms() + (WATCH_TTL_SECONDS * 1000), meta)
 
 
-async def clear_watcher(tenant_id: str) -> None:
+async def clear_watcher(tenant_id: str, underlying: str | None = None) -> None:
+    key = _watch_key(tenant_id, underlying)
     client = await get_redis()
     if client is not None:
         try:
-            await client.delete(_watch_key(tenant_id))
+            await client.delete(key)
             return
         except Exception:
             await invalidate_redis()
             logger.warning("options_lab_cache_watch_clear_failed", tenant_id=tenant_id)
-    _watchers.pop(tenant_id, None)
+    _watchers.pop(f"{tenant_id}|{instrument_slug(underlying)}", None)
 
 
-async def list_watched() -> list[tuple[str, int]]:
-    """Return (tenant_id, wings) for active Options Lab SSE desks."""
+def _split_watch_id(raw: str) -> tuple[str, str]:
+    """``{tenant}|{instrument}`` → parts. Legacy keys carry no instrument."""
+    tenant_id, sep, slug = raw.partition("|")
+    return tenant_id, (slug if sep else DESK_DEFAULT_INSTRUMENT)
+
+
+def _wings_from_meta(meta: Any) -> int:
+    if isinstance(meta, dict) and meta.get("wings") is not None:
+        try:
+            return int(meta["wings"])
+        except (TypeError, ValueError):
+            return 15
+    return 15
+
+
+async def list_watched() -> list[tuple[str, int, str]]:
+    """Return (tenant_id, wings, instrument) for active Options Lab SSE desks.
+
+    ``instrument`` is ``-`` when the window did not pin one, meaning the worker
+    should warm whatever the tenant desk config points at.
+    """
     client = await get_redis()
     if client is not None:
         try:
             cursor = 0
-            out: list[tuple[str, int]] = []
+            out: list[tuple[str, int, str]] = []
             pattern = "atlas:options-lab:watch:*"
             prefix = "atlas:options-lab:watch:"
             while True:
@@ -241,17 +283,15 @@ async def list_watched() -> list[tuple[str, int]]:
                 for key in keys:
                     if not key.startswith(prefix):
                         continue
-                    tenant_id = key[len(prefix) :]
+                    tenant_id, slug = _split_watch_id(key[len(prefix) :])
                     raw = await client.get(key)
-                    wings = 15
+                    meta: Any = None
                     if raw:
                         try:
                             meta = json.loads(raw)
-                            if isinstance(meta, dict) and meta.get("wings") is not None:
-                                wings = int(meta["wings"])
                         except (TypeError, ValueError, json.JSONDecodeError):
-                            pass
-                    out.append((tenant_id, wings))
+                            meta = None
+                    out.append((tenant_id, _wings_from_meta(meta), slug))
                 if cursor == 0:
                     break
             return out
@@ -260,18 +300,13 @@ async def list_watched() -> list[tuple[str, int]]:
             logger.warning("options_lab_cache_watch_list_failed")
 
     now = _now_ms()
-    active: list[tuple[str, int]] = []
-    for tenant_id, (expires, meta) in list(_watchers.items()):
+    active: list[tuple[str, int, str]] = []
+    for watch_id, (expires, meta) in list(_watchers.items()):
         if expires <= now:
-            _watchers.pop(tenant_id, None)
+            _watchers.pop(watch_id, None)
             continue
-        wings = 15
-        if isinstance(meta, dict) and meta.get("wings") is not None:
-            try:
-                wings = int(meta["wings"])
-            except (TypeError, ValueError):
-                wings = 15
-        active.append((tenant_id, wings))
+        tenant_id, slug = _split_watch_id(watch_id)
+        active.append((tenant_id, _wings_from_meta(meta), slug))
     return active
 
 

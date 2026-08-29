@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.domains import signal_engine_cache as cache
@@ -360,3 +362,242 @@ async def test_matrix_bg_peeks_before_session(monkeypatch: pytest.MonkeyPatch) -
         primary_underlying="NSE:NIFTY 50",
     )
     assert sessions["n"] == 0
+
+
+def _desk_frame(symbol: str = "NSE:NIFTY 50") -> dict:
+    """A monolithic primary snapshot, as ``merged_frame`` falls back to."""
+    return {
+        "engine_enabled": True,
+        "underlying": {"symbol": symbol, "label": "NIFTY 50"},
+        "instrument": symbol,
+        "atm": 24_300,
+        "entry": {"side": "CE"},
+        "entry_ready": True,
+        "passed": 7,
+        "evaluable": 9,
+        "feed_source": "kite",
+        "computed_at_ms": 1_700_000_000_000,
+        "metrics": [
+            {"id": "pcr", "category": "Options Chain Check", "value": 0.8},
+            {"id": "adr", "category": "Global Markets Watch", "value": 1.1},
+        ],
+    }
+
+
+def test_warming_row_frame_renames_and_blanks_the_row() -> None:
+    from app.domains.signal_matrix import warming_row_frame
+
+    out = warming_row_frame(
+        _desk_frame(), symbol="NSE:RELIANCE", label="RELIANCE"
+    )
+
+    # The board must name what was asked for, not the desk primary.
+    assert out["underlying"] == {"symbol": "NSE:RELIANCE", "label": "RELIANCE"}
+    assert out["instrument"] == "NSE:RELIANCE"
+    # NIFTY's row values must not survive under a RELIANCE heading.
+    assert "atm" not in out
+    assert out["entry"] is None
+    assert out["entry_ready"] is False
+    assert out["passed"] == 0
+    assert out["evaluable"] == 0
+    assert out["feed_source"] == "starting"
+    assert out["engine_computing"] is True
+    # Shared globals are genuinely tenant-wide, so they stay; row metrics go.
+    kept = [row["id"] for row in out["metrics"]]
+    assert kept == ["adr"]
+
+
+def test_warming_row_frame_keeps_global_top_level_fields() -> None:
+    from app.domains.signal_matrix import warming_row_frame
+
+    frame = {**_desk_frame(), "mock": True, "team_slug": "signals-ops"}
+    out = warming_row_frame(frame, symbol="NSE:TCS")
+
+    assert out["mock"] is True
+    assert out["team_slug"] == "signals-ops"
+    assert out["engine_enabled"] is True
+    assert out["underlying"]["label"] == "NSE:TCS"
+
+
+@pytest.mark.asyncio
+async def test_stream_frame_warms_instrument_without_a_row() -> None:
+    """An instrument with no matrix row must not paint the primary's numbers."""
+    import uuid
+
+    from app.domains.signal_engine import stream_frame_from_cache
+
+    tenant_key = str(uuid.uuid4())
+    await cache.set_metric(tenant_key, "engine_enabled", "medium", True)
+    await cache.set_snapshot(tenant_key, _desk_frame(), force=True)
+
+    frame = await stream_frame_from_cache(tenant_key, instrument="NSE:RELIANCE")
+
+    assert frame is not None
+    assert frame["underlying"]["symbol"] == "NSE:RELIANCE"
+    assert frame["passed"] == 0
+    assert frame["feed_source"] == "starting"
+    # Opening it must register the watcher so the worker builds the row.
+    watched = await cache.watched_instrument_symbols(tenant_key)
+    assert "NSE:RELIANCE" in watched.values()
+
+
+@pytest.mark.asyncio
+async def test_stream_frame_serves_the_primary_unchanged() -> None:
+    import uuid
+
+    from app.domains.signal_engine import stream_frame_from_cache
+
+    tenant_key = str(uuid.uuid4())
+    await cache.set_metric(tenant_key, "engine_enabled", "medium", True)
+    await cache.set_snapshot(tenant_key, _desk_frame(), force=True)
+
+    frame = await stream_frame_from_cache(tenant_key, instrument="NSE:NIFTY 50")
+
+    assert frame is not None
+    assert frame["passed"] == 7
+    assert frame["feed_source"] == "kite"
+
+
+def test_preset_lookup_covers_equities_not_just_indices() -> None:
+    """An equity row built with the index step resolves the wrong ATM."""
+    from app.domains.signal_engine import preset_label, preset_strike_step
+
+    assert preset_label("NSE:NIFTY 50") == "NIFTY 50"
+    assert preset_strike_step("NSE:NIFTY 50") == 50
+    assert preset_label("NSE:RELIANCE") == "RELIANCE"
+    assert preset_strike_step("NSE:RELIANCE") == 20
+    assert preset_strike_step("NSE:ITC") == 5
+    # Unknown names fall back to the caller's step rather than guessing.
+    assert preset_strike_step("NSE:NOTLISTED") is None
+    assert preset_label("NSE:NOTLISTED") == "NSE:NOTLISTED"
+
+
+@pytest.mark.asyncio
+async def test_matrix_pass_stops_on_budget_and_resumes_next_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow watch set must rotate, not recompute the same head forever."""
+    from app.domains import signal_engine_worker as worker
+    from app.domains.signal_engine import SignalEngineConfig
+
+    worker.reset_matrix_bg_for_tests()
+    symbols = ["NSE:A", "NSE:B", "NSE:C", "NSE:D"]
+
+    async def fake_extras(*args: object, **kwargs: object) -> list[SignalEngineConfig]:
+        # Mirrors the real builder's contract: rotate to resume after the row
+        # the last pass finished on, BEFORE the row cap is applied.
+        order = list(symbols)
+        resume_after = kwargs.get("resume_after")
+        if resume_after in order:
+            cut = order.index(resume_after) + 1
+            order = order[cut:] + order[:cut]
+        return [
+            SignalEngineConfig(underlying_symbol=s, engine_enabled=True)
+            for s in order
+        ]
+
+    computed: list[str] = []
+    clock = {"t": 0.0}
+
+    async def fake_compute(_service: object, *, config: object, last_good: object):
+        computed.append(config.underlying_symbol)
+        # Each row "takes" 6s — two fit inside the 10s budget.
+        clock["t"] += 6.0
+        return {"underlying": {"symbol": config.underlying_symbol}, "metrics": []}
+
+    monkeypatch.setattr(worker, "_matrix_extra_configs", fake_extras)
+    monkeypatch.setattr(worker, "_compute_state_payload", fake_compute)
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock["t"])
+
+    class _Nested:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+    class _Session:
+        def begin_nested(self) -> _Nested:
+            return _Nested()
+
+    async def run_pass() -> None:
+        await worker._refresh_pinned_matrix_rows(
+            service=object(),
+            session=_Session(),
+            tenant_key="tenant-budget",
+            primary=SignalEngineConfig(
+                underlying_symbol="NSE:PRIMARY", engine_enabled=True
+            ),
+            epoch=1,
+        )
+
+    await run_pass()
+    # Budget is 10s and each row costs 6s, so the pass stops early.
+    assert computed == ["NSE:A", "NSE:B"], computed
+
+    computed.clear()
+    await run_pass()
+    # Resumes after the row it finished on rather than restarting at A.
+    assert computed[0] == "NSE:C", computed
+    worker.reset_matrix_bg_for_tests()
+
+
+def test_lab_refresh_concurrency_is_bounded() -> None:
+    """Ten open Lab windows must not launch ten simultaneous chain scans."""
+    from app.domains.options_lab import LAB_REFRESH_CONCURRENCY
+
+    assert 1 <= LAB_REFRESH_CONCURRENCY <= 5
+
+
+async def test_state_endpoint_never_answers_with_the_desk_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold cache must not swap the primary's board in under another name.
+
+    ``/state`` is what the panel calls on mount and on Refresh. Falling through
+    to the unscoped ``state_for_stream`` when no row is cached yet reproduced
+    the exact mislabelling the ``instrument`` parameter exists to prevent.
+    """
+    from app.api import signals as signals_api
+
+    seeded: list[str | None] = []
+
+    async def _cold(_tenant_id: str, *, instrument: str | None = None):
+        return None
+
+    async def _seed(_service, *, instrument: str | None = None):
+        seeded.append(instrument)
+        return {"instrument": instrument, "engine_computing": True}, False
+
+    async def _primary(_service):
+        raise AssertionError("must not fall back to the desk primary")
+
+    monkeypatch.setattr(signals_api, "stream_frame_from_cache", _cold)
+    monkeypatch.setattr(signals_api, "seed_stream_cold_frame", _seed)
+    monkeypatch.setattr(signals_api, "state_for_stream", _primary)
+    monkeypatch.setattr(signals_api, "SignalEngineService", lambda *_a, **_k: object())
+
+    context = SimpleNamespace(tenant_id="t-1")
+    out = await signals_api.get_signal_state(
+        context=context, session=object(), instrument="NSE:RELIANCE"
+    )
+
+    assert seeded == ["NSE:RELIANCE"]
+    assert out["instrument"] == "NSE:RELIANCE"
+
+
+async def test_state_endpoint_without_an_instrument_uses_the_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import signals as signals_api
+
+    async def _primary(_service):
+        return {"instrument": "NSE:NIFTY 50"}
+
+    monkeypatch.setattr(signals_api, "state_for_stream", _primary)
+    monkeypatch.setattr(signals_api, "SignalEngineService", lambda *_a, **_k: object())
+
+    out = await signals_api.get_signal_state(
+        context=SimpleNamespace(tenant_id="t-1"), session=object(), instrument=None
+    )
+    assert out["instrument"] == "NSE:NIFTY 50"

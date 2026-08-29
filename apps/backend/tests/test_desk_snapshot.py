@@ -231,3 +231,87 @@ def test_call_kwargs_fills_user_id_for_paper_positions() -> None:
 def test_read_capabilities_include_trades_and_paper_positions() -> None:
     assert "list_trades" in READ_CAPABILITIES
     assert "list_positions" in READ_CAPABILITIES
+
+
+def test_empty_books_include_bids_tabs_so_the_nav_is_stable() -> None:
+    """The Bids heading must not appear/disappear with the bound toolkit."""
+    from app.domains.desk_snapshot import BIDS_BOOK_TABS
+
+    books = empty_books(has_tools=False)
+    by_tab = {book["tab"]: book for book in books}
+    for tab in BIDS_BOOK_TABS:
+        assert tab in by_tab
+        assert by_tab[tab]["group"] == "bids"
+    assert by_tab["orders"]["group"] == "books"
+    assert by_tab["ipo"]["label"] == "SSE IPO"
+
+
+def test_assemble_books_always_offers_bids_unlike_trades() -> None:
+    books = assemble_books({}, has_tools=True)
+    tabs = {book["tab"] for book in books}
+    assert {"corporate_actions", "ipo"} <= tabs
+    # Trades stays conditional — it is a peer book, not a nav heading.
+    assert "trades" not in tabs
+
+
+def test_normalize_corporate_actions_across_broker_shapes() -> None:
+    from app.domains.desk_snapshot import normalize_corporate_actions
+
+    rows = normalize_corporate_actions(
+        {
+            "ok": True,
+            "data": [
+                {
+                    "trading_symbol": "RELIANCE",
+                    "purpose": "Dividend",
+                    "amount": 5.5,
+                    "exDate": "2026-09-10",
+                    "recordDate": "2026-09-11",
+                },
+                {
+                    "symbol": "INFY",
+                    "action_type": "Bonus",
+                    "ratio": "1:1",
+                    "ex_date": "2026-09-15",
+                },
+            ],
+        }
+    )
+    assert rows[0]["symbol"] == "RELIANCE"
+    assert rows[0]["action"] == "Dividend"
+    assert rows[0]["ratio"] == 5.5
+    assert rows[0]["ex_date"] == "2026-09-10"
+    assert rows[1]["action"] == "Bonus"
+    assert rows[1]["record_date"] is None
+
+
+def test_normalize_ipos_builds_a_price_band_when_absent() -> None:
+    from app.domains.desk_snapshot import normalize_ipos
+
+    rows = normalize_ipos(
+        [
+            {
+                "symbol": "ACME",
+                "company_name": "Acme Industries",
+                "min_price": 100,
+                "max_price": 105,
+                "lot_size": 140,
+                "status": "OPEN",
+                "close_date": "2026-09-02",
+            },
+            {"symbol": "BETA", "price_band": "90–95", "name": "Beta Ltd"},
+        ]
+    )
+    assert rows[0]["price_band"] == "100–105"
+    assert rows[0]["name"] == "Acme Industries"
+    assert rows[0]["lot_size"] == 140
+    # An explicit band from the broker is preferred over a derived one.
+    assert rows[1]["price_band"] == "90–95"
+
+
+def test_read_capabilities_cover_bids_aliases() -> None:
+    """No broker names these the same, so accept the common aliases."""
+    for name in ("list_corporate_actions", "get_corporate_actions"):
+        assert READ_CAPABILITIES[name][0] == "Corporate actions"
+    for name in ("list_ipos", "get_ipos", "list_bids", "get_ipo_bids"):
+        assert READ_CAPABILITIES[name][0] == "IPO"

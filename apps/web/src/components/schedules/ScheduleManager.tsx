@@ -9,13 +9,11 @@ import { Button } from "@/components/ui/Button";
 import { Input, Label, Textarea } from "@/components/ui/Field";
 import { SearchableSelect } from "@/components/ui/SearchableSelect";
 import {
-  CheckIcon,
   CloseIcon,
   EyeIcon,
   EyeOffIcon,
   PencilIcon,
   PlayIcon,
-  PlusIcon,
   SaveIcon,
   TrashIcon,
 } from "@/components/ui/icons";

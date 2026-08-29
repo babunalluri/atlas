@@ -235,7 +235,17 @@ class Settings(BaseSettings):
         validation_alias="RATE_LIMITS_ENABLED",
         description="Admin API rate/concurrency middleware. Public chat uses its own limiter.",
     )
-    tenant_concurrency_limit: int = Field(default=10, validation_alias="TENANT_CONCURRENCY_LIMIT")
+    tenant_concurrency_limit: int = Field(
+        default=40,
+        validation_alias="TENANT_CONCURRENCY_LIMIT",
+        description=(
+            "In-flight admin requests per tenant. An SSE stream holds a slot "
+            "for its whole life, so the desk's long-lived streams — Signal, "
+            "Options Lab, Param Chart, one per open window — consume this "
+            "budget directly. The old default of 10 let a handful of open "
+            "windows lock every other request out of the tenant."
+        ),
+    )
     max_upload_bytes: int = Field(default=10_485_760, validation_alias="MAX_UPLOAD_BYTES")
     max_knowledge_chunks: int = Field(default=1000, validation_alias="MAX_KNOWLEDGE_CHUNKS")
     knowledge_top_k: int = Field(default=6, validation_alias="KNOWLEDGE_TOP_K")

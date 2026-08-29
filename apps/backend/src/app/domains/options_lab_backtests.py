@@ -500,6 +500,25 @@ def portfolio_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def owned_by(row: dict[str, Any], owner_id: str | None) -> bool:
+    """True when ``owner_id`` may see and act on this row.
+
+    ``None`` is the operator scope (the whole tenant). A trader passes their
+    user id and sees only their own. Rows written before ownership existed
+    carry no ``owner_id``; they were all created while these routes were
+    admin-only, so they stay operator-visible.
+    """
+    if owner_id is None:
+        return True
+    return str(row.get("owner_id") or "") == owner_id
+
+
+def visible_rows(
+    rows: list[dict[str, Any]], owner_id: str | None
+) -> list[dict[str, Any]]:
+    return [row for row in rows if owned_by(row, owner_id)]
+
+
 async def load_backtests(tenant_id: str) -> list[dict[str, Any]]:
     stored = await get_session_value(tenant_id, BACKTESTS_FIELD)
     if not isinstance(stored, dict):
@@ -518,8 +537,10 @@ async def save_backtests(tenant_id: str, items: list[dict[str, Any]]) -> None:
     )
 
 
-async def list_backtests(tenant_id: str) -> dict[str, Any]:
-    items = await load_backtests(tenant_id)
+async def list_backtests(
+    tenant_id: str, *, owner_id: str | None = None
+) -> dict[str, Any]:
+    items = visible_rows(await load_backtests(tenant_id), owner_id)
     slim: list[dict[str, Any]] = []
     for row in items:
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
@@ -539,23 +560,36 @@ async def list_backtests(tenant_id: str) -> dict[str, Any]:
     return {"ok": True, "backtests": slim, "count": len(slim)}
 
 
-async def get_backtest(tenant_id: str, backtest_id: str) -> dict[str, Any]:
+async def get_backtest(
+    tenant_id: str, backtest_id: str, *, owner_id: str | None = None
+) -> dict[str, Any]:
     for row in await load_backtests(tenant_id):
         if row.get("id") == backtest_id:
+            # Another trader's backtest reads as absent, never as forbidden.
+            if not owned_by(row, owner_id):
+                break
             return {"ok": True, "backtest": row}
     return {"ok": False, "error": "Backtest not found."}
 
 
-async def delete_backtest(tenant_id: str, backtest_id: str) -> dict[str, Any]:
+async def delete_backtest(
+    tenant_id: str, backtest_id: str, *, owner_id: str | None = None
+) -> dict[str, Any]:
     items = await load_backtests(tenant_id)
-    next_items = [row for row in items if row.get("id") != backtest_id]
+    next_items = [
+        row
+        for row in items
+        if not (row.get("id") == backtest_id and owned_by(row, owner_id))
+    ]
     if len(next_items) == len(items):
         return {"ok": False, "error": "Backtest not found."}
     await save_backtests(tenant_id, next_items)
     return {"ok": True}
 
 
-async def create_backtest(tenant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def create_backtest(
+    tenant_id: str, payload: dict[str, Any], *, owner_id: str | None = None
+) -> dict[str, Any]:
     raw_legs = payload.get("legs") if isinstance(payload.get("legs"), list) else []
     legs: list[dict[str, Any]] = []
     for idx, item in enumerate(raw_legs):
@@ -642,6 +676,7 @@ async def create_backtest(tenant_id: str, payload: dict[str, Any]) -> dict[str, 
     now = _now_ts()
     row = {
         "id": f"bt-{uuid.uuid4().hex[:12]}",
+        "owner_id": str(owner_id) if owner_id else None,
         "name": name[:120],
         "fidelity": result.get("fidelity") or "model",
         "underlying_symbol": str(payload.get("underlying_symbol") or "").strip() or None,
@@ -664,8 +699,9 @@ async def summarize_backtests(
     *,
     ids: list[str] | None = None,
     limit: int = 5,
+    owner_id: str | None = None,
 ) -> dict[str, Any]:
-    items = await load_backtests(tenant_id)
+    items = visible_rows(await load_backtests(tenant_id), owner_id)
     if ids:
         wanted = set(ids)
         selected = [row for row in items if row.get("id") in wanted]

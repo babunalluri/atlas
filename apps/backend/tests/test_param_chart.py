@@ -820,11 +820,14 @@ async def test_refresh_overlay_from_cache_is_book_only() -> None:
             "NFO:NIFTY26AUG24000PE": {"last_price": 95.25},
         },
     )
+    # Packs are keyed per instrument now — the writer must name the same
+    # underlying the reader resolves, or the overlay misses its own pack.
     await pc_cache.set_month_pack(
         tenant,
         year=today_d.year,
         month=today_d.month,
         interval="1D",
+        underlying="NSE:NIFTY 50",
         payload={
             "year": today_d.year,
             "month": today_d.month,

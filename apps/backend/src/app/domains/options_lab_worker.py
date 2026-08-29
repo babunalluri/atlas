@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import select
@@ -42,10 +43,23 @@ async def refresh_options_lab_snapshot(
     *,
     auth_org_id: str,
     wings: int,
+    underlying: str | None = None,
 ) -> bool:
-    """Compute one Options Lab chain snapshot. Returns True when stored."""
+    """Compute one Options Lab chain snapshot. Returns True when stored.
+
+    ``underlying`` is the instrument the watching window pinned (E1/E2). The
+    sentinel ``-`` — and None — mean "whatever the tenant desk config says".
+    """
+    from app.domains.options_lab import config_for_underlying
+    from app.domains.options_lab_cache import DESK_DEFAULT_INSTRUMENT
+
     wings = _clamp_wings(wings)
     tenant_key = str(tenant_id)
+    # The hub source key must match the slot the watcher registered, or the
+    # prune below sees its own subscription as stale and drops it every tick.
+    watch_slot = underlying
+    if underlying == DESK_DEFAULT_INSTRUMENT:
+        underlying = None
     context = TenantContext(
         tenant_id=tenant_id,
         user_id="options-lab-ticker",
@@ -58,20 +72,29 @@ async def refresh_options_lab_snapshot(
             async with session.begin():
                 await apply_tenant_guc(session, tenant_id)
                 service = OptionsLabService(session, context)
-                config = await service._read_config()
+                config = config_for_underlying(await service._read_config(), underlying)
                 fingerprint = config.cache_fingerprint()
                 if not await ol_cache.try_compute_lock(
                     tenant_key, wings=wings, fingerprint=fingerprint
                 ):
                     return False
                 try:
-                    payload = await service.chain_snapshot(wings=wings)
+                    payload = await service.chain_snapshot(wings=wings, config=config)
                     await ol_cache.set_snapshot(
-                        tenant_key, payload, wings=wings, fingerprint=fingerprint
+                        tenant_key,
+                        payload,
+                        wings=wings,
+                        fingerprint=fingerprint,
+                        underlying=underlying,
                     )
                     if not config.mock:
                         await _sync_kite_from_chain_payload(
-                            session, context, service, config, payload
+                            session,
+                            context,
+                            service,
+                            config,
+                            payload,
+                            source_slot=watch_slot,
                         )
                     return True
                 finally:
@@ -87,14 +110,65 @@ async def refresh_options_lab_snapshot(
         return False
 
 
+def options_lab_source_key(underlying: str | None) -> str:
+    """Hub source key for one Lab instrument (``options_lab:NSE:NIFTY 50``)."""
+    return f"{SOURCE_OPTIONS_LAB}:{ol_cache.instrument_slug(underlying)}"
+
+
+def stale_lab_source_keys(
+    source_keys: Iterable[str], keep: set[str]
+) -> list[str]:
+    """Lab source keys to unsubscribe: ours, and no longer watched.
+
+    Never touches Signal's or Param Chart's sources — they own their own keys
+    on the same tenant feed.
+    """
+    prefix = f"{SOURCE_OPTIONS_LAB}:"
+    return [
+        key for key in source_keys if key.startswith(prefix) and key not in keep
+    ]
+
+
+def watched_lab_source_keys(
+    watched: list[tuple[str, int, str | None]],
+) -> dict[str, set[str]]:
+    """``{tenant_id: {source_key, ...}}`` for the currently watched windows."""
+    live: dict[str, set[str]] = {}
+    for tenant_id, _wings, instrument in watched:
+        live.setdefault(tenant_id, set()).add(options_lab_source_key(instrument))
+    return live
+
+
+async def _prune_options_lab_sources(
+    watched: list[tuple[str, int, str | None]],
+) -> None:
+    """Drop hub sources for Lab instruments nobody is watching any more.
+
+    Without this a closed window's chain stays subscribed for the life of the
+    process, and ``feed.sources`` grows with every instrument ever opened.
+    """
+    hub = get_kite_ticker_hub()
+    live = watched_lab_source_keys(watched)
+    for tenant_id, feed in list(hub._tenants.items()):
+        for key in stale_lab_source_keys(feed.sources, live.get(tenant_id, set())):
+            await hub.drop_source(tenant_id, key)
+
+
 async def _sync_kite_from_chain_payload(
     session: Any,
     context: TenantContext,
     service: OptionsLabService,
     config: OptionsLabConfig,
     payload: dict[str, Any],
+    source_slot: str | None = None,
 ) -> None:
-    """Subscribe using instrument tokens already present on the chain snapshot."""
+    """Subscribe using instrument tokens already present on the chain snapshot.
+
+    ``source_slot`` is the watch slot this refresh belongs to (``-`` for a
+    window that pinned no instrument). It keys the hub source so the prune can
+    match subscriptions to watchers; without it a desk-default window
+    subscribed under its resolved symbol and pruned itself on the next tick.
+    """
     if config.mock or not config.underlying_symbol:
         return
     try:
@@ -143,12 +217,18 @@ async def _sync_kite_from_chain_payload(
             token_map.update(token_map_from_quotes(seed_quotes))
     if not token_map:
         return
+    # Per-instrument source key. The hub REPLACES a source's whole token map,
+    # so a single "options_lab" key meant two Lab windows on different
+    # underlyings overwrote each other every tick — NIFTY's chain unsubscribed
+    # for SENSEX's, then back — and both fell back to REST.
     await get_kite_ticker_hub().sync_tenant(
         _tenant_key(context),
         api_key=api_key,
         access_token=access_token,
         token_to_symbol=token_map,
-        source=SOURCE_OPTIONS_LAB,
+        source=options_lab_source_key(
+            source_slot if source_slot is not None else config.underlying_symbol
+        ),
     )
 
 
@@ -207,8 +287,9 @@ class OptionsLabWorker:
             return False
 
         self._idle_clear_ticks = 0
+        await _prune_options_lab_sources(watched)
         org_by_tenant: dict[str, str] = {}
-        parsed = _parse_tenant_ids([tid for tid, _wings in watched])
+        parsed = _parse_tenant_ids([tid for tid, _wings, _instrument in watched])
         if not parsed:
             return signal_synced
         async with SessionFactory() as session:
@@ -230,8 +311,25 @@ class OptionsLabWorker:
 
         signal_watched = set(await signal_cache.list_watched_tenant_ids())
 
+        # Bound the fan-out: each refresh is a full chain scan, and the tick
+        # used to launch one per watcher at once.
+        from app.domains.options_lab import LAB_REFRESH_CONCURRENCY
+
+        gate = asyncio.Semaphore(LAB_REFRESH_CONCURRENCY)
+
+        async def _refresh_gated(
+            tid: uuid.UUID, *, auth_org_id: str, wings: int, underlying: str | None
+        ) -> bool:
+            async with gate:
+                return await refresh_options_lab_snapshot(
+                    tid,
+                    auth_org_id=auth_org_id,
+                    wings=wings,
+                    underlying=underlying,
+                )
+
         refresh_tasks: list[asyncio.Task[bool]] = []
-        for tenant_id, wings in watched:
+        for tenant_id, wings, instrument in watched:
             if tenant_id not in org_by_tenant:
                 continue
             try:
@@ -249,15 +347,18 @@ class OptionsLabWorker:
                 )
             refresh_tasks.append(
                 asyncio.create_task(
-                    refresh_options_lab_snapshot(
+                    _refresh_gated(
                         tid,
                         auth_org_id=org_by_tenant[tenant_id],
                         wings=effective_wings,
+                        underlying=instrument,
                     )
                 )
             )
         if refresh_tasks:
-            await asyncio.gather(*refresh_tasks)
+            # return_exceptions: one instrument's failure must not cancel the
+            # rest of the tick's refreshes.
+            await asyncio.gather(*refresh_tasks, return_exceptions=True)
         return True
 
 

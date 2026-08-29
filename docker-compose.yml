@@ -186,6 +186,16 @@ services:
       OPTIONS_LAB_BOTS_ENABLED: "true"
       # Pin single worker — Kite WS hub + paper bots disable themselves if >1.
       WEB_CONCURRENCY: "1"
+      # The desk is request-dense for a single signed-in developer: each panel
+      # loads config + chain + screener, SSE reconnects re-hit the limiter, and
+      # Next dev remounts effects on every hot reload. The production default
+      # (60/min per user) is a multi-tenant guard, not a dev budget — one person
+      # opening four tools trips it. Quotas stay ON so the code path is
+      # exercised; only the dev ceiling is raised.
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-600}
+      # SSE streams hold a concurrency slot for their whole lifetime, so a few
+      # open desk panels can exhaust the default 10.
+      TENANT_CONCURRENCY_LIMIT: ${TENANT_CONCURRENCY_LIMIT:-40}
     ports:
       - "7777:7777"
     volumes:

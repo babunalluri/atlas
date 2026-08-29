@@ -26,6 +26,20 @@ READ_CAPABILITIES = {
     "get_orders": ("Orders", "desk_orders"),
     "list_trades": ("Trades", "desk_trades"),
     "get_account_health": ("Account health", "desk_health"),
+    # Bids. No broker names these identically, so accept the aliases Kite,
+    # Groww and the MCP toolkits actually expose rather than one vendor's.
+    "list_corporate_actions": ("Corporate actions", "desk_corporate_actions"),
+    "get_corporate_actions": ("Corporate actions", "desk_corporate_actions"),
+    "list_corporate_action": ("Corporate actions", "desk_corporate_actions"),
+    "get_corporate_bids": ("Corporate actions", "desk_corporate_actions"),
+    "list_ipos": ("IPO", "desk_ipo"),
+    "get_ipos": ("IPO", "desk_ipo"),
+    "list_ipo": ("IPO", "desk_ipo"),
+    "get_ipo": ("IPO", "desk_ipo"),
+    "list_ipo_bids": ("IPO", "desk_ipo"),
+    "get_ipo_bids": ("IPO", "desk_ipo"),
+    "list_bids": ("IPO", "desk_ipo"),
+    "get_bids": ("IPO", "desk_ipo"),
 }
 QUOTE_CAPABILITIES = ("get_quote", "get_ltp", "get_ohlc")
 MUTATING_MARKERS = (
@@ -52,6 +66,18 @@ CAPABILITY_BOOK = {
     "get_user_margins": "funds",
     "get_funds": "funds",
     "list_trades": "trades",
+    "list_corporate_actions": "corporate_actions",
+    "get_corporate_actions": "corporate_actions",
+    "list_corporate_action": "corporate_actions",
+    "get_corporate_bids": "corporate_actions",
+    "list_ipos": "ipo",
+    "get_ipos": "ipo",
+    "list_ipo": "ipo",
+    "get_ipo": "ipo",
+    "list_ipo_bids": "ipo",
+    "get_ipo_bids": "ipo",
+    "list_bids": "ipo",
+    "get_bids": "ipo",
 }
 
 DEFAULT_WATCHLIST = ("NSE:NIFTY", "NSE:BANKNIFTY", "NSE:RELIANCE")
@@ -63,6 +89,8 @@ HOLDING_COLUMNS = ["symbol", "qty", "avg", "ltp", "pnl"]
 FUNDS_COLUMNS = ["label", "value"]
 WATCHLIST_COLUMNS = ["symbol", "ltp", "change"]
 TRADE_COLUMNS = ["symbol", "side", "qty", "price", "time", "trade_id"]
+CORPORATE_ACTION_COLUMNS = ["symbol", "action", "ratio", "ex_date", "record_date"]
+IPO_COLUMNS = ["symbol", "name", "price_band", "lot_size", "status", "close_date"]
 
 _LIST_KEYS = (
     "data",
@@ -80,6 +108,8 @@ _LIST_KEYS = (
 )
 
 CORE_BOOK_TABS = ("orders", "positions", "holdings", "watchlist")
+# Books grouped under the "Bids" nav heading rather than shown as peers.
+BIDS_BOOK_TABS = ("corporate_actions", "ipo")
 
 
 def broker_display_name(name: str, slug: str = "") -> str:
@@ -476,8 +506,42 @@ def empty_books(*, has_tools: bool) -> list[dict[str, Any]]:
             empty_hint="Funds appear after a margin/funds read is bound on Live trading.",
             has_tools=has_tools,
         ),
+        *_empty_bids_books(has_tools=has_tools),
     ]
     return books
+
+
+def _empty_bids_books(*, has_tools: bool) -> list[dict[str, Any]]:
+    return [
+        make_book(
+            book_id="corporate_actions",
+            label="Corporate actions",
+            tab="corporate_actions",
+            group="bids",
+            source="list_corporate_actions",
+            columns=list(CORPORATE_ACTION_COLUMNS),
+            rows=[],
+            empty_hint=(
+                "Corporate actions appear once the broker toolkit on Live "
+                "trading exposes a corporate-actions read."
+            ),
+            has_tools=has_tools,
+        ),
+        make_book(
+            book_id="ipo",
+            label="SSE IPO",
+            tab="ipo",
+            group="bids",
+            source="list_ipos",
+            columns=list(IPO_COLUMNS),
+            rows=[],
+            empty_hint=(
+                "Open issues appear once the broker toolkit on Live trading "
+                "exposes an IPO/bids read."
+            ),
+            has_tools=has_tools,
+        ),
+    ]
 
 
 def assemble_books(
@@ -526,18 +590,38 @@ def assemble_books(
             normalize_trades,
             "No trades today.",
         ),
+        (
+            "corporate_actions",
+            "Corporate actions",
+            "list_corporate_actions",
+            CORPORATE_ACTION_COLUMNS,
+            normalize_corporate_actions,
+            "Corporate actions appear once the broker toolkit on Live trading "
+            "exposes a corporate-actions read.",
+        ),
+        (
+            "ipo",
+            "SSE IPO",
+            "list_ipos",
+            IPO_COLUMNS,
+            normalize_ipos,
+            "Open issues appear once the broker toolkit on Live trading "
+            "exposes an IPO/bids read.",
+        ),
     )
     books: list[dict[str, Any]] = []
     for book_id, label, default_source, columns, normalizer, empty_hint in specs:
         hit = captured.get(book_id)
         if book_id == "trades" and hit is None:
             continue
+        group = "bids" if book_id in BIDS_BOOK_TABS else "books"
         if hit is None:
             books.append(
                 make_book(
                     book_id=book_id,
                     label=label,
                     tab=book_id,
+                    group=group,
                     source=default_source,
                     columns=list(columns),
                     rows=[],
@@ -558,6 +642,7 @@ def assemble_books(
                 book_id=book_id,
                 label=label,
                 tab=book_id,
+                group=group,
                 via=hit.get("via"),
                 team_slug=hit.get("team_slug"),
                 source=hit.get("source") or default_source,
@@ -586,6 +671,7 @@ def make_book(
     error: str | None = None,
     capability_present: bool = False,
     has_tools: bool = False,
+    group: str = "books",
 ) -> dict[str, Any]:
     hint = empty_hint
     if error:
@@ -600,6 +686,7 @@ def make_book(
         "id": book_id,
         "label": label,
         "tab": tab,
+        "group": group,
         "via": via,
         "team_slug": team_slug,
         "source": source,
@@ -719,6 +806,68 @@ def normalize_trades(value: Any) -> list[dict[str, Any]]:
                     item, "time", "fill_timestamp", "trade_timestamp", "exchange_timestamp"
                 ),
                 "trade_id": _pick(item, "trade_id", "tradeId", "exchange_trade_id"),
+            }
+        )
+    return rows
+
+
+def normalize_corporate_actions(value: Any) -> list[dict[str, Any]]:
+    """Dividends, splits, bonuses — whatever shape the toolkit returns."""
+    rows: list[dict[str, Any]] = []
+    for item in unwrap_records(value):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "symbol": _pick(
+                    item, "symbol", "trading_symbol", "tradingsymbol", "isin"
+                ),
+                "action": _pick(
+                    item,
+                    "action",
+                    "purpose",
+                    "type",
+                    "action_type",
+                    "corporate_action",
+                    "subject",
+                ),
+                "ratio": _pick(item, "ratio", "value", "amount", "dividend"),
+                "ex_date": _pick(
+                    item, "ex_date", "exDate", "ex_dividend_date", "ex_datetime"
+                ),
+                "record_date": _pick(
+                    item, "record_date", "recordDate", "book_closure", "bc_start_date"
+                ),
+            }
+        )
+    return rows
+
+
+def normalize_ipos(value: Any) -> list[dict[str, Any]]:
+    """Open / upcoming issues a customer can bid on."""
+    rows: list[dict[str, Any]] = []
+    for item in unwrap_records(value):
+        if not isinstance(item, dict):
+            continue
+        low = _pick(item, "min_price", "price_low", "lowerPrice", "issue_price_low")
+        high = _pick(item, "max_price", "price_high", "upperPrice", "issue_price_high")
+        band = _pick(item, "price_band", "priceBand", "price_range")
+        if band is None and low is not None and high is not None:
+            band = f"{low}–{high}"
+        rows.append(
+            {
+                "symbol": _pick(
+                    item, "symbol", "trading_symbol", "tradingsymbol", "scrip"
+                ),
+                "name": _pick(item, "name", "company", "company_name", "issuer"),
+                "price_band": band,
+                "lot_size": _pick(
+                    item, "lot_size", "lotSize", "min_quantity", "bid_lot"
+                ),
+                "status": _pick(item, "status", "state", "issue_status"),
+                "close_date": _pick(
+                    item, "close_date", "closeDate", "end_date", "bidding_end_date"
+                ),
             }
         )
     return rows

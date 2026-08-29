@@ -77,18 +77,56 @@ def reset_param_chart_worker_gates_for_tests() -> None:
     _KITE_SYNC_AT.clear()
 
 
-async def refresh_param_chart_overlay(tenant_id: str) -> bool:
-    """Paint today's overlay from book + Redis. Returns True when stored."""
+async def refresh_param_chart_overlay(
+    tenant_id: str, underlying: str | None = None
+) -> bool:
+    """Paint today's overlay from book + Redis. Returns True when stored.
+
+    ``underlying`` selects the slot: overlays are per instrument, so a window
+    scoped to SENSEX needs its own refresh rather than riding the tenant desk
+    slot — otherwise only the SSE fall-through would ever repaint it.
+    """
     try:
-        frame = await refresh_overlay_from_cache(tenant_id)
+        frame = await refresh_overlay_from_cache(tenant_id, underlying=underlying)
         return frame is not None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "param_chart_overlay_refresh_failed",
             tenant_id=tenant_id,
+            underlying=underlying or "-",
             error=str(exc)[:200],
         )
         return False
+
+
+async def _watch_symbols_for_instruments(
+    tenant_key: str,
+    cfg: ParamChartConfig,
+    underlyings: tuple[str | None, ...] = (),
+) -> list[str]:
+    """Union of under / FUT / CE / PE across every watched instrument.
+
+    Resolves an ATM strike for scoped instruments first. Without it a scoped
+    config has no strike, so ``heal_option_symbols_for_month`` yields no CE/PE
+    and the option legs would never be subscribed. Spot comes from the book, so
+    the first pass subscribes the underlying and the next one adds its legs.
+    """
+    from app.domains.param_chart import config_for_underlying, resolve_atm_strike
+
+    wanted: tuple[str | None, ...] = underlyings or (None,)
+    out: list[str] = []
+    for underlying in wanted:
+        scoped = cfg
+        if underlying:
+            scoped = await resolve_atm_strike(
+                tenant_key, config_for_underlying(cfg, underlying)
+            )
+        y, m = scoped.resolved_year_month()
+        scoped = heal_option_symbols_for_month(scoped, year=y, month=m)
+        for sym in param_chart_watch_symbols(scoped):
+            if sym and sym not in out:
+                out.append(sym)
+    return out
 
 
 async def sync_kite_for_param_chart_tenant(
@@ -96,6 +134,7 @@ async def sync_kite_for_param_chart_tenant(
     *,
     auth_org_id: str,
     cfg: ParamChartConfig | None = None,
+    underlyings: tuple[str | None, ...] = (),
 ) -> bool:
     """Subscribe under/FUT/CE/PE on the shared hub as SOURCE_PARAM_CHART only.
 
@@ -136,9 +175,7 @@ async def sync_kite_for_param_chart_tenant(
 
     if cfg is None or creds is None:
         return False
-    y, m = cfg.resolved_year_month()
-    cfg = heal_option_symbols_for_month(cfg, year=y, month=m)
-    symbols = param_chart_watch_symbols(cfg)
+    symbols = await _watch_symbols_for_instruments(tenant_key, cfg, underlyings)
     if not symbols:
         await _clear_param_chart_source(tenant_key)
         return False
@@ -290,6 +327,7 @@ class ParamChartWorker:
         tenant_key: str,
         auth_org_id: str,
         cfg: ParamChartConfig | None,
+        underlyings: tuple[str | None, ...] = (),
     ) -> None:
         if tenant_key in self._sync_inflight:
             return
@@ -298,7 +336,10 @@ class ParamChartWorker:
         async def _run() -> None:
             try:
                 await sync_kite_for_param_chart_tenant(
-                    tenant_id, auth_org_id=auth_org_id, cfg=cfg
+                    tenant_id,
+                    auth_org_id=auth_org_id,
+                    cfg=cfg,
+                    underlyings=underlyings,
                 )
             finally:
                 self._sync_inflight.discard(tenant_key)
@@ -308,7 +349,10 @@ class ParamChartWorker:
         task.add_done_callback(self._sync_tasks.discard)
 
     async def tick(self) -> bool:
-        watched = await pc_cache.list_watched_tenant_ids()
+        # Per (tenant, instrument): each open Chart window has its own overlay
+        # slot, and each needs repainting on the worker cadence.
+        watched_pairs = await pc_cache.list_watched()
+        watched = list(dict.fromkeys(tenant for tenant, _ in watched_pairs))
         watched_set = set(watched)
         for stale_id in list(self._synced):
             if stale_id not in watched_set:
@@ -319,14 +363,22 @@ class ParamChartWorker:
             return False
 
         overlay_tasks = [
-            asyncio.create_task(refresh_param_chart_overlay(tenant_key))
-            for tenant_key in watched
+            asyncio.create_task(refresh_param_chart_overlay(tenant_key, underlying))
+            for tenant_key, underlying in watched_pairs
         ]
         if overlay_tasks:
             await asyncio.gather(*overlay_tasks, return_exceptions=True)
 
         if not get_settings().kite_ticker_enabled:
             return True
+
+        # Which instruments each tenant is actually watching — the sync must
+        # cover all of them, not just the desk config's.
+        instruments_by_tenant: dict[str, tuple[str | None, ...]] = {}
+        for tenant_key, underlying in watched_pairs:
+            current = instruments_by_tenant.get(tenant_key, ())
+            if underlying not in current:
+                instruments_by_tenant[tenant_key] = (*current, underlying)
 
         due_keys: list[str] = []
         cfg_by_tenant: dict[str, ParamChartConfig | None] = {}
@@ -335,7 +387,15 @@ class ParamChartWorker:
                 self._synced.add(tenant_key)
                 continue
             cfg = await config_from_setup_cache(tenant_key)
-            symbols = tuple(param_chart_watch_symbols(cfg)) if cfg is not None else ()
+            symbols = (
+                tuple(
+                    await _watch_symbols_for_instruments(
+                        tenant_key, cfg, instruments_by_tenant.get(tenant_key, ())
+                    )
+                )
+                if cfg is not None
+                else ()
+            )
             if not _kite_sync_due(tenant_key, symbols):
                 self._synced.add(tenant_key)
                 continue
@@ -372,6 +432,7 @@ class ParamChartWorker:
                 tenant_key=tenant_key,
                 auth_org_id=auth_org_id,
                 cfg=cfg_by_tenant.get(tenant_key),
+                underlyings=instruments_by_tenant.get(tenant_key, ()),
             )
             self._synced.add(tenant_key)
         return True

@@ -181,7 +181,8 @@ async def test_chain_frame_from_cache_fast_path() -> None:
     assert frame["stream"] is True
     assert frame["poll_ms"] == STREAM_INTERVAL_MS
     watched = await ol_cache.list_watched()
-    assert (tenant, wings) in watched
+    # No ?underlying= on this request → desk-default instrument sentinel (E1/E2).
+    assert (tenant, wings, ol_cache.DESK_DEFAULT_INSTRUMENT) in watched
 
 
 @pytest.mark.asyncio
@@ -728,3 +729,73 @@ def test_price_divisor_cds_vs_bcd() -> None:
     assert _price_divisor(0x103) == 10_000_000.0
     assert _price_divisor(0x106) == 10_000.0
     assert _price_divisor(256 + 1) == 100.0  # NSE equity
+
+
+def test_options_lab_source_key_is_per_instrument() -> None:
+    """Two Lab windows must not share one hub source key.
+
+    The hub replaces a source's whole token map, so a shared key made the
+    NIFTY window unsubscribe the SENSEX window's chain every tick and back.
+    """
+    from app.domains.options_lab_worker import options_lab_source_key
+
+    nifty = options_lab_source_key("NSE:NIFTY 50")
+    sensex = options_lab_source_key("BSE:SENSEX")
+    desk = options_lab_source_key(None)
+
+    assert nifty != sensex
+    assert nifty.startswith("options_lab:")
+    assert sensex.startswith("options_lab:")
+    # The desk-default window keeps its own slot too.
+    assert desk not in {nifty, sensex}
+
+
+@pytest.mark.asyncio
+async def test_two_lab_instruments_both_stay_subscribed() -> None:
+    """Union across instruments, rather than last-write-wins."""
+    from app.domains.kite_ticker_hub import _union_source_maps
+    from app.domains.options_lab_worker import options_lab_source_key
+
+    sources = {
+        options_lab_source_key("NSE:NIFTY 50"): {1: "NFO:NIFTY26AUG24000CE"},
+        options_lab_source_key("BSE:SENSEX"): {2: "BFO:SENSEX26AUG81000CE"},
+    }
+    merged = _union_source_maps(sources)
+
+    assert merged == {1: "NFO:NIFTY26AUG24000CE", 2: "BFO:SENSEX26AUG81000CE"}
+
+
+def test_prune_selects_only_unwatched_lab_sources() -> None:
+    """A closed window's chain must not stay subscribed; others are untouched."""
+    from app.domains.options_lab_worker import (
+        options_lab_source_key,
+        stale_lab_source_keys,
+        watched_lab_source_keys,
+    )
+
+    nifty = options_lab_source_key("NSE:NIFTY 50")
+    sensex = options_lab_source_key("BSE:SENSEX")
+    sources = ["signal", "param_chart", nifty, sensex]
+
+    # Only the NIFTY window is still open.
+    keep = watched_lab_source_keys([("tenant-a", 15, "NSE:NIFTY 50")])["tenant-a"]
+    stale = stale_lab_source_keys(sources, keep)
+
+    assert stale == [sensex]
+    # Signal and Param Chart own their own keys on the same feed.
+    assert "signal" not in stale
+    assert "param_chart" not in stale
+
+
+def test_prune_keeps_everything_while_all_windows_are_open() -> None:
+    from app.domains.options_lab_worker import (
+        options_lab_source_key,
+        stale_lab_source_keys,
+        watched_lab_source_keys,
+    )
+
+    watched = [("t", 15, "NSE:NIFTY 50"), ("t", 15, "BSE:SENSEX")]
+    keep = watched_lab_source_keys(watched)["t"]
+    sources = [options_lab_source_key(s) for s in ("NSE:NIFTY 50", "BSE:SENSEX")]
+
+    assert stale_lab_source_keys(sources, keep) == []

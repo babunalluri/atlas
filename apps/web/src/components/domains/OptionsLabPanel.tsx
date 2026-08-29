@@ -12,6 +12,7 @@ import { OptionsLabIvChart } from "@/components/domains/OptionsLabIvChart";
 import { OptionsLabOiChart } from "@/components/domains/OptionsLabOiChart";
 import { OptionsLabScreenerPanel } from "@/components/domains/OptionsLabScreenerPanel";
 import { OptionsLabSetupBar } from "@/components/domains/OptionsLabSetupBar";
+import { TradingViewButton } from "@/components/domains/CommonInstrumentSetupBar";
 import { OptionsLabStrategyPanel } from "@/components/domains/OptionsLabStrategyPanel";
 import { OptionsLabStraddleChart } from "@/components/domains/OptionsLabStraddleChart";
 import { useOptionsLabConfigAutosave } from "@/components/domains/useOptionsLabConfigAutosave";
@@ -22,6 +23,12 @@ import {
   subscribeDeskInstrument,
   type DeskInstrumentSelection,
 } from "@/components/domains/desk-instrument";
+import {
+  isInstrumentMismatch,
+  labToolAccess,
+  type DeskOverlay,
+} from "@/components/domains/lab-sku";
+import { RATE_LIMIT_BACKOFF_MS, isRateLimited } from "@/lib/api/rate-limit";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import type { StrategyLeg, StrategyTemplateId } from "@/components/domains/options-lab-strategy";
 import { STRATEGY_TEMPLATES } from "@/components/domains/options-lab-strategy";
@@ -59,15 +66,6 @@ const SCREENER_POLL_MS = 60_000;
 const WING_OPTIONS = [10, 15, 20] as const;
 /** Left analysis pane — market read before building. */
 type AnalysisPane = "quotes" | "oi" | "straddle" | "iv";
-type DeskOverlay =
-  | null
-  | "screener"
-  | "books"
-  | "heatmap"
-  | "flows"
-  | "backtest"
-  | "bots"
-  | "ideas";
 
 type PendingPortfolioSave = {
   name: string;
@@ -194,14 +192,35 @@ function QuoteHit({
 export function OptionsLabPanel({
   active = true,
   readOnly = false,
+  automationEnabled,
+  instrumentHint,
+  hideChartButton = false,
+  initialOverlay = null,
 }: {
   active?: boolean;
-  /** Org-wide viewers: chain only — no setup edits / resets / bots. */
+  /** Org-wide viewers: no setup edits, resets, Flows or Books. */
   readOnly?: boolean;
+  /**
+   * Ideas / Backtest / Bot / Screener. Independent of {@link readOnly}: the
+   * end-user Lab SKU is read-only for config but automation-enabled.
+   * Defaults to `!readOnly` so the admin desk is unchanged.
+   */
+  automationEnabled?: boolean;
+  /**
+   * Instrument from the URL. Drives the chain: both `getOptionsChain` and
+   * `streamOptionsChain` send it as `?underlying=`, so this window reads its
+   * own instrument without touching tenant config.
+   */
+  instrumentHint?: string;
+  /** True when a dialog header already shows TV beside the instrument. */
+  hideChartButton?: boolean;
+  /** Overlay to open on mount, from the landing's tool pick (`?tool=`). */
+  initialOverlay?: DeskOverlay;
 }) {
+  const { automation } = labToolAccess({ readOnly, automationEnabled });
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
   const [analysisPane, setAnalysisPane] = useState<AnalysisPane>("quotes");
-  const [overlay, setOverlay] = useState<DeskOverlay>(null);
+  const [overlay, setOverlay] = useState<DeskOverlay>(initialOverlay);
   const [wings, setWings] = useState<number>(15);
   const [snapshot, setSnapshot] = useState<OptionsChainSnapshot | null>(null);
   const [screener, setScreener] = useState<OptionsScreenerSnapshot | null>(null);
@@ -249,10 +268,18 @@ export function OptionsLabPanel({
     error: configError,
     patchConfig,
     onPresetChange,
-  } = useOptionsLabConfigAutosave(getAccessToken, isLoaded && isSignedIn && active);
+  } = useOptionsLabConfigAutosave(getAccessToken, isLoaded && isSignedIn && active, {
+    pinnedInstrument: instrumentHint,
+  });
 
   const configRef = useRef(config);
   configRef.current = config;
+
+  // With an instrument in the URL the backend derives underlying + FUT from
+  // `?underlying=` (E1), so an incomplete tenant desk config must not block the
+  // chain for a pinned window. Config writes still gate on `configReady`.
+  const pinnedInstrument = Boolean(instrumentHint?.trim());
+  const chainReady = configReady || (pinnedInstrument && !configLoading);
 
   const atmHint = useMemo(
     () => (snapshot?.atm != null ? Math.round(snapshot.atm) : null),
@@ -292,7 +319,7 @@ export function OptionsLabPanel({
     try {
       const token = await getAccessToken();
       if (!token || !mounted.current) return;
-      const data = await getOptionsChain(token, wings);
+      const data = await getOptionsChain(token, wings, instrumentHint);
       if (!mounted.current || seq !== refreshSeq.current) return;
       setSnapshot(data);
       setError(data.ok ? null : data.error ?? "Chain unavailable");
@@ -301,7 +328,7 @@ export function OptionsLabPanel({
         setError(err instanceof Error ? err.message : "Failed to load chain");
       }
     }
-  }, [getAccessToken, wings]);
+  }, [getAccessToken, instrumentHint, wings]);
 
   const refreshScreener = useCallback(async () => {
     const seq = ++screenerSeq.current;
@@ -486,8 +513,10 @@ export function OptionsLabPanel({
   const lastDeskApplyKey = useRef("");
 
   // Apply Signal / Param Chart picks while Lab is open (same browser session).
+  // Pinned windows (`/lab/{instrument}`) must not rewrite tenant config from
+  // another desk's handoff — the URL owns the chain for that window.
   useEffect(() => {
-    if (!active || readOnly || !configReady) return;
+    if (!active || readOnly || !configReady || pinnedInstrument) return;
     const apply = (selection: DeskInstrumentSelection) => {
       if (selection.source === "options-lab") return;
       const key = deskInstrumentIdentityKey(selection);
@@ -516,11 +545,16 @@ export function OptionsLabPanel({
     const existing = readDeskInstrument();
     if (existing && existing.source !== "options-lab") apply(existing);
     return subscribeDeskInstrument(apply);
-  }, [active, configReady, patchConfig, readOnly]);
+  }, [active, configReady, patchConfig, pinnedInstrument, readOnly]);
 
   useEffect(() => {
-    if (!active || !isLoaded || !isSignedIn || !configReady) return;
-    if (!config?.underlying_symbol?.trim() || !config.fut_symbol?.trim()) return;
+    if (!active || !isLoaded || !isSignedIn || !chainReady) return;
+    if (
+      !pinnedInstrument &&
+      (!config?.underlying_symbol?.trim() || !config.fut_symbol?.trim())
+    ) {
+      return;
+    }
 
     const controller = new AbortController();
     const myGeneration = ++streamGeneration.current;
@@ -529,7 +563,9 @@ export function OptionsLabPanel({
 
     void (async () => {
       let attempt = 0;
+      let rateLimited = false;
       while (!cancelled && myGeneration === streamGeneration.current) {
+        rateLimited = false;
         try {
           const token = await getAccessToken();
           if (!token || !mounted.current || controller.signal.aborted) return;
@@ -538,6 +574,7 @@ export function OptionsLabPanel({
           await streamOptionsChain({
             accessToken: token,
             wings,
+            underlying: instrumentHint,
             signal: controller.signal,
             onState: (data) => {
               if (
@@ -571,11 +608,16 @@ export function OptionsLabPanel({
           }
           setStreaming(false);
           setError(err instanceof Error ? err.message : "Options Lab stream failed");
-          if (attempt === 0) void refresh();
+          // Over budget already — a REST refresh spends another request and
+          // keeps the sliding window full. Wait a full window instead.
+          rateLimited = isRateLimited(err);
+          if (!rateLimited && attempt === 0) void refresh();
           attempt += 1;
         }
         if (controller.signal.aborted || cancelled) return;
-        const delayMs = Math.min(8_000, 500 * 2 ** Math.min(attempt - 1, 4));
+        const delayMs = rateLimited
+          ? RATE_LIMIT_BACKOFF_MS
+          : Math.min(8_000, 500 * 2 ** Math.min(attempt - 1, 4));
         await new Promise((resolve) => window.setTimeout(resolve, delayMs));
       }
       if (mounted.current && myGeneration === streamGeneration.current) {
@@ -593,10 +635,13 @@ export function OptionsLabPanel({
     config?.mock,
     config?.strike_step,
     config?.underlying_symbol,
-    configReady,
+    chainReady,
     getAccessToken,
+    // Re-open the stream when the window switches instrument (E1).
+    instrumentHint,
     isLoaded,
     isSignedIn,
+    pinnedInstrument,
     refresh,
     wings,
   ]);
@@ -733,8 +778,58 @@ export function OptionsLabPanel({
     },
   ];
 
+  // Safety net: `?underlying=` now drives the chain (E1), so these should agree.
+  // If the backend falls back — unknown symbol, no broker binding — never label
+  // the wrong chain with the requested instrument's name.
+  const streamedUnderlying =
+    snapshot?.underlying_symbol ??
+    (pinnedInstrument ? undefined : config?.underlying_symbol);
+  const instrumentMismatch = isInstrumentMismatch(instrumentHint, streamedUnderlying);
+
+  // A pinned window streams `?underlying=`, but `config` is the tenant desk
+  // config — showing it in the setup bar put "SENSEX" above a MIDCPNIFTY chain.
+  // Mirror the requested instrument immediately, then the streamed snapshot.
+  const displayConfig = useMemo(() => {
+    if (!config) return config;
+    if (!instrumentHint?.trim()) return config;
+
+    const preset = presets.find((item) => item.symbol === instrumentHint);
+    const hinted = {
+      ...config,
+      underlying_symbol: instrumentHint,
+      underlying_label: preset?.label ?? instrumentHint,
+      fut_symbol:
+        snapshot?.fut_symbol ??
+        suggestFutSymbol(instrumentHint) ??
+        config.fut_symbol,
+      strike_step:
+        snapshot?.strike_step ?? preset?.strike_step ?? config.strike_step,
+    };
+
+    if (!snapshot?.underlying_symbol) return hinted;
+
+    return {
+      ...hinted,
+      underlying_symbol: snapshot.underlying_symbol,
+      underlying_label: snapshot.underlying_label ?? snapshot.underlying_symbol,
+      fut_symbol: snapshot.fut_symbol ?? hinted.fut_symbol,
+      strike_step: snapshot.strike_step ?? hinted.strike_step,
+    };
+  }, [config, instrumentHint, presets, snapshot]);
+
   return (
     <section className="relative flex h-full min-h-[36rem] flex-col overflow-hidden rounded-xl border border-line bg-raised/20 p-2">
+      {instrumentMismatch ? (
+        <p className="mb-1.5 shrink-0 rounded-md border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber">
+          Requested <strong>{instrumentHint}</strong> but the chain is showing{" "}
+          <strong>{streamedUnderlying}</strong>. The instrument may not be
+          tradable in this workspace — reload, or pick it again from the desk.
+        </p>
+      ) : pinnedInstrument && !snapshot?.underlying_symbol && streaming ? (
+        <p className="mb-1.5 shrink-0 rounded-md border border-line bg-canvas/60 px-3 py-2 text-xs text-slate-muted">
+          Loading <strong>{instrumentHint}</strong> chain…
+        </p>
+      ) : null}
       <header className="shrink-0 space-y-1.5 border-b border-line pb-1.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -749,6 +844,12 @@ export function OptionsLabPanel({
             <Badge tone={streaming ? "success" : "warning"} dot={false}>
               Stream {streaming ? "connected" : "…"}
             </Badge>
+            {!hideChartButton ? (
+              <TradingViewButton
+                symbol={displayConfig?.underlying_symbol ?? ""}
+                label={displayConfig?.underlying_label}
+              />
+            ) : null}
             <span className="text-xs text-slate-muted tabular-nums">
               ATM ±{wings} · refreshed {fetchedLabel ?? "…"}
               {snapshot?.quote_source ? ` · ${snapshot.quote_source}` : ""}
@@ -758,27 +859,31 @@ export function OptionsLabPanel({
             ) : null}
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            {/* Trader tools — backends carry TraderContext, so end users in the
+                Lab SKU may open these. See docs/desk-architecture-roadmap.md
+                Track B. */}
+            {/* Screener, Ideas, Backtest and Bot are reached from the
+                workspace's instrument menu (Automation) and from `?tool=`,
+                not from here — this window is the chain. Their overlays stay
+                mounted below so those entry points still open them. */}
+            {automation ? (
+              <Button
+                variant={overlay === "heatmap" ? "primary" : "secondary"}
+                size="sm"
+                icon={<LayersIcon />}
+                onClick={() => {
+                  setScreenerUniverse("equities");
+                  setOverlay((prev) => (prev === "heatmap" ? null : "heatmap"));
+                }}
+              >
+                Heat map
+              </Button>
+            ) : null}
+            {/* Admin-only backends: /flows and /portfolios stay AdminContext.
+                Books is out of the end-user SKU until per-user book stores
+                land (Track D) — keep it hidden rather than 403 on click. */}
             {!readOnly ? (
               <>
-                <Button
-                  variant={overlay === "screener" ? "primary" : "secondary"}
-                  size="sm"
-                  icon={<SearchIcon />}
-                  onClick={() => setOverlay((prev) => (prev === "screener" ? null : "screener"))}
-                >
-                  Screener
-                </Button>
-                <Button
-                  variant={overlay === "heatmap" ? "primary" : "secondary"}
-                  size="sm"
-                  icon={<LayersIcon />}
-                  onClick={() => {
-                    setScreenerUniverse("equities");
-                    setOverlay((prev) => (prev === "heatmap" ? null : "heatmap"));
-                  }}
-                >
-                  Heat map
-                </Button>
                 <Button
                   variant={overlay === "flows" ? "primary" : "secondary"}
                   size="sm"
@@ -788,42 +893,15 @@ export function OptionsLabPanel({
                   Flows
                 </Button>
                 <Button
-                  variant={overlay === "ideas" ? "primary" : "secondary"}
+                  variant={overlay === "books" ? "primary" : "secondary"}
                   size="sm"
-                  icon={<ChartLineIcon />}
-                  onClick={() => {
-                    setScreenerUniverse("all");
-                    setOverlay((prev) => (prev === "ideas" ? null : "ideas"));
-                  }}
+                  icon={<BookIcon />}
+                  onClick={() => setOverlay((prev) => (prev === "books" ? null : "books"))}
                 >
-                  Ideas
-                </Button>
-                <Button
-                  variant={overlay === "backtest" ? "primary" : "secondary"}
-                  size="sm"
-                  icon={<HistoryIcon />}
-                  onClick={() => setOverlay((prev) => (prev === "backtest" ? null : "backtest"))}
-                >
-                  Backtest
-                </Button>
-                <Button
-                  variant={overlay === "bots" ? "primary" : "secondary"}
-                  size="sm"
-                  icon={<PlayIcon />}
-                  onClick={() => setOverlay((prev) => (prev === "bots" ? null : "bots"))}
-                >
-                  Bot
+                  Books
                 </Button>
               </>
             ) : null}
-            <Button
-              variant={overlay === "books" ? "primary" : "secondary"}
-              size="sm"
-              icon={<BookIcon />}
-              onClick={() => setOverlay((prev) => (prev === "books" ? null : "books"))}
-            >
-              Books
-            </Button>
             {!readOnly ? (
               <label
                 htmlFor="options-lab-mock"
@@ -892,7 +970,7 @@ export function OptionsLabPanel({
         </div>
 
         <OptionsLabSetupBar
-          config={config}
+          config={displayConfig}
           presets={presets}
           presetKey={presetKey}
           presetLocked={presetLocked}
@@ -901,6 +979,7 @@ export function OptionsLabPanel({
           loading={configLoading}
           atmHint={atmHint}
           readOnly={readOnly}
+          hidePreset={pinnedInstrument}
           layoutExtras={
             <div className="grid min-w-0 flex-[1.4] grid-cols-4 gap-x-3 gap-y-1 border-l border-line pl-3">
               {summaryItems.map(({ label, parts }) => (

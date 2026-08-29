@@ -50,6 +50,41 @@ function FieldShell({
   );
 }
 
+/** Opens the instrument on TradingView. Lives beside whatever names the
+    instrument — the setup bar's preset, or a window header. */
+export function TradingViewButton({
+  symbol,
+  label,
+  className,
+}: {
+  symbol: string;
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="secondary"
+      icon={<ChartLineIcon />}
+      disabled={!symbol}
+      title={
+        symbol
+          ? `Chart ${label ?? symbol} on TradingView`
+          : "Select an instrument first"
+      }
+      aria-label="Open TradingView chart"
+      onClick={() => {
+        if (!symbol) return;
+        openTradingViewChartWindow(symbol);
+      }}
+      className={className ?? "shrink-0"}
+    >
+      TV
+    </Button>
+  );
+}
+
 export function CommonInstrumentSetupBar({
   loading,
   loadingLabel,
@@ -80,6 +115,7 @@ export function CommonInstrumentSetupBar({
   layoutExtras = null,
   dense = false,
   showTradingView = false,
+  hidePreset = false,
   readOnly = false,
   allowPresetChange = false,
 }: {
@@ -114,6 +150,12 @@ export function CommonInstrumentSetupBar({
   dense?: boolean;
   /** Chart button between Preset and Underlying. */
   showTradingView?: boolean;
+  /**
+   * Hide the Preset picker. True when the window is already scoped to one
+   * instrument (opened from the workspace's instrument menu): the header names
+   * it, and switching here would leave the title describing another symbol.
+   */
+  hidePreset?: boolean;
   /** Org-wide viewers: show symbols, no setup edits. */
   readOnly?: boolean;
   /** When readOnly, still allow switching the viewed preset/row. */
@@ -136,37 +178,20 @@ export function CommonInstrumentSetupBar({
   return (
     <div className={containerClassName}>
       <div className={layoutClassName}>
-        <FieldShell dense={dense} htmlFor={`${idPrefix}-preset`} label="Preset">
-          <SearchableSelect
-            id={`${idPrefix}-preset`}
-            value={presetKey}
-            onChange={onPresetChange}
-            options={presetOptions}
-            disabled={readOnly && !allowPresetChange}
-            placeholder="Search preset…"
-          />
-        </FieldShell>
+        {!hidePreset ? (
+          <FieldShell dense={dense} htmlFor={`${idPrefix}-preset`} label="Preset">
+            <SearchableSelect
+              id={`${idPrefix}-preset`}
+              value={presetKey}
+              onChange={onPresetChange}
+              options={presetOptions}
+              disabled={readOnly && !allowPresetChange}
+              placeholder="Search preset…"
+            />
+          </FieldShell>
+        ) : null}
         {showTradingView ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="secondary"
-            icon={<ChartLineIcon />}
-            disabled={!tvSymbol}
-            title={
-              tvSymbol
-                ? `Chart ${presetOption?.label ?? tvSymbol} on TradingView`
-                : "Select a preset first"
-            }
-            aria-label="Open TradingView chart"
-            onClick={() => {
-              if (!tvSymbol) return;
-              openTradingViewChartWindow(tvSymbol);
-            }}
-            className="shrink-0"
-          >
-            TV
-          </Button>
+          <TradingViewButton symbol={tvSymbol} label={presetOption?.label} />
         ) : null}
         <FieldShell
           dense={dense}

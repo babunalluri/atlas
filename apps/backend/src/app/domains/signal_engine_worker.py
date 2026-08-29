@@ -43,6 +43,10 @@ logger = get_logger(__name__)
 _BG_WORKER_TASKS: set[asyncio.Task[Any]] = set()
 # At most one in-flight matrix row refresh per tenant (pileup guard).
 _MATRIX_BG_BY_TENANT: dict[str, asyncio.Task[Any]] = {}
+# Round-robin cursor per tenant: the symbol the last matrix pass finished on.
+# A time-budgeted pass would otherwise always recompute the same head of the
+# watch set and never reach the tail.
+_MATRIX_CURSOR: dict[str, str] = {}
 
 
 def _track_bg_worker(task: asyncio.Task[Any]) -> None:
@@ -64,6 +68,7 @@ def _track_bg_worker(task: asyncio.Task[Any]) -> None:
 
 def reset_matrix_bg_for_tests() -> None:
     _MATRIX_BG_BY_TENANT.clear()
+    _MATRIX_CURSOR.clear()
     _BG_WORKER_TASKS.clear()
 
 
@@ -128,7 +133,7 @@ async def sync_kite_for_signal_tenant(
         except Exception:
             settings = {}
         pinned = pinned_instruments(settings)
-        watched_keys = set(await cache.list_watched_instruments(str(tenant_id)))
+        watched = await cache.watched_instrument_symbols(str(tenant_id))
         primary_key = instrument_key(cfg.underlying_symbol or "")
         for sym in pinned:
             if not sym or instrument_key(sym) == primary_key:
@@ -137,15 +142,23 @@ async def sync_kite_for_signal_tenant(
             fut = suggest_fut_symbol(sym)
             if fut:
                 symbols.append(fut)
-        for key in watched_keys:
+        # Subscribe every watched instrument, not only watched keys that match a
+        # pinned name. An ad-hoc open (RELIANCE from the instrument menu) gets a
+        # matrix row, so it must get WS tokens too — otherwise its Tier-A reads
+        # REST-stamp their way into 429s while pinned rows read the book.
+        for key, symbol in watched.items():
             if key == primary_key:
                 continue
-            match = next((s for s in pinned if instrument_key(s) == key), None)
-            if match and match not in symbols:
-                symbols.append(match)
-                fut = suggest_fut_symbol(match)
-                if fut and fut not in symbols:
-                    symbols.append(fut)
+            # Legacy watch rows stored a flag, not a symbol; recover via pinned.
+            target = symbol or next(
+                (s for s in pinned if instrument_key(s) == key), ""
+            )
+            if not target or target in symbols:
+                continue
+            symbols.append(target)
+            fut = suggest_fut_symbol(target)
+            if fut and fut not in symbols:
+                symbols.append(fut)
         symbols = list(dict.fromkeys(s for s in symbols if s))
         if not symbols:
             return False
@@ -220,9 +233,18 @@ async def _matrix_extra_configs(
     tenant_key: str,
     *,
     watched_only: bool,
+    resume_after: str | None = None,
 ) -> list[SignalEngineConfig]:
-    """Build configs for non-primary matrix instruments that need warming."""
+    """Build configs for non-primary matrix instruments that need warming.
+
+    ``resume_after`` is the symbol the previous pass finished on. Rotation
+    happens BEFORE the row cap, so a watch set larger than
+    ``MATRIX_MAX_EXTRA_ROWS`` still cycles: capping first would pin the same
+    head of the list forever and never reach the tail.
+    """
+    from app.domains.options_lab_underlyings import EQUITY_FNO_SEED
     from app.domains.signal_engine import UNDERLYING_PRESETS
+    from app.domains.signal_engine_constants import MATRIX_MAX_EXTRA_ROWS
     from app.domains.signal_matrix import (
         config_for_instrument,
         instrument_key,
@@ -241,29 +263,56 @@ async def _matrix_extra_configs(
         settings = {}
 
     pinned = pinned_instruments(settings)
-    watched_keys = set(await cache.list_watched_instruments(tenant_key))
+    watched_symbols = await cache.watched_instrument_symbols(tenant_key)
     primary_sym = (primary.underlying_symbol or "").strip()
     primary_key = instrument_key(primary_sym)
 
+    # Equities as well as indices: an equity row built with the desk's index
+    # strike step (RELIANCE at NIFTY's 50) resolves the wrong ATM and produces
+    # a junk chain, so carry each name's own step.
     preset_by_symbol = {
-        str(p.get("symbol") or ""): p for p in UNDERLYING_PRESETS if p.get("symbol")
+        str(p.get("symbol") or ""): p
+        for p in (*UNDERLYING_PRESETS, *EQUITY_FNO_SEED)
+        if p.get("symbol")
     }
 
     targets: list[str] = []
     if watched_only:
-        for key in watched_keys:
+        # Warm what is actually being watched, pinned or not. Previously only
+        # watched keys that matched a pinned symbol were warmed, so opening any
+        # other instrument produced no row and the stream silently fell back to
+        # the desk primary.
+        #
+        # Ad-hoc opens sort FIRST. Every name here has a live SSE reader, so
+        # neither group is idle, but a pinned instrument is reachable from the
+        # standing universe while an instrument the trader just opened from the
+        # menu has no other way to get a row. Pinned-first plus a cap of two is
+        # what left NSE:RELIANCE with no row behind three pinned indices.
+        pinned_targets: list[str] = []
+        adhoc_targets: list[str] = []
+        for key, symbol in watched_symbols.items():
             if key == primary_key:
                 continue
             match = next((s for s in pinned if instrument_key(s) == key), None)
             if match:
-                targets.append(match)
+                pinned_targets.append(match)
+            elif symbol:
+                # Empty for legacy watch rows that stored a flag, not a symbol.
+                adhoc_targets.append(symbol)
+        targets = adhoc_targets + pinned_targets
     else:
         for sym in pinned:
             if instrument_key(sym) == primary_key:
                 continue
             targets.append(sym)
 
-    max_extra = 2 if primary_sym else 3
+    if resume_after and resume_after in targets:
+        cut = targets.index(resume_after) + 1
+        targets = targets[cut:] + targets[:cut]
+
+    # The watch set is self-limiting (WATCH_TTL_SECONDS, live readers only), so
+    # this only caps a burst of simultaneously opened windows.
+    max_extra = MATRIX_MAX_EXTRA_ROWS - (1 if primary_sym else 0)
     out: list[SignalEngineConfig] = []
     for sym in targets[:max_extra]:
         preset = preset_by_symbol.get(sym) or {}
@@ -635,13 +684,41 @@ async def _refresh_pinned_matrix_rows(
 
     When ``watched_only`` (default), skip pinned symbols with no live SSE
     instrument watcher — avoids burning the tick budget on idle rows.
+
+    Rows compute sequentially and each is a full state build, so a pass stops
+    starting new rows once ``MATRIX_PASS_BUDGET_MS`` is spent and resumes from
+    the next row on the following pass. A flat row cap alone let a large watch
+    set run far past the refresh gate, leaving the tail permanently stale.
     """
+    from app.domains.signal_engine_constants import MATRIX_PASS_BUDGET_MS
     from app.domains.signal_matrix import split_snapshot
 
+    # Resume after whichever row the previous pass finished on, so a budget cut
+    # rotates through the watch set instead of recomputing the same head. The
+    # rotation is applied before the row cap, inside _matrix_extra_configs.
     extras = await _matrix_extra_configs(
-        service, primary, tenant_key, watched_only=watched_only
+        service,
+        primary,
+        tenant_key,
+        watched_only=watched_only,
+        resume_after=_MATRIX_CURSOR.get(tenant_key),
     )
+    if not extras:
+        return
+
+    deadline = time.monotonic() + (MATRIX_PASS_BUDGET_MS / 1000)
+    computed = 0
     for row_cfg in extras:
+        # Always compute at least one row: a pass that returns no progress
+        # would never advance the cursor and the tail would never be served.
+        if computed and time.monotonic() >= deadline:
+            logger.info(
+                "signal_matrix_pass_budget_spent",
+                tenant_id=tenant_key,
+                computed=computed,
+                remaining=len(extras) - computed,
+            )
+            break
         sym = (row_cfg.underlying_symbol or "").strip()
         if not sym:
             continue
@@ -649,6 +726,8 @@ async def _refresh_pinned_matrix_rows(
             row_payload = await _compute_state_payload(
                 service, config=row_cfg, last_good=None
             )
+        computed += 1
+        _MATRIX_CURSOR[tenant_key] = sym
         if not isinstance(row_payload, dict):
             continue
         row_payload = {

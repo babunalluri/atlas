@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from app.domains.options_lab import (
     OptionsLabService,
     chain_frame_from_cache,
     chain_state_for_stream,
+    config_for_underlying,
 )
 from app.domains.signal_engine_constants import STREAM_INTERVAL_MS
 from app.domains.sse_frames import SSE_KEEPALIVE, stream_revision
@@ -40,7 +41,44 @@ ViewerContext = Annotated[
         require_roles(Role.platform_admin, Role.tenant_admin, Role.end_user)
     ),
 ]
+# Lab SKU: end users may run Ideas / Backtest / paper Bots. Same role set as
+# ViewerContext today (there is no distinct trader role) — kept separate so a
+# future trader role tightens these routes in one place. Live bot placement,
+# broker orders/GTTs, portfolios, and config writes stay AdminContext.
+TraderContext = Annotated[
+    TenantContext,
+    Depends(
+        require_roles(Role.platform_admin, Role.tenant_admin, Role.end_user)
+    ),
+]
 TenantSession = Annotated[AsyncSession, Depends(tenant_session)]
+
+_LIVE_BOT_DENIED = "Live bots require an admin role."
+
+
+def _require_admin_for_live(context: TenantContext, mode: Any) -> None:
+    """Reject live-mode bot writes from non-admins (paper-only Lab SKU)."""
+    if str(mode or "").lower() != "live":
+        return
+    if context.can_administer():
+        return
+    raise HTTPException(status_code=403, detail=_LIVE_BOT_DENIED)
+
+
+async def _guard_live_bot(
+    service: OptionsLabService, context: TenantContext, bot_id: str
+) -> None:
+    """Non-admins may read live bots but never mutate or run them.
+
+    Reads the mode unscoped on purpose. ``get_bot`` is owner-scoped, so an end
+    user aiming at an operator's live bot would get "not found" and skip this
+    refusal — the request would still be rejected further down, but as a 200
+    with an error body rather than the 403 this rule promises.
+    """
+    if context.can_administer():
+        return
+    if await service.bot_mode_unscoped(bot_id) == "live":
+        raise HTTPException(status_code=403, detail=_LIVE_BOT_DENIED)
 
 
 class OptionsLabConfigPatchIn(BaseModel):
@@ -100,7 +138,7 @@ async def reset_options_lab_iv_history(
 
 @router.get("/iv-history")
 async def get_options_iv_history(
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
     symbol: str = Query(..., min_length=3),
 ) -> dict[str, Any]:
@@ -110,7 +148,7 @@ async def get_options_iv_history(
 
 @router.get("/screener")
 async def get_options_screener(
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
     universe: str = Query("indices"),
     mode: str = Query("full", pattern="^(fast|full)$"),
@@ -149,14 +187,26 @@ async def delete_options_lab_gtt(
     """Cancel a GTT via bound kite delete_gtt (mutating)."""
     return await OptionsLabService(session, context).delete_gtt(trigger_id)
 
+# E1: pin one window to one instrument without PATCHing org-wide config. Empty
+# means "use the tenant desk config", the pre-E1 behaviour.
+UnderlyingQuery = Query(
+    None,
+    max_length=64,
+    description="Instrument to stream (defaults to the tenant desk config).",
+)
+
+
 @router.get("/chain")
 async def get_options_chain(
     context: ViewerContext,
     session: TenantSession,
     wings: int = Query(DEFAULT_WINGS, ge=MIN_WINGS, le=MAX_WINGS),
+    underlying: str | None = UnderlyingQuery,
 ) -> dict[str, Any]:
     """Live CE/PE chain from Kite quotes (ATM ± wings)."""
-    return await OptionsLabService(session, context).chain_snapshot(wings=wings)
+    service = OptionsLabService(session, context)
+    config = config_for_underlying(await service._read_config(), underlying)
+    return await service.chain_snapshot(wings=wings, config=config)
 
 
 @router.get("/stream")
@@ -164,6 +214,7 @@ async def stream_options_chain(
     request: Request,
     context: ViewerContext,
     wings: int = Query(DEFAULT_WINGS, ge=MIN_WINGS, le=MAX_WINGS),
+    underlying: str | None = UnderlyingQuery,
 ) -> StreamingResponse:
     """Server-sent events: ~8 Hz chain snapshots with coalesced ticks."""
 
@@ -176,19 +227,24 @@ async def stream_options_chain(
                     break
                 # Steady state: Redis only (no Postgres). Cold path opens a
                 # short-lived session when fingerprint or snapshot is missing.
-                payload = await chain_frame_from_cache(tenant_key, wings=wings)
+                payload = await chain_frame_from_cache(
+                    tenant_key, wings=wings, underlying=underlying
+                )
                 if payload is None:
-                    await ol_cache.touch_watcher(tenant_key, wings=wings)
+                    await ol_cache.touch_watcher(
+                        tenant_key, wings=wings, underlying=underlying
+                    )
                     async with SessionFactory() as session:
                         async with session.begin():
                             await apply_tenant_guc(session, context.tenant_id)
                             service = OptionsLabService(session, context)
                             payload = await chain_state_for_stream(
-                                service, wings=wings
+                                service, wings=wings, underlying=underlying
                             )
                     await ol_cache.touch_watcher(
                         tenant_key,
                         wings=int(payload.get("wings", wings)),
+                        underlying=underlying,
                     )
                 rev = stream_revision(payload)
                 if rev == last_rev:
@@ -201,7 +257,7 @@ async def stream_options_chain(
         except asyncio.CancelledError:
             raise
         finally:
-            await ol_cache.clear_watcher(tenant_key)
+            await ol_cache.clear_watcher(tenant_key, underlying)
 
     return StreamingResponse(
         event_stream(),
@@ -358,7 +414,7 @@ async def options_lab_broker_reconcile(
 @router.post("/margins")
 async def options_lab_strategy_margins(
     body: OptionsLabMarginsIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Broker order-margin + available funds for a builder strategy (fallback heuristic)."""
@@ -427,7 +483,7 @@ class OptionsLabBacktestSummaryIn(BaseModel):
 
 @router.get("/backtests")
 async def list_options_lab_backtests(
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """List saved model backtests for this tenant."""
@@ -437,7 +493,7 @@ async def list_options_lab_backtests(
 @router.post("/backtests")
 async def create_options_lab_backtest(
     body: OptionsLabBacktestCreateIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Run + persist a model backtest (session store)."""
@@ -449,7 +505,7 @@ async def create_options_lab_backtest(
 @router.post("/backtests/run")
 async def run_options_lab_backtest(
     body: OptionsLabBacktestRunIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Run a model backtest without saving."""
@@ -461,7 +517,7 @@ async def run_options_lab_backtest(
 @router.post("/backtests/summary")
 async def summarize_options_lab_backtests(
     body: OptionsLabBacktestSummaryIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Multi-run portfolio summary of saved model backtests."""
@@ -474,7 +530,7 @@ async def summarize_options_lab_backtests(
 @router.get("/backtests/{backtest_id}")
 async def get_options_lab_backtest(
     backtest_id: str,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Fetch one saved backtest including shocks / equity."""
@@ -484,7 +540,7 @@ async def get_options_lab_backtest(
 @router.delete("/backtests/{backtest_id}")
 async def delete_options_lab_backtest(
     backtest_id: str,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Delete a saved model backtest."""
@@ -537,7 +593,7 @@ class OptionsLabBotRunIn(BaseModel):
 
 @router.get("/bots")
 async def list_options_lab_bots(
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """List persisted Options Lab bots for this tenant."""
@@ -551,7 +607,7 @@ async def list_options_lab_bots(
 @router.post("/bots")
 async def create_options_lab_bot(
     body: OptionsLabBotCreateIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Create a bot (optional backtest_id handoff)."""
@@ -559,12 +615,13 @@ async def create_options_lab_bot(
     payload.setdefault("enabled", False)
     payload.setdefault("kill", False)
     payload.setdefault("mode", "paper")
+    _require_admin_for_live(context, payload.get("mode"))
     return await OptionsLabService(session, context).create_bot(payload)
 
 
 @router.post("/bots/evaluate")
 async def evaluate_options_lab_bots(
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Nudge: evaluate due armed paper bots for this tenant."""
@@ -574,7 +631,7 @@ async def evaluate_options_lab_bots(
 @router.get("/bots/{bot_id}")
 async def get_options_lab_bot(
     bot_id: str,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     return await OptionsLabService(session, context).get_bot(bot_id)
@@ -584,33 +641,42 @@ async def get_options_lab_bot(
 async def update_options_lab_bot(
     bot_id: str,
     body: OptionsLabBotUpdateIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
-    return await OptionsLabService(session, context).update_bot(
-        bot_id, body.model_dump(exclude_unset=True)
-    )
+    payload = body.model_dump(exclude_unset=True)
+    service = OptionsLabService(session, context)
+    # Block both switching a bot to live and editing an existing live bot.
+    _require_admin_for_live(context, payload.get("mode"))
+    await _guard_live_bot(service, context, bot_id)
+    return await service.update_bot(bot_id, payload)
 
 
 @router.delete("/bots/{bot_id}")
 async def delete_options_lab_bot(
     bot_id: str,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
-    return await OptionsLabService(session, context).delete_bot(bot_id)
+    service = OptionsLabService(session, context)
+    await _guard_live_bot(service, context, bot_id)
+    return await service.delete_bot(bot_id)
 
 
 @router.post("/bots/{bot_id}/run")
 async def run_options_lab_bot(
     bot_id: str,
     body: OptionsLabBotRunIn,
-    context: AdminContext,
+    context: TraderContext,
     session: TenantSession,
 ) -> dict[str, Any]:
     """Run once (HITL). Live requires confirm; auto flag is for worker/tests."""
-    return await OptionsLabService(session, context).run_bot(
+    service = OptionsLabService(session, context)
+    await _guard_live_bot(service, context, bot_id)
+    # ``auto`` skips the confirm gate — worker/admin path only.
+    auto = bool(body.auto) and context.can_administer()
+    return await service.run_bot(
         bot_id,
-        auto=bool(body.auto),
+        auto=auto,
         confirm=bool(body.confirm),
     )

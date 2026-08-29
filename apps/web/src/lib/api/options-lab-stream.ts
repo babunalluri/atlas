@@ -20,11 +20,14 @@ function streamHeaders(accessToken: string): Record<string, string> {
 export async function streamOptionsChain(options: {
   accessToken: string;
   wings: number;
+  /** Pin this stream to an instrument; omit to use the tenant desk config. */
+  underlying?: string | null;
   signal?: AbortSignal;
   onState: (state: OptionsChainSnapshot) => void;
 }): Promise<void> {
-  const { accessToken, wings, signal, onState } = options;
+  const { accessToken, wings, underlying, signal, onState } = options;
   const params = new URLSearchParams({ wings: String(wings) });
+  if (underlying?.trim()) params.set("underlying", underlying.trim());
   let response: Response;
   try {
     response = await fetch(agentOsUrl(`/admin/options-lab/stream?${params}`), {

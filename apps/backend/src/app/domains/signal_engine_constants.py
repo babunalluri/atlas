@@ -41,6 +41,17 @@ NSE_SLOW_INFLIGHT_TTL_MS = 25_000
 # Matrix row bg refresh gate — stops tick-cadence create_task pileups that
 # exhaust the DB pool when row compute (>tick) overlaps. Aligns with chain TTL.
 MATRIX_REFRESH_GATE_MS = 15_000
+# How many non-primary matrix rows one pass may compute. The watch set is
+# already bounded by WATCH_TTL_SECONDS (only instruments with a live SSE
+# reader are in it), so this caps a burst of opened windows, not the
+# instrument menu.
+MATRIX_MAX_EXTRA_ROWS = 12
+# Wall-clock budget for one matrix pass. Rows compute sequentially (each is a
+# full state build), so a flat count alone let a large watch set run far past
+# the refresh gate and starve the tail. Stop starting new rows once the budget
+# is spent; the next pass resumes where this one left off, so every watched row
+# still gets served — just in rotation rather than all in one pass.
+MATRIX_PASS_BUDGET_MS = 10_000
 
 # Ticker sleeps longer when no admin desk has an open SSE connection.
 TICKER_IDLE_POLL_SECONDS = 2.0

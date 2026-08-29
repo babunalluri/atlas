@@ -95,6 +95,13 @@ export function useSignalConfigAutosave(
   enabled: boolean,
 ) {
   const [presets, setPresets] = useState<SignalUnderlyingPreset[]>([]);
+  // `persist` must not depend on `presets` by value: `load()` calls
+  // setPresets() with a freshly parsed array, so a `presets` dependency gives
+  // `persist` — and therefore `load` — a new identity on every load, which
+  // re-fires the `[enabled, load]` effect and loops GET /admin/signals/config
+  // until the request budget is gone. Read it through a ref instead.
+  const presetsRef = useRef<SignalUnderlyingPreset[]>([]);
+  presetsRef.current = presets;
   const [pinnedInstruments, setPinnedInstruments] = useState<string[]>([]);
   const [presetKey, setPresetKey] = useState(CUSTOM_PRESET);
   const [config, setConfig] = useState<SignalEngineAdminConfig | null>(null);
@@ -133,7 +140,7 @@ export function useSignalConfigAutosave(
         if (result?.config) {
           setConfig(result.config);
           lastSavedRef.current = signalConfigSnapshot(result.config);
-          const match = presets.find(
+          const match = presetsRef.current.find(
             (p) => p.symbol === result.config.underlying_symbol,
           );
           setPresetKey(match ? match.symbol : CUSTOM_PRESET);
@@ -147,7 +154,7 @@ export function useSignalConfigAutosave(
         setError(err instanceof Error ? err.message : "Save failed");
       }
     },
-    [getAccessToken, presets],
+    [getAccessToken],
   );
 
   const scheduleSave = useCallback(
@@ -249,7 +256,7 @@ export function useSignalConfigAutosave(
         if (result?.config) {
           setConfig(result.config);
           lastSavedRef.current = signalConfigSnapshot(result.config);
-          const match = presets.find(
+          const match = presetsRef.current.find(
             (p) => p.symbol === result.config.underlying_symbol,
           );
           setPresetKey(match ? match.symbol : CUSTOM_PRESET);
@@ -263,7 +270,7 @@ export function useSignalConfigAutosave(
         throw err;
       }
     },
-    [getAccessToken, presets],
+    [getAccessToken],
   );
 
   /**

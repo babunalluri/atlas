@@ -16,15 +16,18 @@ describe("notification inbox", () => {
     expect(source).not.toContain("applyToLiveTrading");
   });
 
-  it("wires desk draft provider on the customer trading desk", () => {
+  it("wires desk draft provider on the trader workspace", () => {
+    // The three-tab desk is gone; the workspace is the surface that hosts the
+    // chat rail, so it is what must provide the draft context.
     const source = readFileSync(
       join(
         dirname(fileURLToPath(import.meta.url)),
-        "../domains/StockBrokerCustomerDesk.tsx",
+        "../domains/TraderWorkspace.tsx",
       ),
       "utf8",
     );
     expect(source).toContain("DeskChatDraftProvider");
     expect(source).toContain("chat_targets");
+    expect(source).toContain("WorkspaceDeskChat");
   });
 });

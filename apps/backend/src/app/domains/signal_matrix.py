@@ -214,6 +214,41 @@ def merge_globals_row(
     return out
 
 
+def warming_row_frame(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    label: str | None = None,
+) -> dict[str, Any]:
+    """Keep shared globals, blank the row, and name the requested instrument.
+
+    ``merged_frame`` falls back to the monolithic snapshot when the asked-for
+    row has not been computed yet, which painted the desk primary's ATM, entry
+    and per-instrument checklist under the requested instrument's heading — the
+    RELIANCE board showing NIFTY numbers. Global metrics (breadth, timing,
+    discipline) are genuinely shared, so they stay.
+    """
+    out = {k: v for k, v in payload.items() if k not in _ROW_TOP_KEYS}
+    metrics = payload.get("metrics")
+    out["metrics"] = [
+        row
+        for row in (metrics if isinstance(metrics, list) else [])
+        if isinstance(row, dict) and is_global_metric(row)
+    ]
+    out["underlying"] = {"symbol": symbol, "label": label or symbol}
+    out["instrument"] = symbol
+    out["feed_source"] = "starting"
+    out["live_quote_missing"] = False
+    out["live_warnings"] = ["Warming this instrument's row…"]
+    out["passed"] = 0
+    out["evaluable"] = 0
+    out["entry_ready"] = False
+    out["entry"] = None
+    out["engine_computing"] = True
+    out["matrix"] = True
+    return out
+
+
 def config_for_instrument(
     primary: Any,
     *,

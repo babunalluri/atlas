@@ -17,6 +17,17 @@ Tracked work we are **not** doing now. Pick up later when prioritizing UX/perf o
 
 **Out of scope for this debt item:** converting Atlas to Vite + Ant Design; IVP/Dow feeds (manual by design).
 
+## Trading desk — long-term architecture
+
+Instrument-first landing, unified Redis matrix per instrument, and Kite subscription for pinned universe: see [Desk architecture roadmap](desk-architecture-roadmap.md). Shipped identity layer: [desk-instrument.md](desk-instrument.md).
+
+**Single-process ticker (`WEB_CONCURRENCY=1`).** The Kite WS hub and the paper-bot
+worker both disable themselves above one worker, so the whole API scales as one
+process. Every desk SSE stream therefore shares that process's event loop, and
+`TENANT_CONCURRENCY_LIMIT` (raised to 40) is a mitigation, not a fix. The real
+fix is splitting desk workers out of the API processes — open decision **#10** in
+the roadmap, flagged there as "before customer #2".
+
 ## Signal / pilot (related, also deferred polish)
 
 - Soft-pinned preset switch without cold epoch when possible.

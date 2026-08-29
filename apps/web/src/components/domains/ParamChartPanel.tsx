@@ -8,7 +8,6 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   RefreshIcon,
-  SaveIcon,
 } from "@/components/ui/icons";
 import {
   getParamChartConfig,
@@ -31,6 +30,7 @@ import {
 } from "@/components/domains/desk-instrument";
 import { suggestFutSymbol } from "@/components/domains/signal-setup-options";
 import { useAgentOsToken } from "@/lib/auth/token";
+import { TradingViewButton } from "@/components/domains/CommonInstrumentSetupBar";
 import { cn } from "@/lib/utils";
 
 import {
@@ -43,12 +43,6 @@ import {
   barAxisLabel,
   shouldShowAxisLabel,
 } from "./paramChartAxis";
-import {
-  BUILTIN_PARAM_CHART_PRESETS,
-  loadCustomPresets,
-  saveCustomPreset,
-  type ParamChartPreset,
-} from "./paramChartPresets";
 import {
   isNoTradeBand,
   isSessionCloseBar,
@@ -77,6 +71,16 @@ const MONTH_LABELS = [
   "Dec",
 ];
 
+/** A month pack the server is still assembling — its rows are not final yet. */
+function packIsBuilding(snap: ParamChartMonthSnapshot): boolean {
+  return (
+    Boolean(snap.building) ||
+    (snap.kite?.errors || []).some((e) =>
+      /pack_building|pack_rebuild_in_progress/i.test(String(e)),
+    )
+  );
+}
+
 const INTERVAL_OPTIONS = [
   { id: "1m", label: "1m" },
   { id: "5m", label: "5m" },
@@ -93,12 +97,6 @@ function fmt(n: number | null | undefined, digits = 2): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
-}
-
-function fmtPct(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return "—";
-  const sign = n > 0 ? "+" : "";
-  return `${sign}${n.toFixed(2)}%`;
 }
 
 function numericMetric(value: unknown): number | null {
@@ -1627,8 +1625,36 @@ function ParamSidebar({
   );
 }
 
-export function ParamChartPanel({ active = true }: { active?: boolean }) {
+export function ParamChartPanel({
+  active = true,
+  instrument,
+  hideChartButton = false,
+}: {
+  active?: boolean;
+  /**
+   * Underlying to open, from the trader workspace.
+   *
+   * Request-scoped: it rides on `?underlying=` for the month read and the
+   * stream, so this window can read another instrument without moving the
+   * tenant desk chart. The server clears the desk strike for a scoped read and
+   * resolves ATM itself, which is why the strike and entry-premium inputs are
+   * disabled while an instrument is pinned — see `pinned` below.
+   */
+  instrument?: string;
+  /** True when a dialog header already shows TV beside the instrument. */
+  hideChartButton?: boolean;
+}) {
   const { getAccessToken, isLoaded, isSignedIn } = useAgentOsToken();
+  /**
+   * This window is scoped to one instrument from the workspace.
+   *
+   * Config writes are desk-wide, so anything that only makes sense for the
+   * desk instrument is disabled here: strike and entry premiums are cleared
+   * and re-derived server-side for a scoped read, so editing them would move
+   * the whole desk's chart while changing nothing in this window. Interval
+   * stays live — it is desk-wide too, but it does drive this read.
+   */
+  const pinned = Boolean(instrument?.trim());
   const [config, setConfig] = useState<ParamChartAdminConfig | null>(null);
   const [presets, setPresets] = useState<SignalUnderlyingPreset[]>([]);
   const [sharedMetrics, setSharedMetrics] = useState<ParamChartSharedMetric[]>(
@@ -1643,8 +1669,8 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     "auto",
   );
   const [showSpotPct, setShowSpotPct] = useState(false);
-  const [customPresets, setCustomPresets] = useState<ParamChartPreset[]>([]);
   const [alertsOn, setAlertsOn] = useState(true);
+  const [buildNotice, setBuildNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1662,10 +1688,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   const configRef = useRef(config);
   configRef.current = config;
 
-  useEffect(() => {
-    setCustomPresets(loadCustomPresets());
-  }, []);
-
   const applySnapshot = useCallback((snap: ParamChartMonthSnapshot) => {
     const pending = pendingIntervalRef.current;
     const snapIv = snap.config?.interval || snap.interval || "1D";
@@ -1674,11 +1696,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       return;
     }
     // Soft SSE / lock stubs: keep "building…" but don't wipe the plot forever.
-    const building =
-      Boolean(snap.building) ||
-      (snap.kite?.errors || []).some((e) =>
-        /pack_building|pack_rebuild_in_progress/i.test(String(e)),
-      );
+    const building = packIsBuilding(snap);
     if (building && !(snap.days?.length) && !snap.stream_patch) {
       setLoading(true);
       return;
@@ -1724,16 +1742,16 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   const loadMonthUntilReady = useCallback(
     async (
       token: string,
-      opts: { year?: number; month?: number; refresh?: boolean },
+      opts: {
+        year?: number;
+        month?: number;
+        refresh?: boolean;
+        underlying?: string | null;
+      },
     ) => {
       const snap = await getParamChartMonth(token, opts);
       if (!snap.ok) return snap;
-      const stillBuilding = (row: ParamChartMonthSnapshot) =>
-        Boolean(row.building) ||
-        (row.kite?.errors || []).some((e) =>
-          /pack_building|pack_rebuild_in_progress/i.test(String(e)),
-        );
-      if (!stillBuilding(snap)) return snap;
+      if (!packIsBuilding(snap)) return snap;
       // Wait for an in-flight dump. Never pass refresh=true on retries —
       // that would kick another Kite hist pull and trip the 60/min cap.
       let last = snap;
@@ -1743,12 +1761,13 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           last = await getParamChartMonth(token, {
             year: opts.year,
             month: opts.month,
+            underlying: opts.underlying,
             refresh: false,
           });
         } catch {
           return last;
         }
-        if (!last.ok || !stillBuilding(last)) return last;
+        if (!last.ok || !packIsBuilding(last)) return last;
       }
       return last;
     },
@@ -1768,6 +1787,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           year: config.year,
           month: config.month,
           interval,
+          underlying: instrument?.trim() || null,
           refresh: false,
           buildMissing: false,
         });
@@ -1775,7 +1795,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         prefetchedIntervals.current.delete(interval);
       }
     },
-    [active, config, getAccessToken, isLoaded, isSignedIn],
+    [active, config, getAccessToken, instrument, isLoaded, isSignedIn],
   );
 
   const refresh = useCallback(
@@ -1783,13 +1803,19 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       if (!isLoaded || !isSignedIn || !active) return;
       setLoading(true);
       setError(null);
+      setBuildNotice(null);
       try {
         const token = await getAccessToken();
         const [cfg, snap] = await Promise.all([
           getParamChartConfig(token),
-          loadMonthUntilReady(token, { refresh: Boolean(opts?.force) }),
+          loadMonthUntilReady(token, {
+            refresh: Boolean(opts?.force),
+            underlying: instrument?.trim() || null,
+          }),
         ]);
-        if (cfg.ok) {
+        // A pinned window is served a scoped config by `month_state`; writing
+        // the tenant desk config over it would name the wrong instrument.
+        if (cfg.ok && !pinned) {
           setConfig(cfg.config);
           setDraftStrike(
             cfg.config.strike == null ? "" : String(cfg.config.strike),
@@ -1801,8 +1827,16 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         } else if (cfg.error) {
           setError(cfg.error);
         }
-        if (snap.ok) applySnapshot(snap);
-        else if (snap.error) setError(snap.error);
+        if (snap.ok) {
+          applySnapshot(snap);
+          setBuildNotice(
+            packIsBuilding(snap)
+              ? "Still rebuilding this month's pack from Kite — the chart updates on its own when it lands."
+              : null,
+          );
+        } else if (snap.error) {
+          setError(snap.error);
+        }
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Failed to load Param Chart",
@@ -1811,7 +1845,16 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
         setLoading(false);
       }
     },
-    [active, applySnapshot, getAccessToken, isLoaded, isSignedIn, loadMonthUntilReady],
+    [
+      active,
+      applySnapshot,
+      getAccessToken,
+      instrument,
+      isLoaded,
+      isSignedIn,
+      loadMonthUntilReady,
+      pinned,
+    ],
   );
 
   const patchConfig = useCallback(
@@ -1865,6 +1908,10 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
     },
     [applySnapshot, getAccessToken, loadMonthUntilReady],
   );
+
+  // The workspace's instrument is request-scoped: it rides on ?underlying= for
+  // the month read and the stream. It used to PATCH tenant config, which moved
+  // the desk chart for every other window and user.
 
   useEffect(() => {
     if (!active || !config) return;
@@ -1939,6 +1986,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           await streamParamChart({
             accessToken: token,
             signal: ac.signal,
+            underlying: instrument?.trim() || null,
             onState: (snap) => {
               if (!cancelled && snap.ok) applySnapshot(snap);
             },
@@ -1957,7 +2005,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       cancelled = true;
       ac.abort();
     };
-  }, [active, applySnapshot, getAccessToken, isLoaded, isSignedIn]);
+  }, [active, applySnapshot, getAccessToken, instrument, isLoaded, isSignedIn]);
 
   const selectedDay = useMemo(() => {
     const days = month?.days;
@@ -1991,21 +2039,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   const overlayLabels = useMemo(
     () => overlaySeries.map((id) => seriesLabel(id, sharedMetrics)),
     [overlaySeries, sharedMetrics],
-  );
-
-  const allPresets = useMemo(
-    () => [...BUILTIN_PARAM_CHART_PRESETS, ...customPresets],
-    [customPresets],
-  );
-
-  const applyLayoutPreset = useCallback(
-    (preset: ParamChartPreset) => {
-      setOverlaySeries(preset.overlays.slice(0, MAX_OVERLAYS));
-      if (preset.chartStyle) setChartStyle(preset.chartStyle);
-      if (preset.histPreference) setHistPreference(preset.histPreference);
-      if (preset.interval) void patchConfig({ interval: preset.interval });
-    },
-    [patchConfig],
   );
 
   const alertHits = useMemo(() => {
@@ -2054,61 +2087,23 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
       <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-md border border-line bg-canvas/40 px-2 py-1.5">
+        {/* TV belongs beside whatever names the instrument. In a dialog the
+            header carries it instead. */}
+        {!hideChartButton ? (
+          <TradingViewButton
+            symbol={config?.underlying_symbol ?? ""}
+            label={config?.underlying_label}
+          />
+        ) : null}
+        {/* Pinned by the workspace row: hide the picker rather than show a
+            disabled one — switching here would also move the desk-wide chart
+            out from under this window's own heading. */}
         <select
-          className="max-w-[9.5rem] rounded border border-line bg-raised px-2 py-1 text-sm"
-          disabled={!config}
-          defaultValue=""
-          onChange={(e) => {
-            const id = e.target.value;
-            e.target.value = "";
-            const preset = allPresets.find((p) => p.id === id);
-            if (preset) applyLayoutPreset(preset);
-          }}
-          title="Apply layout preset"
-        >
-          <option value="" disabled>
-            Layout…
-          </option>
-          {BUILTIN_PARAM_CHART_PRESETS.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-          {customPresets.length ? (
-            <optgroup label="Saved">
-              {customPresets.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </optgroup>
-          ) : null}
-        </select>
-        <button
-          type="button"
-          className="inline-flex items-center justify-center rounded border border-line bg-raised p-1.5 text-slate-muted hover:text-ink disabled:opacity-50"
-          disabled={!config}
-          title="Save current interval + overlays as a custom layout"
-          aria-label="Save layout"
-          onClick={() => {
-            const label = window.prompt("Name this layout?", "My layout");
-            if (!label?.trim()) return;
-            const next = saveCustomPreset({
-              id: `custom-${Date.now()}`,
-              label: label.trim(),
-              interval: config?.interval || "1D",
-              overlays: overlaySeries,
-              chartStyle,
-              histPreference,
-            });
-            setCustomPresets(next);
-          }}
-        >
-          <SaveIcon />
-        </button>
-        <select
-          className="rounded border border-line bg-raised px-2 py-1 text-sm"
-          disabled={!config || saving}
+          className={cn(
+            "rounded border border-line bg-raised px-2 py-1 text-sm disabled:opacity-60",
+            pinned && "hidden",
+          )}
+          disabled={!config || saving || pinned}
           value={config?.underlying_symbol ?? ""}
           onChange={(e) => {
             const symbol = e.target.value;
@@ -2150,12 +2145,18 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           ))}
         </select>
 
+        <span aria-hidden className="h-5 w-px shrink-0 bg-line" />
         <label className="flex items-center gap-1 text-xs text-slate-muted">
           Strike
           <input
             type="number"
             className="w-24 rounded border border-line bg-raised px-2 py-1 font-mono text-sm"
-            disabled={!config || saving}
+            disabled={!config || saving || pinned}
+            title={
+              pinned
+                ? "Set on the desk chart — a pinned window resolves this from live spot"
+                : undefined
+            }
             value={draftStrike}
             onChange={(e) => setDraftStrike(e.target.value)}
             onBlur={() => commitNumeric("strike", draftStrike)}
@@ -2170,7 +2171,12 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           <input
             type="number"
             className="w-20 rounded border border-line bg-raised px-2 py-1 font-mono text-sm"
-            disabled={!config || saving}
+            disabled={!config || saving || pinned}
+            title={
+              pinned
+                ? "Set on the desk chart — a pinned window resolves this from live spot"
+                : undefined
+            }
             value={draftEntryCe}
             onChange={(e) => setDraftEntryCe(e.target.value)}
             onBlur={() => commitNumeric("entry_ce_premium", draftEntryCe)}
@@ -2184,7 +2190,12 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           <input
             type="number"
             className="w-20 rounded border border-line bg-raised px-2 py-1 font-mono text-sm"
-            disabled={!config || saving}
+            disabled={!config || saving || pinned}
+            title={
+              pinned
+                ? "Set on the desk chart — a pinned window resolves this from live spot"
+                : undefined
+            }
             value={draftEntryPe}
             onChange={(e) => setDraftEntryPe(e.target.value)}
             onBlur={() => commitNumeric("entry_pe_premium", draftEntryPe)}
@@ -2194,6 +2205,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           />
         </label>
 
+        <span aria-hidden className="h-5 w-px shrink-0 bg-line" />
         <div className="flex items-center rounded-md border border-line bg-raised p-0.5">
           {INTERVAL_OPTIONS.map((opt) => {
             const active = (config?.interval || "1D") === opt.id;
@@ -2235,6 +2247,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
           })}
         </div>
 
+        <span aria-hidden className="h-5 w-px shrink-0 bg-line" />
         <select
           className="rounded border border-line bg-raised px-2 py-1 text-sm"
           disabled={
@@ -2267,7 +2280,7 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
 
         <div className="ml-auto flex items-center gap-2">
           {config?.strike != null ? (
-            <span className="font-mono text-xs text-slate-muted">
+            <span className="hidden font-mono text-[11px] text-slate-muted xl:inline">
               {config.ce_symbol || "—"} / {config.pe_symbol || "—"}
             </span>
           ) : null}
@@ -2287,6 +2300,12 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
       {error ? (
         <p className="shrink-0 rounded-md border border-rose-300/60 bg-rose-50 px-3 py-2 text-sm text-rose-700">
           {error}
+        </p>
+      ) : null}
+
+      {buildNotice ? (
+        <p className="shrink-0 rounded-md border border-amber/40 bg-amber/10 px-3 py-2 text-sm text-amber">
+          {buildNotice}
         </p>
       ) : null}
 
@@ -2415,9 +2434,6 @@ export function ParamChartPanel({ active = true }: { active?: boolean }) {
                     </button>
                   ))}
                 </div>
-                <p className="text-xs text-slate-muted">
-                  1m / 5m / 15m / 1H / 1D / 1W / 1M
-                </p>
               </div>
             </div>
             {selectedDay ? (

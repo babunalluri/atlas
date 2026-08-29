@@ -183,16 +183,44 @@ async def seed_engine_enabled_metric(tenant_id: str, enabled: bool) -> None:
 
 async def seed_stream_cold_frame(
     service: "SignalEngineService",
+    *,
+    instrument: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Open a DB-backed SSE cold frame without awaiting ``state()``.
 
     Returns ``(payload, should_refresh)``. Caller schedules
     ``refresh_tenant_snapshot`` when ``should_refresh`` is True so the generator
     can yield the starting skeleton immediately.
+
+    ``instrument`` is the matrix row the reader asked for. It must be carried
+    through: seeding the desk primary here opened every non-primary window on
+    the primary's board, and registered the watcher without the instrument so
+    the worker never learned to build that row.
     """
+    from app.domains.signal_matrix import (
+        config_for_instrument,
+        instrument_key,
+        warming_row_frame,
+    )
+
     tenant_id = _tenant_key(service.context)
     config = await service._load_config()
     await seed_engine_enabled_metric(tenant_id, config.engine_enabled)
+
+    selected = (instrument or "").strip()
+    off_primary = bool(selected) and instrument_key(selected) != instrument_key(
+        config.underlying_symbol or ""
+    )
+    row_config = (
+        config_for_instrument(
+            config,
+            symbol=selected,
+            label=preset_label(selected),
+            strike_step=preset_strike_step(selected),
+        )
+        if off_primary
+        else config
+    )
 
     if not config.engine_enabled:
         await cache.clear_watcher(tenant_id)
@@ -204,10 +232,21 @@ async def seed_stream_cold_frame(
             **stopped,
             "config_epoch": await cache.get_config_epoch(tenant_id),
         }
+        # ``snapshot`` is the tenant-wide primary key that every reader shares,
+        # so only ever store the primary's shape there; a row-shaped frame is
+        # returned to this reader alone.
         await cache.set_snapshot(tenant_id, stopped, force=True)
+        if off_primary:
+            stopped = _apply_engine_stopped_overlay(
+                _engine_starting_payload(row_config)
+            )
+            stopped = {
+                **stopped,
+                "config_epoch": await cache.get_config_epoch(tenant_id),
+            }
         return stopped, False
 
-    await cache.touch_watcher(tenant_id)
+    await cache.touch_watcher(tenant_id, instrument=selected or None)
     existing = await cache.get_snapshot(tenant_id)
     if existing is not None:
         computing = await cache.compute_lock_held(tenant_id)
@@ -215,22 +254,37 @@ async def seed_stream_cold_frame(
             existing.get("feed_source") in (None, "starting", "stopped")
             and not computing
         )
+        if selected and instrument_key(frame_instrument(existing)) != instrument_key(
+            selected
+        ):
+            # Only the primary's snapshot exists — do not pass it off as this
+            # instrument's board. The watcher above queues the row.
+            existing = warming_row_frame(
+                existing, symbol=selected, label=preset_label(selected)
+            )
+            computing = True
         return (
             _annotate_snapshot_freshness(existing, computing=computing),
             need_refresh,
         )
 
-    starting = _engine_starting_payload(config)
+    epoch = await cache.get_config_epoch(tenant_id)
     starting = {
-        **starting,
-        "config_epoch": await cache.get_config_epoch(tenant_id),
+        **_engine_starting_payload(config),
+        "config_epoch": epoch,
     }
+    # Same rule as above: the shared key stays primary-shaped.
     await cache.set_snapshot(
         tenant_id,
         starting,
         ttl_ms=ENGINE_STARTING_SNAPSHOT_MS,
         force=True,
     )
+    if off_primary:
+        starting = {
+            **_engine_starting_payload(row_config),
+            "config_epoch": epoch,
+        }
     return _annotate_snapshot_freshness(starting, computing=True), True
 
 
@@ -418,6 +472,38 @@ async def state_for_stream(
     return _annotate_snapshot_freshness(payload, computing=True)
 
 
+def frame_instrument(payload: dict[str, Any]) -> str:
+    """Which instrument a desk frame actually describes."""
+    under = payload.get("underlying")
+    under = under if isinstance(under, dict) else {}
+    return str(payload.get("instrument") or under.get("symbol") or "")
+
+
+def preset_label(symbol: str) -> str:
+    """Menu label for an underlying — indices first, then the equity F&O seed."""
+    from app.domains.options_lab_underlyings import EQUITY_FNO_SEED
+
+    sym = (symbol or "").strip()
+    for preset in (*UNDERLYING_PRESETS, *EQUITY_FNO_SEED):
+        if str(preset.get("symbol") or "") == sym:
+            return str(preset.get("label") or sym)
+    return sym
+
+
+def preset_strike_step(symbol: str) -> int | None:
+    """Strike step for an underlying, or None when the name is unknown."""
+    from app.domains.options_lab_underlyings import EQUITY_FNO_SEED
+
+    sym = (symbol or "").strip()
+    for preset in (*UNDERLYING_PRESETS, *EQUITY_FNO_SEED):
+        if str(preset.get("symbol") or "") == sym:
+            try:
+                return max(1, int(preset["strike_step"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+    return None
+
+
 async def stream_frame_from_cache(
     tenant_id: str,
     *,
@@ -431,8 +517,11 @@ async def stream_frame_from_cache(
     When ``instrument`` is set, merge ``globals + row[instrument]`` so warm
     switches paint without waiting on a structural rebuild.
     """
+    from app.domains.signal_matrix import instrument_key, warming_row_frame
+
+    selected = (instrument or "").strip()
     enabled = await cache.get_metric(tenant_id, "engine_enabled")
-    snapshot = await cache.merged_frame(tenant_id, instrument=instrument)
+    snapshot = await cache.merged_frame(tenant_id, instrument=selected or None)
     if not isinstance(enabled, bool) or snapshot is None:
         # Fallback: legacy monolithic snapshot when matrix halves are cold.
         if snapshot is None:
@@ -440,8 +529,19 @@ async def stream_frame_from_cache(
         if not isinstance(enabled, bool) or snapshot is None:
             return None
     if enabled:
-        await cache.touch_watcher(tenant_id, instrument=instrument)
+        await cache.touch_watcher(tenant_id, instrument=selected or None)
         computing = await cache.compute_lock_held(tenant_id)
+        if selected and instrument_key(frame_instrument(snapshot)) != instrument_key(
+            selected
+        ):
+            # No row for this instrument yet, so ``merged_frame`` fell back to
+            # the desk primary. ``touch_watcher`` above queues the row; until it
+            # lands, show the board warming rather than another instrument's
+            # numbers under this one's name.
+            snapshot = warming_row_frame(
+                snapshot, symbol=selected, label=preset_label(selected)
+            )
+            computing = True
         return _annotate_snapshot_freshness(snapshot, computing=computing)
     return _apply_engine_stopped_overlay(snapshot)
 
@@ -587,6 +687,44 @@ class SignalEngineConfig:
             "engine_enabled": self.engine_enabled,
             "auto_atm_symbols": self.auto_atm_symbols,
         }
+
+
+def config_with_desk_board(settings: dict[str, Any] | None) -> SignalEngineConfig:
+    """Build the engine config with shared-board identity applied.
+
+    ``get_admin_config`` merged the board for the UI only, so every other
+    consumer — the ticker, matrix row builds, stream seeds — kept reading the
+    signal nest and could describe a different instrument than the board the
+    desk was showing. The merge belongs here, where the config is built.
+    """
+    from app.domains.desk_instrument import (
+        merge_desk_instrument_into_signal,
+        read_desk_board,
+    )
+
+    raw = dict(settings or {})
+    if read_desk_board(raw) is None:
+        return SignalEngineConfig.from_settings(raw)
+    merged = merge_desk_instrument_into_signal(raw, raw)
+    # The board writes ``fut_symbol``; ``from_settings`` prefers the legacy
+    # ``nifty_fut_symbol`` alias, so a stale alias would outrank the board.
+    fut = str(merged.get("fut_symbol") or "").strip()
+    if fut:
+        merged["nifty_fut_symbol"] = fut
+    # Option legs stay Signal's while the instrument is unchanged. The board's
+    # CE/PE record the last *manual* identity PATCH, but Signal rolls its own
+    # ATM legs (``maybe_persist_auto_atm_symbols``) and deliberately never
+    # writes them back to the board — so letting the board win here would pin
+    # the engine to whatever strike someone last typed. On an instrument change
+    # the merge's own handling stands: legs belonging to the previous
+    # underlying must not carry over.
+    prev_under = str(
+        raw.get("underlying_symbol") or raw.get("nifty_symbol") or ""
+    ).strip()
+    if str(merged.get("underlying_symbol") or "").strip() == prev_under:
+        for key in ("ce_symbol", "pe_symbol"):
+            merged[key] = raw.get(key)
+    return SignalEngineConfig.from_settings(merged)
 
 
 def _tenant_key(context: TenantContext) -> str:
@@ -2348,7 +2486,7 @@ class SignalEngineService:
         hit = await _cache_get(tenant_id, "setup")
         if hit is not None:
             return (
-                SignalEngineConfig.from_settings(hit["settings"]),
+                config_with_desk_board(hit["settings"]),
                 bool(hit["has_broker"]),
                 bool(hit["team_ready"]),
             )
@@ -2365,7 +2503,7 @@ class SignalEngineService:
                 "team_ready": team_ready,
             },
         )
-        return SignalEngineConfig.from_settings(settings), has_broker, team_ready
+        return config_with_desk_board(settings), has_broker, team_ready
 
     async def get_admin_config(self) -> dict[str, Any]:
         config = await self._load_config()
@@ -2384,7 +2522,7 @@ class SignalEngineService:
             equity_presets = []
         presets = merge_presets(
             [{**p, "universe": "indices"} for p in UNDERLYING_PRESETS],
-            equity_presets,
+            [{**p, "universe": "equities"} for p in equity_presets],
         )
         from app.domains.signal_matrix import pinned_instruments
 

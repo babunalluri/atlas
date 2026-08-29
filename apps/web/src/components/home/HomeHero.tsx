@@ -50,7 +50,11 @@ export function HomeHero() {
         const workspace = await getWorkspaceInfo(token);
         if (cancelled) return;
         const slug = workspace.slug || status.tenant_slug || "";
-        const portalHref = slug ? `/t/${slug}/chat` : "/chat";
+        // Trading desks are instrument-first: land on the instrument list, not
+        // a desk already pinned to one instrument. Other domains keep chat.
+        const home =
+          workspace.domain === "stock_broker" ? "workspace" : "chat";
+        const portalHref = slug ? `/t/${slug}/${home}` : "/chat";
         setMode("redirecting");
         router.replace(portalHref);
       } catch {

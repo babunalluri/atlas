@@ -128,9 +128,33 @@ async def patch_signal_config(
 async def get_signal_state(
     context: ViewerContext,
     session: TenantSession,
+    instrument: str | None = Query(
+        default=None,
+        description="Matrix row to read (e.g. NSE:NIFTY 50). Defaults to admin primary.",
+    ),
 ) -> dict[str, Any]:
-    """Single snapshot (prefer GET /stream for live desk)."""
+    """Single snapshot (prefer GET /stream for live desk).
+
+    Takes ``instrument`` for the same reason ``/stream`` does: the panel calls
+    this on mount and on Refresh, and answering with the desk primary stamped
+    the desk's board over whichever instrument the caller had open.
+    """
+    selected = (instrument or "").strip()
     service = SignalEngineService(session, context)
+    if selected:
+        frame = await stream_frame_from_cache(
+            str(context.tenant_id), instrument=selected
+        )
+        if frame is not None:
+            return frame
+        # Cold cache. Falling through to ``state_for_stream`` would answer with
+        # the desk primary under this instrument's name — the exact swap this
+        # parameter exists to prevent. Seed the same scoped cold frame the
+        # stream uses: it registers the watcher and returns a warming board.
+        payload, _should_refresh = await seed_stream_cold_frame(
+            service, instrument=selected
+        )
+        return payload
     return await state_for_stream(service)
 
 
@@ -166,7 +190,7 @@ async def stream_signal_state(
                             await apply_tenant_guc(session, context.tenant_id)
                             service = SignalEngineService(session, context)
                             payload, should_refresh = await seed_stream_cold_frame(
-                                service
+                                service, instrument=selected
                             )
                     if should_refresh:
                         task = asyncio.create_task(
@@ -195,6 +219,12 @@ async def stream_signal_state(
                 await asyncio.sleep(STREAM_INTERVAL_MS / 1000)
         except asyncio.CancelledError:
             raise
+        finally:
+            # Stop warming this row the moment the window closes. Without it a
+            # closed board kept a matrix row (and its Kite subscription) alive
+            # for the whole 45 s TTL, and a trader clicking through instruments
+            # left a trail of ghost rows competing for the tick budget.
+            await cache.clear_watch_instrument(tenant_key, selected)
 
     return StreamingResponse(
         event_stream(),

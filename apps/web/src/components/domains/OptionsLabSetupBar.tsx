@@ -25,6 +25,7 @@ export function OptionsLabSetupBar({
   atmHint = null,
   layoutExtras = null,
   readOnly = false,
+  hidePreset = false,
 }: {
   config: OptionsLabAdminConfig | null;
       presets: Array<{
@@ -42,6 +43,8 @@ export function OptionsLabSetupBar({
   /** Inline market strip (Spot / PCR / …) on the same dense row. */
   layoutExtras?: ReactNode;
   readOnly?: boolean;
+  /** True when the window is scoped to one instrument (header names it). */
+  hidePreset?: boolean;
 }) {
   const presetOptions = useMemo(() => buildPresetOptions(presets), [presets]);
 
@@ -113,7 +116,8 @@ export function OptionsLabSetupBar({
       strikeOptions={strikeOptions}
       idPrefix="options-lab"
       dense
-      showTradingView
+      showTradingView={false}
+      hidePreset={hidePreset}
       readOnly={readOnly}
       allowPresetChange={false}
       containerClassName="w-full rounded-md border border-line bg-canvas/40 px-2 py-1"

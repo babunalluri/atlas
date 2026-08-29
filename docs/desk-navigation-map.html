@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atlas desk — navigation map</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --line: #2d3a4d;
+      --text: #e8eef4;
+      --muted: #8b9cb3;
+      --teal: #2dd4bf;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+      --violet: #a78bfa;
+      --blue: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 1.5rem;
+    }
+    h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .grid {
+      display: grid;
+      gap: 1.25rem;
+      grid-template-columns: 1fr;
+    }
+    @media (min-width: 960px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+      .grid-full { grid-column: 1 / -1; }
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 1rem 1.15rem;
+    }
+    section h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--teal);
+      margin: 0 0 0.75rem;
+    }
+    section h2.admin { color: var(--violet); }
+    section h2.today { color: var(--amber); }
+    section h2.flow { color: var(--blue); }
+    .tree { list-style: none; margin: 0; padding: 0; }
+    .tree ul { list-style: none; margin: 0.35rem 0 0.35rem 1rem; padding-left: 0.75rem; border-left: 2px solid var(--line); }
+    .tree li { margin: 0.35rem 0; }
+    .path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.82rem;
+      background: #0d1117;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0.35rem 0.55rem;
+      display: inline-block;
+    }
+    .path .param { color: var(--amber); }
+    .path .query { color: var(--blue); }
+    .label {
+      display: block;
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      margin-left: 0.35rem;
+      vertical-align: middle;
+    }
+    .badge-user { background: #134e4a; color: var(--teal); }
+    .badge-admin { background: #3b0764; color: #e9d5ff; }
+    .badge-overlay { background: #422006; color: var(--amber); }
+    .badge-window { background: #1e3a5f; color: var(--blue); }
+    .badge-blocked { background: #4c0519; color: var(--rose); }
+    .flow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .flow-box {
+      background: #0d1117;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.85rem;
+      min-width: 7rem;
+      text-align: center;
+    }
+    .arrow { color: var(--muted); font-size: 1.1rem; }
+    .compare {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    .compare th, .compare td {
+      border: 1px solid var(--line);
+      padding: 0.45rem 0.6rem;
+      text-align: left;
+    }
+    .compare th { background: #0d1117; color: var(--muted); font-weight: 600; }
+    .yes { color: var(--teal); }
+    .no { color: var(--rose); }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 1rem;
+    }
+    footer {
+      margin-top: 1.5rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    a { color: var(--teal); }
+  </style>
+</head>
+<body>
+  <h1>Atlas desk — navigation map</h1>
+  <p class="subtitle">
+    Target routes from <a href="desk-architecture-roadmap.md">desk-architecture-roadmap.md</a>
+    · {slug} = tenant · {instrument} = e.g. <code>NSE:NIFTY 50</code>
+    · <strong>MVP:</strong> URL instrument needs stream <code>?underlying=</code> (E1) — otherwise chain follows tenant config only
+  </p>
+
+  <div class="grid">
+    <!-- End user -->
+    <section>
+      <h2>End-user Lab SKU (target)</h2>
+      <ul class="tree">
+        <li>
+          <span class="path">/t/<span class="param">{slug}</span>/lab</span>
+          <span class="badge badge-user">picker</span>
+          <span class="label">Choose instrument → opens Lab session</span>
+          <ul>
+            <li>
+              <span class="path">/t/<span class="param">{slug}</span>/lab/<span class="param">{instrument}</span></span>
+              <span class="badge badge-user">main</span>
+              <span class="label">Chain · builder · Books · automation buttons</span>
+              <ul>
+                <li>
+                  <span class="path">…/ideas</span>
+                  <span class="badge badge-window">window</span>
+                  <span class="label">Screener ranks (PoP / E[PnL])</span>
+                </li>
+                <li>
+                  <span class="path">…/backtest<span class="query">?underlying=&amp;template=</span></span>
+                  <span class="badge badge-window">window</span>
+                  <span class="label">Model runs · Ideas handoff via query</span>
+                </li>
+                <li>
+                  <span class="path">…/bots</span>
+                  <span class="badge badge-window">window</span>
+                  <span class="label">Paper bots (live = admin only)</span>
+                </li>
+                <li>
+                  <span class="path">…</span> + overlay
+                  <span class="badge badge-overlay">v1 same tab</span>
+                  <span class="label">Ideas / Backtest / Bot as overlays before sub-routes ship</span>
+                </li>
+              </ul>
+            </li>
+          </ul>
+        </li>
+      </ul>
+      <p class="label" style="margin-top:0.75rem">
+        Entry <strong>/lab</strong> not <strong>/desk</strong> — no Signal or Param Chart tabs.
+      </p>
+    </section>
+
+    <!-- Admin -->
+    <section>
+      <h2 class="admin">Admin desk (target)</h2>
+      <ul class="tree">
+        <li>
+          <span class="path">/t/<span class="param">{slug}</span>/desk</span>
+          <span class="badge badge-admin">today</span>
+          <span class="label">Customer chat + three tabs (Signal · Chart · Lab)</span>
+        </li>
+        <li>
+          <span class="path">/admin/workspace</span>
+          <span class="badge badge-admin">today</span>
+          <span class="label">Operator admin desk (full tools)</span>
+        </li>
+        <li style="margin-top:0.75rem">
+          <span class="path">/t/<span class="param">{slug}</span>/desk/<span class="param">{instrument}</span>/…</span>
+          <span class="badge badge-admin">phase 1</span>
+          <span class="label">Instrument-first — one tool per window</span>
+          <ul>
+            <li><span class="path">…/signal</span> <span class="label">Checklist · matrix SSE</span></li>
+            <li><span class="path">…/chart</span> <span class="label">Param Chart · month OHLC</span></li>
+            <li>
+              <span class="path">…/lab</span> <span class="label">Full Lab + admin overlays</span>
+              <ul>
+                <li><span class="path">…/lab/ideas</span></li>
+                <li><span class="path">…/lab/backtest</span></li>
+                <li><span class="path">…/lab/bots</span></li>
+              </ul>
+            </li>
+          </ul>
+        </li>
+        <li>
+          <span class="path">/t/<span class="param">{slug}</span>/desk</span>
+          <span class="badge badge-blocked">phase 1 landing</span>
+          <span class="label">Search universe → pick instrument → pick tool → new tab</span>
+        </li>
+      </ul>
+    </section>
+
+    <!-- Flow -->
+    <section class="grid-full">
+      <h2 class="flow">Automation flow (Ideas → Backtest → Bot)</h2>
+      <div class="flow">
+        <div class="flow-box">Ideas<br><small>screener rank</small></div>
+        <span class="arrow">→ Open</span>
+        <div class="flow-box">Lab builder<br><small>apply template</small></div>
+        <span class="arrow">→ Backtest</span>
+        <div class="flow-box">Backtest<br><small>save run</small></div>
+        <span class="arrow">→ Create bot</span>
+        <div class="flow-box">Bot<br><small>paper arm</small></div>
+      </div>
+      <div class="flow" style="margin-top:1rem">
+        <div class="flow-box">Ideas</div>
+        <span class="arrow">→ cross-window</span>
+        <div class="flow-box">
+          <span class="path" style="font-size:0.72rem">/lab/{instrument}/backtest?template=…</span>
+        </div>
+        <span class="arrow">→</span>
+        <div class="flow-box">Bot window<br><small>/lab/…/bots</small></div>
+      </div>
+      <p class="label">Backtest → Bot uses server <code>backtest_id</code> — works across windows once routes exist.</p>
+    </section>
+
+    <!-- Today vs target -->
+    <section class="grid-full">
+      <h2 class="today">End user — today vs Lab SKU</h2>
+      <table class="compare">
+        <thead>
+          <tr>
+            <th>Path / feature</th>
+            <th>Today</th>
+            <th>Lab SKU target</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="path">/t/{slug}/chat</span> → desk</td>
+            <td class="yes">3 tabs: Signal · Chart · Lab</td>
+            <td class="yes"><span class="path">/lab</span> only</td>
+          </tr>
+          <tr>
+            <td>Chain stream</td>
+            <td class="yes">View</td>
+            <td class="yes">View + build</td>
+          </tr>
+          <tr>
+            <td>Ideas / Backtest / Bot</td>
+            <td class="no">Hidden (readOnly)</td>
+            <td class="yes">Enabled</td>
+          </tr>
+          <tr>
+            <td>Change underlying</td>
+            <td class="no">PATCH 403</td>
+            <td class="yes">URL instrument <small>(needs E1)</small> or one/tenant</td>
+          </tr>
+          <tr>
+            <td>Books</td>
+            <td class="no">Click → 403 today</td>
+            <td class="yes">After B1 portfolios</td>
+          </tr>
+          <tr>
+            <td>Signal / Param Chart</td>
+            <td class="yes">Shown (view)</td>
+            <td class="no">Not in SKU</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <div class="legend">
+    <span><span class="badge badge-user">user</span> End-user Lab SKU</span>
+    <span><span class="badge badge-admin">admin</span> Operator / tenant admin</span>
+    <span><span class="badge badge-overlay">overlay</span> Same-window MVP</span>
+    <span><span class="badge badge-window">window</span> Separate tab / route</span>
+    <span><span class="badge badge-blocked">phase 1</span> After cache prerequisites</span>
+  </div>
+
+  <footer>
+    Open this file in a browser: <code>docs/desk-navigation-map.html</code>
+    · Generated for Atlas desk architecture roadmap (2026-08-28)
+  </footer>
+</body>
+</html>

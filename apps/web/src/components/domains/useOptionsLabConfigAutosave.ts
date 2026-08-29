@@ -61,6 +61,7 @@ function mergeDeskHandoff(config: OptionsLabAdminConfig): OptionsLabAdminConfig 
 export function useOptionsLabConfigAutosave(
   getAccessToken: () => Promise<string | null>,
   enabled: boolean,
+  opts?: { pinnedInstrument?: string | null },
 ) {
   const [presets, setPresets] = useState<SignalUnderlyingPreset[]>([]);
   const [presetKey, setPresetKey] = useState(CUSTOM_PRESET);
@@ -123,7 +124,9 @@ export function useOptionsLabConfigAutosave(
         setError(data.error ?? "Failed to load Options Lab config");
         return;
       }
-      const bootstrapped = mergeDeskHandoff(withSuggestedFut(data.config));
+      const bootstrapped = opts?.pinnedInstrument?.trim()
+        ? withSuggestedFut(data.config)
+        : mergeDeskHandoff(withSuggestedFut(data.config));
       setPresets(data.presets);
       setConfig(bootstrapped);
       const match = data.presets.find(
@@ -144,7 +147,7 @@ export function useOptionsLabConfigAutosave(
     } finally {
       setLoading(false);
     }
-  }, [getAccessToken, persist]);
+  }, [getAccessToken, opts?.pinnedInstrument, persist]);
 
   useEffect(() => {
     if (!enabled) return;

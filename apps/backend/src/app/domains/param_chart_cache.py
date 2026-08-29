@@ -30,31 +30,63 @@ def _now_ms() -> float:
     return time.monotonic() * 1000
 
 
-def _pack_key(tenant_id: str, year: int, month: int, interval: str = "1D") -> str:
-    from app.domains.param_chart_constants import normalize_param_chart_interval
-
-    iv = normalize_param_chart_interval(interval)
-    # 1W / 1M are year-scoped aggregates — one pack per year.
-    if iv in ("1M", "1W"):
-        return f"atlas:param-chart:{tenant_id}:pack:{iv}:{year:04d}"
-    return f"atlas:param-chart:{tenant_id}:pack:{iv}:{year:04d}-{month:02d}"
+# Instrument dimension on every per-instrument key. ``-`` means "the tenant
+# desk instrument" (pre-Phase 0 behaviour) and keeps old callers working.
+DESK_DEFAULT_INSTRUMENT = "-"
 
 
-def _mem_pack_key(
-    tenant_id: str, year: int, month: int, interval: str = "1D"
+def instrument_slug(underlying: str | None) -> str:
+    """Cache-key segment for one instrument (``-`` = tenant desk default)."""
+    return (underlying or "").strip().upper() or DESK_DEFAULT_INSTRUMENT
+
+
+def _pack_key(
+    tenant_id: str,
+    year: int,
+    month: int,
+    interval: str = "1D",
+    underlying: str | None = None,
 ) -> str:
     from app.domains.param_chart_constants import normalize_param_chart_interval
 
     iv = normalize_param_chart_interval(interval)
-    return f"{tenant_id}|{iv}|{year}|{month}"
+    slug = instrument_slug(underlying)
+    # 1W / 1M are year-scoped aggregates — one pack per year.
+    if iv in ("1M", "1W"):
+        return f"atlas:param-chart:{tenant_id}:pack:{slug}:{iv}:{year:04d}"
+    return (
+        f"atlas:param-chart:{tenant_id}:pack:{slug}:{iv}:{year:04d}-{month:02d}"
+    )
 
 
-def _watch_key(tenant_id: str) -> str:
-    return f"atlas:param-chart:watch:{tenant_id}"
+def _mem_pack_key(
+    tenant_id: str,
+    year: int,
+    month: int,
+    interval: str = "1D",
+    underlying: str | None = None,
+) -> str:
+    from app.domains.param_chart_constants import normalize_param_chart_interval
+
+    iv = normalize_param_chart_interval(interval)
+    return f"{tenant_id}|{instrument_slug(underlying)}|{iv}|{year}|{month}"
 
 
-def _overlay_key(tenant_id: str) -> str:
-    return f"atlas:param-chart:{tenant_id}:overlay"
+def _watch_key(tenant_id: str, underlying: str | None = None) -> str:
+    # ``|`` separates tenant from instrument: tenant ids are UUIDs and trading
+    # symbols never contain '|', so the split back is safe. Matches the shape
+    # Options Lab uses for its own watch keys.
+    return f"atlas:param-chart:watch:{tenant_id}|{instrument_slug(underlying)}"
+
+
+def _overlay_key(tenant_id: str, underlying: str | None = None) -> str:
+    return (
+        f"atlas:param-chart:{tenant_id}:overlay:{instrument_slug(underlying)}"
+    )
+
+
+def _overlay_bucket(tenant_id: str, underlying: str | None = None) -> str:
+    return f"{tenant_id}|{instrument_slug(underlying)}"
 
 
 def _metrics_gate_key(tenant_id: str, day: str) -> str:
@@ -62,9 +94,16 @@ def _metrics_gate_key(tenant_id: str, day: str) -> str:
 
 
 def _rebuild_lock_key(
-    tenant_id: str, *, year: int, month: int, interval: str
+    tenant_id: str,
+    *,
+    year: int,
+    month: int,
+    interval: str,
+    underlying: str | None = None,
 ) -> str:
-    pack_suffix = _pack_key(tenant_id, year, month, interval).split(":pack:")[-1]
+    pack_suffix = _pack_key(
+        tenant_id, year, month, interval, underlying
+    ).split(":pack:")[-1]
     return f"atlas:param-chart:{tenant_id}:rebuild:{pack_suffix}"
 
 
@@ -76,11 +115,16 @@ def reset_param_chart_cache_for_tests() -> None:
 
 
 async def delete_month_pack(
-    tenant_id: str, *, year: int, month: int, interval: str = "1D"
+    tenant_id: str,
+    *,
+    year: int,
+    month: int,
+    interval: str = "1D",
+    underlying: str | None = None,
 ) -> None:
     """Drop a pack so the next explicit month load rebuilds (SSE must not stampede)."""
-    key = _pack_key(tenant_id, year, month, interval)
-    mem_key = _mem_pack_key(tenant_id, year, month, interval)
+    key = _pack_key(tenant_id, year, month, interval, underlying)
+    mem_key = _mem_pack_key(tenant_id, year, month, interval, underlying)
     _packs.pop(mem_key, None)
     client = await get_redis()
     if client is not None:
@@ -109,11 +153,17 @@ async def try_rebuild_lock(
     year: int,
     month: int,
     interval: str,
+    underlying: str | None = None,
     ttl_seconds: int = 90,
 ) -> bool:
-    """Only one Kite year/month rebuild at a time per pack key."""
+    """Only one Kite year/month rebuild at a time per pack key.
+
+    Keyed per instrument: a SENSEX rebuild must not block a NIFTY one.
+    """
     client = await get_redis()
-    key = _rebuild_lock_key(tenant_id, year=year, month=month, interval=interval)
+    key = _rebuild_lock_key(
+        tenant_id, year=year, month=month, interval=interval, underlying=underlying
+    )
     if client is not None:
         try:
             ok = await client.set(key, "1", ex=max(15, int(ttl_seconds)), nx=True)
@@ -125,12 +175,19 @@ async def try_rebuild_lock(
 
 
 async def release_rebuild_lock(
-    tenant_id: str, *, year: int, month: int, interval: str
+    tenant_id: str,
+    *,
+    year: int,
+    month: int,
+    interval: str,
+    underlying: str | None = None,
 ) -> None:
     client = await get_redis()
     if client is None:
         return
-    key = _rebuild_lock_key(tenant_id, year=year, month=month, interval=interval)
+    key = _rebuild_lock_key(
+        tenant_id, year=year, month=month, interval=interval, underlying=underlying
+    )
     try:
         await client.delete(key)
     except Exception:
@@ -138,11 +195,16 @@ async def release_rebuild_lock(
 
 
 async def get_month_pack(
-    tenant_id: str, *, year: int, month: int, interval: str = "1D"
+    tenant_id: str,
+    *,
+    year: int,
+    month: int,
+    interval: str = "1D",
+    underlying: str | None = None,
 ) -> dict[str, Any] | None:
     client = await get_redis()
-    key = _pack_key(tenant_id, year, month, interval)
-    mem_key = _mem_pack_key(tenant_id, year, month, interval)
+    key = _pack_key(tenant_id, year, month, interval, underlying)
+    mem_key = _mem_pack_key(tenant_id, year, month, interval, underlying)
     if client is not None:
         try:
             raw = await client.get(key)
@@ -171,10 +233,11 @@ async def set_month_pack(
     month: int,
     payload: dict[str, Any],
     interval: str = "1D",
+    underlying: str | None = None,
 ) -> None:
     ttl = STALE_PACK_TTL_MS if payload.get("stale") else MONTH_PACK_TTL_MS
-    key = _pack_key(tenant_id, year, month, interval)
-    mem_key = _mem_pack_key(tenant_id, year, month, interval)
+    key = _pack_key(tenant_id, year, month, interval, underlying)
+    mem_key = _mem_pack_key(tenant_id, year, month, interval, underlying)
     client = await get_redis()
     if client is not None:
         try:
@@ -193,46 +256,58 @@ async def set_month_pack(
     )
 
 
-async def touch_watcher(tenant_id: str, meta: dict[str, Any] | None = None) -> None:
+async def touch_watcher(
+    tenant_id: str,
+    meta: dict[str, Any] | None = None,
+    *,
+    underlying: str | None = None,
+) -> None:
     payload = dict(meta or {})
     payload["touched_at"] = int(time.time())
+    payload["underlying"] = instrument_slug(underlying)
     client = await get_redis()
     if client is not None:
         try:
             await client.set(
-                _watch_key(tenant_id),
+                _watch_key(tenant_id, underlying),
                 json.dumps(payload),
                 ex=WATCH_TTL_SECONDS,
             )
             return
         except Exception:
             await invalidate_redis()
-    _watchers[tenant_id] = (_now_ms() + WATCH_TTL_SECONDS * 1000, payload)
+    _watchers[f"{tenant_id}|{instrument_slug(underlying)}"] = (
+        _now_ms() + WATCH_TTL_SECONDS * 1000,
+        payload,
+    )
 
 
-async def watcher_alive(tenant_id: str) -> bool:
+async def watcher_alive(tenant_id: str, underlying: str | None = None) -> bool:
     client = await get_redis()
     if client is not None:
         try:
-            return bool(await client.exists(_watch_key(tenant_id)))
+            return bool(await client.exists(_watch_key(tenant_id, underlying)))
         except Exception:
             await invalidate_redis()
-    entry = _watchers.get(tenant_id)
+    entry = _watchers.get(f"{tenant_id}|{instrument_slug(underlying)}")
     if not entry:
         return False
     expires, _ = entry
     if expires <= _now_ms():
-        _watchers.pop(tenant_id, None)
+        _watchers.pop(f"{tenant_id}|{instrument_slug(underlying)}", None)
         return False
     return True
 
 
-async def get_overlay(tenant_id: str) -> dict[str, Any] | None:
+async def get_overlay(
+    tenant_id: str, underlying: str | None = None
+) -> dict[str, Any] | None:
     """Lean today-overlay SSE frame (book + Signal snapshot)."""
+    bucket = _overlay_bucket(tenant_id, underlying)
     client = await get_redis()
     if client is not None:
         try:
-            raw = await client.get(_overlay_key(tenant_id))
+            raw = await client.get(_overlay_key(tenant_id, underlying))
             if raw:
                 data = json.loads(raw)
                 if isinstance(data, dict):
@@ -240,12 +315,12 @@ async def get_overlay(tenant_id: str) -> dict[str, Any] | None:
         except Exception:
             await invalidate_redis()
             logger.warning("param_chart_overlay_get_failed", tenant_id=tenant_id)
-    entry = _overlays.get(tenant_id)
+    entry = _overlays.get(bucket)
     if not entry:
         return None
     expires, payload = entry
     if expires <= _now_ms():
-        _overlays.pop(tenant_id, None)
+        _overlays.pop(bucket, None)
         return None
     return dict(payload)
 
@@ -255,51 +330,74 @@ async def set_overlay(
     payload: dict[str, Any],
     *,
     ttl_ms: int = SNAPSHOT_TTL_MS,
+    underlying: str | None = None,
 ) -> None:
     ttl = max(5_000, int(ttl_ms))
     client = await get_redis()
     if client is not None:
         try:
             await client.set(
-                _overlay_key(tenant_id),
+                _overlay_key(tenant_id, underlying),
                 json.dumps(payload),
                 px=ttl,
             )
         except Exception:
             await invalidate_redis()
             logger.warning("param_chart_overlay_set_failed", tenant_id=tenant_id)
-    _overlays[tenant_id] = (_now_ms() + ttl, dict(payload))
+    _overlays[_overlay_bucket(tenant_id, underlying)] = (
+        _now_ms() + ttl,
+        dict(payload),
+    )
 
 
-async def list_watched_tenant_ids() -> list[str]:
-    """Tenants with an open Param Chart SSE desk."""
+async def list_watched() -> list[tuple[str, str | None]]:
+    """``(tenant_id, underlying)`` for every open Param Chart desk.
+
+    ``underlying`` is None for a window on the tenant desk instrument, so the
+    caller can keep the pre-Phase-0 path for it.
+    """
+    out: list[tuple[str, str | None]] = []
+
+    def _split(raw: str) -> tuple[str, str | None]:
+        tenant, _, slug = raw.partition("|")
+        return tenant, (None if not slug or slug == DESK_DEFAULT_INSTRUMENT else slug)
+
     client = await get_redis()
     if client is not None:
         try:
             cursor = 0
-            tenants: list[str] = []
             pattern = "atlas:param-chart:watch:*"
             prefix = "atlas:param-chart:watch:"
             while True:
                 cursor, keys = await client.scan(cursor=cursor, match=pattern, count=64)
                 for key in keys:
-                    if not str(key).startswith(prefix):
+                    text = str(key)
+                    if not text.startswith(prefix):
                         continue
-                    tenants.append(str(key)[len(prefix) :])
+                    out.append(_split(text[len(prefix) :]))
                 if cursor == 0:
                     break
-            return tenants
+            return out
         except Exception:
             await invalidate_redis()
             logger.warning("param_chart_watch_list_failed")
+
     now = _now_ms()
-    alive: list[str] = []
-    for tenant_id, (expires, _) in list(_watchers.items()):
+    for raw, (expires, _) in list(_watchers.items()):
         if expires <= now:
-            _watchers.pop(tenant_id, None)
+            _watchers.pop(raw, None)
             continue
-        alive.append(tenant_id)
-    return alive
+        out.append(_split(raw))
+    return out
+
+
+async def list_watched_tenant_ids() -> list[str]:
+    """Unique tenants with an open Param Chart SSE desk."""
+    seen: list[str] = []
+    for tenant_id, _ in await list_watched():
+        if tenant_id not in seen:
+            seen.append(tenant_id)
+    return seen
 
 
 async def metrics_persist_due(tenant_id: str, *, day: str) -> bool:

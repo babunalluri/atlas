@@ -618,7 +618,11 @@ async def touch_watcher(tenant_id: str, *, instrument: str | None = None) -> Non
 
                 key = instrument_key(instrument)
                 pipe = client.pipeline()
-                pipe.hset(_watch_instruments_key(tenant_id), key, "1")
+                # Store the symbol, not a "1" flag: the worker needs the real
+                # symbol to build a config and warm a row for an instrument that
+                # is not in the pinned list. ``instrument_key`` is lossy
+                # (spaces → underscores), so it cannot be reversed reliably.
+                pipe.hset(_watch_instruments_key(tenant_id), key, instrument)
                 pipe.expire(_watch_instruments_key(tenant_id), WATCH_TTL_SECONDS)
                 await pipe.execute()
             return
@@ -632,27 +636,70 @@ async def touch_watcher(tenant_id: str, *, instrument: str | None = None) -> Non
 
         key = instrument_key(instrument)
         bucket = _watch_instruments.setdefault(tenant_id, {})
-        bucket[key] = _now_ms() + (WATCH_TTL_SECONDS * 1000)
+        bucket[key] = (_now_ms() + (WATCH_TTL_SECONDS * 1000), instrument)
+
+
+async def clear_watch_instrument(tenant_id: str, instrument: str | None) -> None:
+    """Drop one instrument from the tenant's watch set on SSE disconnect.
+
+    Only this row: the tenant-level watcher and every other open board stay.
+    A reader that is still connected re-touches within one stream interval, so
+    dropping a row another window shares costs at most a single tick — far less
+    than the 45 s of ghost work the TTL-only path left behind after every close.
+    """
+    if not instrument:
+        return
+    from app.domains.signal_matrix import instrument_key
+
+    key = instrument_key(instrument)
+    client = await get_redis()
+    if client is not None:
+        try:
+            await client.hdel(_watch_instruments_key(tenant_id), key)
+            return
+        except Exception:
+            await invalidate_redis()
+            logger.warning(
+                "signal_cache_watch_instr_clear_failed", tenant_id=tenant_id
+            )
+    bucket = _watch_instruments.get(tenant_id)
+    if bucket is not None:
+        bucket.pop(key, None)
 
 
 async def list_watched_instruments(tenant_id: str) -> list[str]:
     """Instrument keys currently watched for this tenant (may be Redis-safe keys)."""
+    return list((await watched_instrument_symbols(tenant_id)).keys())
+
+
+async def watched_instrument_symbols(tenant_id: str) -> dict[str, str]:
+    """Watched ``{instrument_key: symbol}`` for this tenant.
+
+    The symbol lets the worker warm a matrix row for an instrument that is not
+    pinned — the case that made Signal fall back to the desk row for anything a
+    trader opened from the workspace.
+    """
     client = await get_redis()
     if client is not None:
         try:
-            fields = await client.hkeys(_watch_instruments_key(tenant_id))
-            return [str(f) for f in fields]
+            raw = await client.hgetall(_watch_instruments_key(tenant_id))
+            out: dict[str, str] = {}
+            for field, value in (raw or {}).items():
+                key = str(field)
+                symbol = str(value or "")
+                # Legacy rows stored "1"; no symbol recoverable, so key only.
+                out[key] = symbol if symbol and symbol != "1" else ""
+            return out
         except Exception:
             await invalidate_redis()
             logger.warning("signal_cache_watch_instr_list_failed", tenant_id=tenant_id)
 
     now = _now_ms()
     bucket = _watch_instruments.get(tenant_id) or {}
-    alive = [k for k, exp in bucket.items() if exp > now]
     for k in list(bucket):
-        if bucket[k] <= now:
+        if bucket[k][0] <= now:
             bucket.pop(k, None)
-    return alive
+    return {k: symbol for k, (exp, symbol) in bucket.items() if exp > now}
 
 
 async def watcher_alive(tenant_id: str) -> bool:

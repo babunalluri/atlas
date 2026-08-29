@@ -20,12 +20,17 @@ function streamHeaders(accessToken: string): Record<string, string> {
 export async function streamParamChart(options: {
   accessToken: string;
   signal?: AbortSignal;
+  /** Instrument to watch. Omit for the tenant desk instrument. */
+  underlying?: string | null;
   onState: (state: ParamChartMonthSnapshot) => void;
 }): Promise<void> {
-  const { accessToken, signal, onState } = options;
+  const { accessToken, signal, onState, underlying } = options;
+  const qs = underlying?.trim()
+    ? `?underlying=${encodeURIComponent(underlying.trim())}`
+    : "";
   let response: Response;
   try {
-    response = await fetch(agentOsUrl("/admin/param-chart/stream"), {
+    response = await fetch(agentOsUrl(`/admin/param-chart/stream${qs}`), {
       method: "GET",
       headers: streamHeaders(accessToken),
       signal,

@@ -491,6 +491,28 @@ class KiteTickerHub:
             feed.dirty.set()
             feed.task = asyncio.create_task(self._run_tenant(tenant_id, feed))
 
+    async def drop_source(self, tenant_id: str, source: str) -> bool:
+        """Remove one desk's subscriptions, leaving the other sources alone.
+
+        Unlike ``sync_tenant`` with an empty map, this pops the key instead of
+        leaving an empty one behind — a caller pruning stale sources would
+        otherwise rediscover the same dead keys on every pass and re-issue the
+        sync forever. Returns True when a source was actually removed.
+        """
+        feed = self._tenants.get(tenant_id)
+        if feed is None or source not in feed.sources:
+            return False
+        old_tokens = set(feed.desired_tokens)
+        feed.sources.pop(source, None)
+        next_map = _union_source_maps(feed.sources)
+        feed.token_to_symbol = next_map
+        feed.desired_tokens = set(next_map.keys())
+        removed = old_tokens - feed.desired_tokens
+        if removed:
+            feed.pending_unsubscribe |= removed
+            feed.dirty.set()
+        return True
+
     async def clear_tenant(self, tenant_id: str) -> None:
         feed = self._tenants.pop(tenant_id, None)
         if feed is None:

@@ -28,6 +28,8 @@ logger = get_logger(__name__)
 BOTS_FIELD = "options_lab:bots"
 ARMED_SET_KEY = "atlas:options-lab:bots:armed"
 MAX_BOTS = 24
+# Per-user ceiling inside the shared tenant blob (operators are uncapped).
+MAX_BOTS_PER_OWNER = 10
 MAX_LOG = 40
 DEFAULT_COOLDOWN_SEC = 300
 DEFAULT_MAX_RUNS_DAY = 3
@@ -425,6 +427,9 @@ def _clamp_pct(raw: Any, *, default: float, lo: float, hi: float) -> float:
 def normalize_bot(payload: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a persisted bot record from create/update payload."""
     base = dict(existing or {})
+    # Ownership is set once, on create, and never moves: an update payload can
+    # not reassign a bot to another user.
+    owner_id = base.get("owner_id") or payload.get("owner_id")
     name = str(payload.get("name") or base.get("name") or "Untitled bot").strip()[:120]
     mode = str(payload.get("mode") or base.get("mode") or "paper").lower()
     if mode not in {"paper", "live"}:
@@ -502,6 +507,7 @@ def normalize_bot(payload: dict[str, Any], *, existing: dict[str, Any] | None = 
     bot_id = str(base.get("id") or f"bot-{uuid.uuid4().hex[:12]}")
     return {
         "id": bot_id,
+        "owner_id": str(owner_id) if owner_id else None,
         "name": name or "Untitled bot",
         "enabled": enabled,
         "kill": kill,
@@ -667,6 +673,28 @@ def append_run_log(
     return bot
 
 
+def owned_by(row: dict[str, Any], owner_id: str | None) -> bool:
+    """True when ``owner_id`` may see and act on this row.
+
+    ``None`` is the operator scope: an admin sees the whole tenant, which is
+    what the bot worker and the desk both need. A trader passes their user id
+    and sees only their own rows.
+
+    Rows written before ownership existed carry no ``owner_id``. Every one of
+    them was created while these routes were admin-only, so they stay
+    operator-visible rather than becoming shared with every end user.
+    """
+    if owner_id is None:
+        return True
+    return str(row.get("owner_id") or "") == owner_id
+
+
+def visible_rows(
+    rows: list[dict[str, Any]], owner_id: str | None
+) -> list[dict[str, Any]]:
+    return [row for row in rows if owned_by(row, owner_id)]
+
+
 async def load_bots(tenant_id: str) -> list[dict[str, Any]]:
     stored = await get_session_value(tenant_id, BOTS_FIELD)
     if not isinstance(stored, dict):
@@ -724,8 +752,8 @@ async def list_armed_tenant_ids() -> list[str]:
     return sorted(_local_armed)
 
 
-async def list_bots(tenant_id: str) -> dict[str, Any]:
-    items = await load_bots(tenant_id)
+async def list_bots(tenant_id: str, *, owner_id: str | None = None) -> dict[str, Any]:
+    items = visible_rows(await load_bots(tenant_id), owner_id)
     slim = []
     for row in items:
         slim.append(
@@ -773,18 +801,34 @@ async def list_bots(tenant_id: str) -> dict[str, Any]:
     }
 
 
-async def get_bot(tenant_id: str, bot_id: str) -> dict[str, Any]:
+async def get_bot(
+    tenant_id: str, bot_id: str, *, owner_id: str | None = None
+) -> dict[str, Any]:
     for row in await load_bots(tenant_id):
         if row.get("id") == bot_id:
+            # Someone else's bot reads as absent rather than forbidden, so the
+            # response cannot be used to enumerate other traders' bot ids.
+            if not owned_by(row, owner_id):
+                break
             return {"ok": True, "bot": row}
     return {"ok": False, "error": "Bot not found."}
 
 
-async def create_bot(tenant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def create_bot(
+    tenant_id: str, payload: dict[str, Any], *, owner_id: str | None = None
+) -> dict[str, Any]:
     items = await load_bots(tenant_id)
     if len(items) >= MAX_BOTS:
         return {"ok": False, "error": f"Maximum {MAX_BOTS} bots reached."}
-    bot = normalize_bot(payload)
+    # Cap per trader as well as per tenant, so one user cannot fill the blob
+    # and lock every other user out of creating a bot.
+    mine = visible_rows(items, owner_id)
+    if owner_id is not None and len(mine) >= MAX_BOTS_PER_OWNER:
+        return {
+            "ok": False,
+            "error": f"Maximum {MAX_BOTS_PER_OWNER} bots reached for this user.",
+        }
+    bot = normalize_bot({**payload, "owner_id": owner_id})
     if not bot.get("template") and not bot.get("backtest_id") and not bot.get("legs"):
         return {"ok": False, "error": "template, backtest_id, or legs required."}
     # Allow legs from payload on create (backtest handoff).
@@ -795,11 +839,19 @@ async def create_bot(tenant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "bot": bot}
 
 
-async def update_bot(tenant_id: str, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def update_bot(
+    tenant_id: str,
+    bot_id: str,
+    payload: dict[str, Any],
+    *,
+    owner_id: str | None = None,
+) -> dict[str, Any]:
     items = await load_bots(tenant_id)
     for idx, row in enumerate(items):
         if row.get("id") != bot_id:
             continue
+        if not owned_by(row, owner_id):
+            break
         next_bot = normalize_bot(payload, existing=row)
         if isinstance(payload.get("legs"), list):
             next_bot["legs"] = payload["legs"]
@@ -811,9 +863,15 @@ async def update_bot(tenant_id: str, bot_id: str, payload: dict[str, Any]) -> di
     return {"ok": False, "error": "Bot not found."}
 
 
-async def delete_bot(tenant_id: str, bot_id: str) -> dict[str, Any]:
+async def delete_bot(
+    tenant_id: str, bot_id: str, *, owner_id: str | None = None
+) -> dict[str, Any]:
     items = await load_bots(tenant_id)
-    next_items = [row for row in items if row.get("id") != bot_id]
+    next_items = [
+        row
+        for row in items
+        if not (row.get("id") == bot_id and owned_by(row, owner_id))
+    ]
     if len(next_items) == len(items):
         return {"ok": False, "error": "Bot not found."}
     await save_bots(tenant_id, next_items)
